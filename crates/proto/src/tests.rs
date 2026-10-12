@@ -1,0 +1,358 @@
+extern crate std;
+
+use std::vec;
+use std::vec::Vec;
+
+use crate::checksum::{self, finish, sum};
+use crate::*;
+
+const MAC_A: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+const MAC_B: [u8; 6] = [0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb];
+
+fn eth(et: u16, tags: &[(u16, u16)], payload: &[u8]) -> Vec<u8> {
+    // dst, src, (TPID, TCI)*, EtherType, payload; outermost tag first.
+    let mut v = [MAC_B, MAC_A].concat();
+    for (tpid, tci) in tags {
+        v.extend_from_slice(&tpid.to_be_bytes());
+        v.extend_from_slice(&tci.to_be_bytes());
+    }
+    v.extend_from_slice(&et.to_be_bytes());
+    v.extend_from_slice(payload);
+    v
+}
+
+fn ipv4(proto: u8, frag: u16, payload: &[u8]) -> Vec<u8> {
+    let total = (20 + payload.len()) as u16;
+    let mut v = vec![0x45, 0x00];
+    v.extend_from_slice(&total.to_be_bytes());
+    v.extend_from_slice(&[0x12, 0x34]);
+    v.extend_from_slice(&frag.to_be_bytes());
+    v.extend_from_slice(&[64, proto, 0, 0, 10, 0, 0, 1, 192, 168, 1, 2]);
+    v.extend_from_slice(payload);
+    v
+}
+
+fn ipv6(next: u8, payload: &[u8]) -> Vec<u8> {
+    let mut v = vec![0x60, 0x00, 0x00, 0x00];
+    v.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    v.extend_from_slice(&[next, 64]);
+    v.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    v.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+    v.extend_from_slice(payload);
+    v
+}
+
+fn tcp(sport: u16, dport: u16, flags: u16, payload: &[u8]) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.extend_from_slice(&sport.to_be_bytes());
+    v.extend_from_slice(&dport.to_be_bytes());
+    v.extend_from_slice(&1000u32.to_be_bytes());
+    v.extend_from_slice(&2000u32.to_be_bytes());
+    v.extend_from_slice(&((5u16 << 12) | flags).to_be_bytes());
+    v.extend_from_slice(&[0xff, 0xff, 0, 0, 0, 0]);
+    v.extend_from_slice(payload);
+    v
+}
+
+fn udp(sport: u16, dport: u16, payload: &[u8]) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.extend_from_slice(&sport.to_be_bytes());
+    v.extend_from_slice(&dport.to_be_bytes());
+    v.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    v.extend_from_slice(&[0, 0]);
+    v.extend_from_slice(payload);
+    v
+}
+
+/// The one's-complement sum over a segment and its pseudo-header is 0 when the checksum is right.
+fn l4_valid(p: &Packet<'_>) -> bool {
+    let seg = &p.data()[p.l4_offset().unwrap()..p.payload_range().end];
+    let (proto, src, dst): (u8, &[u8], &[u8]) = match p.network() {
+        Network::Ipv4(ip) => (ip.protocol(), &ip.bytes()[12..16], &ip.bytes()[16..20]),
+        Network::Ipv6(ip) => (
+            p.ip_protocol().unwrap(),
+            &ip.bytes()[8..24],
+            &ip.bytes()[24..40],
+        ),
+        _ => unreachable!(),
+    };
+    let acc = if proto == ip_proto::ICMP {
+        0
+    } else {
+        sum(dst, sum(src, proto as u64 + seg.len() as u64))
+    };
+    finish(sum(seg, acc)) == 0
+}
+
+#[test]
+fn ipv4_header_checksum_known_vector() {
+    // Example from RFC 1071 discussions / Wikipedia.
+    let h = [
+        0x45, 0x00, 0x00, 0x73, 0x00, 0x00, 0x40, 0x00, 0x40, 0x11, 0x00, 0x00, 0xc0, 0xa8, 0x00,
+        0x01, 0xc0, 0xa8, 0x00, 0xc7,
+    ];
+    assert_eq!(checksum::ipv4_header(&h), 0xb861);
+}
+
+#[test]
+fn ethernet_vlan_ipv4_tcp() {
+    let frame = eth(
+        ethertype::IPV4,
+        &[(ethertype::VLAN, 0xa064)],
+        &ipv4(
+            ip_proto::TCP,
+            0x4000,
+            &tcp(51000, 443, Tcp::SYN | Tcp::ACK, b"hello"),
+        ),
+    );
+    let p = Packet::parse(&frame, Link::Ethernet);
+    let e = p.eth().unwrap();
+    assert_eq!(e.dst(), MacAddr(MAC_B));
+    assert_eq!(e.src(), MacAddr(MAC_A));
+    assert_eq!(e.ethertype(), ethertype::VLAN);
+    assert_eq!(p.vlans().len(), 1);
+    let tag = p.vlans()[0];
+    assert_eq!(
+        (tag.priority(), tag.dei(), tag.id(), tag.ethertype),
+        (5, false, 100, ethertype::IPV4)
+    );
+    assert_eq!(p.ethertype(), Some(ethertype::IPV4));
+    let ip = p.ipv4().unwrap();
+    assert_eq!(ip.src(), core::net::Ipv4Addr::new(10, 0, 0, 1));
+    assert_eq!(ip.dst(), core::net::Ipv4Addr::new(192, 168, 1, 2));
+    assert!(ip.dont_fragment() && !ip.is_fragment());
+    assert_eq!(ip.flags(), 0b010);
+    assert_eq!(p.l3_offset(), Some(18));
+    let t = p.tcp().unwrap();
+    assert_eq!(
+        (t.src_port(), t.dst_port(), t.seq(), t.ack()),
+        (51000, 443, 1000, 2000)
+    );
+    assert!(t.has(Tcp::SYN) && t.has(Tcp::ACK) && !t.has(Tcp::FIN));
+    assert_eq!(t.flags(), 0x012);
+    assert_eq!(p.l4_offset(), Some(38));
+    assert_eq!(p.payload(), b"hello");
+}
+
+#[test]
+fn qinq_two_tags() {
+    let frame = eth(
+        ethertype::IPV6,
+        &[(ethertype::QINQ, 0x0007), (ethertype::VLAN, 0x1fff)],
+        &ipv6(ip_proto::UDP, &udp(1, 2, b"x")),
+    );
+    let p = Packet::parse(&frame, Link::Ethernet);
+    let ids: Vec<u16> = p.vlans().iter().map(|t| t.id()).collect();
+    assert_eq!(ids, [7, 0xfff]);
+    assert!(p.vlans()[1].dei());
+    assert_eq!(p.vlans()[0].tpid, ethertype::QINQ);
+    assert_eq!(p.udp().unwrap().dst_port(), 2);
+    assert_eq!(p.payload(), b"x");
+}
+
+#[test]
+fn arp_request() {
+    let mut arp = vec![0, 1, 8, 0, 6, 4, 0, 1];
+    arp.extend_from_slice(&MAC_A);
+    arp.extend_from_slice(&[10, 0, 0, 1]);
+    arp.extend_from_slice(&[0; 6]);
+    arp.extend_from_slice(&[10, 0, 0, 2]);
+    let mut frame = eth(ethertype::ARP, &[], &arp);
+    frame.resize(60, 0); // Ethernet padding
+    let p = Packet::parse(&frame, Link::Ethernet);
+    let a = p.arp().unwrap();
+    assert_eq!(
+        (a.hw_type(), a.proto_type(), a.opcode()),
+        (1, ethertype::IPV4, 1)
+    );
+    assert_eq!(a.sender_mac(), Some(MacAddr(MAC_A)));
+    assert_eq!(a.sender_ipv4(), Some(core::net::Ipv4Addr::new(10, 0, 0, 1)));
+    assert_eq!(a.target_ipv4(), Some(core::net::Ipv4Addr::new(10, 0, 0, 2)));
+    assert!(p.payload().is_empty());
+    assert!(p.ipv4().is_none() && p.tcp().is_none());
+}
+
+#[test]
+fn ethernet_padding_is_not_payload() {
+    let mut frame = eth(
+        ethertype::IPV4,
+        &[],
+        &ipv4(ip_proto::UDP, 0, &udp(53, 5353, b"ab")),
+    );
+    frame.resize(64, 0xee);
+    let p = Packet::parse(&frame, Link::Ethernet);
+    assert_eq!(p.payload(), b"ab");
+}
+
+#[test]
+fn ipv4_fragments() {
+    let first = ipv4(ip_proto::UDP, 0x2000, &udp(1, 2, &[0; 16]));
+    let p = Packet::parse(&first, Link::Ip);
+    assert_eq!(
+        p.fragment(),
+        Some(Fragment {
+            offset: 0,
+            more: true,
+            id: 0x1234
+        })
+    );
+    assert!(
+        p.udp().is_some(),
+        "the first fragment carries the UDP header"
+    );
+
+    let later = ipv4(ip_proto::UDP, 0x0003, &[1, 2, 3, 4, 5, 6, 7, 8]);
+    let p = Packet::parse(&later, Link::Ip);
+    assert_eq!(
+        p.fragment(),
+        Some(Fragment {
+            offset: 3,
+            more: false,
+            id: 0x1234
+        })
+    );
+    assert!(
+        p.udp().is_none(),
+        "later fragments have no transport header"
+    );
+    assert_eq!(p.ip_protocol(), Some(ip_proto::UDP));
+    assert_eq!(p.payload(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+}
+
+#[test]
+fn ipv6_extension_headers_and_fragment() {
+    // Hop-by-hop (8 bytes) -> fragment (offset 0, more) -> TCP.
+    let mut ext = vec![ip_proto::IPV6_FRAG, 0, 1, 4, 0, 0, 0, 0];
+    ext.extend_from_slice(&[ip_proto::TCP, 0, 0x00, 0x01, 0xde, 0xad, 0xbe, 0xef]);
+    ext.extend_from_slice(&tcp(1, 80, Tcp::SYN, b""));
+    let pkt = ipv6(ip_proto::HOPOPT, &ext);
+    let p = Packet::parse(&pkt, Link::Ip);
+    assert_eq!(p.ip_protocol(), Some(ip_proto::TCP));
+    assert_eq!(
+        p.fragment(),
+        Some(Fragment {
+            offset: 0,
+            more: true,
+            id: 0xdeadbeef
+        })
+    );
+    assert_eq!(p.tcp().unwrap().dst_port(), 80);
+    assert_eq!(p.l4_offset(), Some(56));
+
+    // Same chain with a non-zero offset: no transport.
+    let mut ext = vec![ip_proto::UDP, 0, 0x00, 0x10, 0, 0, 0, 1];
+    ext.extend_from_slice(&[9; 8]);
+    let pkt = ipv6(ip_proto::IPV6_FRAG, &ext);
+    let p = Packet::parse(&pkt, Link::Ip);
+    assert_eq!(p.fragment().map(|f| (f.offset, f.more)), Some((2, false)));
+    assert!(p.udp().is_none());
+    assert_eq!(p.payload(), &[9; 8]);
+}
+
+#[test]
+fn icmp_echo() {
+    let msg = [8, 0, 0, 0, 0x12, 0x34, 0x00, 0x07, b'p', b'i', b'n', b'g'];
+    let pkt = ipv4(ip_proto::ICMP, 0, &msg);
+    let p = Packet::parse(&pkt, Link::Ip);
+    let i = p.icmp().unwrap();
+    assert_eq!(
+        (i.icmp_type(), i.code(), i.ident(), i.seq()),
+        (8, 0, Some(0x1234), Some(7))
+    );
+    assert_eq!(p.payload(), b"ping");
+
+    let unreachable = [3, 1, 0, 0, 0, 0, 0, 0];
+    let pkt = ipv4(ip_proto::ICMP, 0, &unreachable);
+    assert_eq!(Packet::parse(&pkt, Link::Ip).icmp().unwrap().ident(), None);
+}
+
+#[test]
+fn recalculate_fixes_every_checksum() {
+    let mut frame = eth(
+        ethertype::IPV4,
+        &[],
+        &ipv4(
+            ip_proto::TCP,
+            0,
+            &tcp(1234, 80, Tcp::PSH | Tcp::ACK, b"GET /"),
+        ),
+    );
+    let u = checksum::recalculate(&mut frame, Link::Ethernet);
+    assert!(u.ipv4 && u.tcp);
+    let p = Packet::parse(&frame, Link::Ethernet);
+    assert_eq!(finish(sum(p.ipv4().unwrap().bytes(), 0)), 0);
+    assert!(l4_valid(&p));
+
+    let mut pkt = ipv6(ip_proto::UDP, &udp(5353, 5353, b"odd"));
+    assert!(checksum::recalculate(&mut pkt, Link::Ip).udp);
+    assert!(l4_valid(&Packet::parse(&pkt, Link::Ip)));
+
+    let mut pkt = ipv6(ip_proto::ICMPV6, &[128, 0, 0, 0, 0, 1, 0, 2]);
+    assert!(checksum::recalculate(&mut pkt, Link::Ip).icmpv6);
+    assert!(l4_valid(&Packet::parse(&pkt, Link::Ip)));
+
+    let mut pkt = ipv4(ip_proto::ICMP, 0, &[8, 0, 0, 0, 0, 1, 0, 1, 1, 2, 3]);
+    assert!(checksum::recalculate(&mut pkt, Link::Ip).icmp);
+    assert!(l4_valid(&Packet::parse(&pkt, Link::Ip)));
+}
+
+#[test]
+fn recalculate_skips_fragments() {
+    let mut pkt = ipv4(ip_proto::UDP, 0x2000, &udp(1, 2, &[0; 8]));
+    let u = checksum::recalculate(&mut pkt, Link::Ip);
+    assert!(u.ipv4 && !u.udp);
+}
+
+#[test]
+fn every_truncation_parses() {
+    let frames = [
+        eth(
+            ethertype::IPV4,
+            &[(ethertype::VLAN, 1)],
+            &ipv4(ip_proto::TCP, 0, &tcp(1, 2, Tcp::SYN, b"data")),
+        ),
+        eth(
+            ethertype::IPV6,
+            &[],
+            &ipv6(
+                ip_proto::HOPOPT,
+                &[ip_proto::UDP, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2, 0, 8, 0, 0],
+            ),
+        ),
+    ];
+    for frame in &frames {
+        for n in 0..=frame.len() {
+            let mut b = frame[..n].to_vec();
+            let p = Packet::parse(&b, Link::Ethernet);
+            let _ = (p.payload(), p.tcp(), p.udp(), p.vlans());
+            checksum::recalculate(&mut b, Link::Ethernet);
+            let p = Packet::parse(&frame[n.min(frame.len())..], Link::Ip);
+            let _ = p.payload();
+        }
+    }
+}
+
+#[test]
+fn random_bytes_never_panic() {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for _ in 0..20_000 {
+        let len = (next() % 128) as usize;
+        let mut b: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+        // Bias towards plausible headers.
+        if len > 14 && next() % 2 == 0 {
+            b[12..14].copy_from_slice(&[0x08, 0x00]);
+            b[14] = 0x45;
+        }
+        for link in [Link::Ethernet, Link::Ip] {
+            let p = Packet::parse(&b, link);
+            let _ = (p.payload(), p.ip_protocol(), p.fragment());
+            checksum::recalculate(&mut b, link);
+        }
+    }
+}

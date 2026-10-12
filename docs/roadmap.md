@@ -126,11 +126,11 @@ let lan  = {10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fd00::/8}
 let web  = tcp.port in {80, 443, 8000..8100}           # tcp.port = src OR dst
 
 outbound and ip.dst not in $lan and $web
-eth.type == arp and arp.op == request
+eth.type == arp and arp.opcode == request
 vlan.id == 100 and eth.src == 00:11:22:33:44:55
-tcp.flags & (syn|ack) == syn                            # symbolic constants
+tcp.flags & syn and not tcp.flags & ack               # symbolic constants
 icmp.type == echo-request
-udp.dstport == 53 and udp.payload[2:2] & 0x8000 == 0     # typed payload slices
+udp.dstport == 53 and udp.payload[2:2] == 01:00         # payload slices
 tcp.payload[0:4] == "GET " or tcp.payload contains "Host:"   # Wireshark-valid; contains is bounded
 iface == "eth0" and not loopback
 event == connect and process.pid == 1234 and remote.port == 443   # SOCKET layer

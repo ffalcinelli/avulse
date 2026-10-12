@@ -19,6 +19,10 @@ repository = "https://github.com/ffalcinelli/avulse"
 authors = ["Fabio Falcinelli <fabio.falcinelli@gmail.com>"]
 publish = false
 
+[workspace.dependencies]
+avulse-proto = { path = "crates/proto", version = "0.0.0" }
+avulse-filter = { path = "crates/filter", version = "0.0.0" }
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 

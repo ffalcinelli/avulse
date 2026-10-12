@@ -1,0 +1,106 @@
+use alloc::format;
+use alloc::string::String;
+use core::fmt;
+
+/// A byte range in the filter source.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl Span {
+    pub const fn new(start: usize, end: usize) -> Self {
+        Span { start, end }
+    }
+
+    /// The smallest span covering both.
+    pub fn to(self, other: Span) -> Span {
+        Span {
+            start: self.start.min(other.start),
+            end: self.end.max(other.end),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    Error,
+    Warning,
+}
+
+/// A compile error or warning, pointing into the filter source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Diagnostic {
+    pub level: Level,
+    pub span: Span,
+    pub message: String,
+    pub help: Option<String>,
+}
+
+pub type Result<T> = core::result::Result<T, Diagnostic>;
+
+impl Diagnostic {
+    pub(crate) fn error(span: Span, message: impl Into<String>) -> Self {
+        Diagnostic {
+            level: Level::Error,
+            span,
+            message: message.into(),
+            help: None,
+        }
+    }
+
+    pub(crate) fn warning(span: Span, message: impl Into<String>) -> Self {
+        Diagnostic {
+            level: Level::Warning,
+            span,
+            message: message.into(),
+            help: None,
+        }
+    }
+
+    pub(crate) fn help(mut self, help: impl Into<String>) -> Self {
+        self.help = Some(help.into());
+        self
+    }
+
+    /// Renders the diagnostic with the offending source line underlined, like rustc does.
+    pub fn render(&self, src: &str) -> String {
+        let start = self.span.start.min(src.len());
+        let line_start = src[..start].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = src[start..].find('\n').map_or(src.len(), |i| start + i);
+        let line_no = src[..start].matches('\n').count() + 1;
+        let col = src[line_start..start].chars().count();
+        let end = self.span.end.clamp(start, line_end);
+        let width = src[start..end].chars().count().max(1);
+        let gutter = format!("{line_no}").len();
+        let level = match self.level {
+            Level::Error => "error",
+            Level::Warning => "warning",
+        };
+        let mut out = format!(
+            "{level}: {msg}\n{pad} |\n{line_no} | {line}\n{pad} | {sp}{carets}\n",
+            msg = self.message,
+            pad = " ".repeat(gutter),
+            line = &src[line_start..line_end],
+            sp = " ".repeat(col),
+            carets = "^".repeat(width),
+        );
+        if let Some(help) = &self.help {
+            out += &format!("{pad} = help: {help}\n", pad = " ".repeat(gutter));
+        }
+        out
+    }
+}
+
+impl fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)?;
+        if let Some(help) = &self.help {
+            write!(f, " (help: {help})")?;
+        }
+        Ok(())
+    }
+}
+
+impl core::error::Error for Diagnostic {}
