@@ -1,0 +1,12 @@
+[package]
+name = "avulse-ebpf"
+description = "Filter IR to eBPF code generation and the static BPF programs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

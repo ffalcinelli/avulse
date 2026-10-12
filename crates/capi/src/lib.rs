@@ -1,0 +1,1 @@
+//! C ABI for libavulse.

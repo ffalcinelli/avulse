@@ -1,0 +1,15 @@
+[package]
+name = "avulse"
+description = "Divert, modify and re-inject network packets on Linux, Windows and macOS."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = true
+readme = "README.md"
+keywords = ["windivert", "packet", "divert", "ebpf", "firewall"]
+categories = ["network-programming", "os"]
+
+[lints]
+workspace = true

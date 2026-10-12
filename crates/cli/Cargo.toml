@@ -1,0 +1,16 @@
+[package]
+name = "avulse-cli"
+description = "Command-line tool: capture, inject and filter check/explain/fmt/convert."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "avulse"
+path = "src/main.rs"

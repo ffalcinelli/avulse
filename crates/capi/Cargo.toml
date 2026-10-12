@@ -1,0 +1,16 @@
+[package]
+name = "avulse-capi"
+description = "C ABI for libavulse."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "avulse"
+crate-type = ["cdylib", "staticlib", "rlib"]

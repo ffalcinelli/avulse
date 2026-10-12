@@ -1,0 +1,4 @@
+/target
+*.bpf.o
+/bindings/python/dist
+__pycache__/
