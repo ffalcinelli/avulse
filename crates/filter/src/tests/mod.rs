@@ -601,7 +601,7 @@ fn multi_range_slices() {
     ));
     assert!(!check("udp.payload[10,20]", &f));
     assert!(check(
-        "len(udp.payload[0:2,1:]) == 5 and udp.payload[0:2,3][1:2] == 34:00",
+        "len(udp.payload[0:2,-3:]) == 5 and udp.payload[0:2,3][1:2] == 34:00",
         &f
     ));
     assert!(check("ip.src[0,3] == 0a:01 and eth.src[0,5] == 00:55", &f));
@@ -610,14 +610,20 @@ fn multi_range_slices() {
         ..Meta::default()
     };
     assert!(check_with("upper(iface)[0,3] == \"E0\"", &f, &meta));
-    // At most 32 bytes: too long a result gives no value, or an error when it is known early.
-    assert!(check("frame[0:20,70:]", &long_frame()));
-    assert!(!check("frame[0:20,40:]", &long_frame()));
-    assert!(
-        error("frame[0:20,20:20] == 00")
-            .message
-            .contains("more than 32 bytes")
-    );
+    // At most 32 bytes, so every range needs a bounded length: `[-n:]` is the last `n` bytes, and
+    // an open range is bounded by an address.
+    assert!(check("frame[0:20,-10:]", &long_frame()));
+    assert!(check("ip.src[0,1:] == 0a:00:00:01", &f));
+    for filter in [
+        "frame[0:20,20:20] == 00",
+        "frame[0:20,70:]",
+        "udp.payload[0:2,1:] contains 00",
+    ] {
+        assert!(
+            error(filter).message.contains("more than 32 bytes"),
+            "{filter}"
+        );
+    }
 }
 
 /// A frame long enough for 40-byte slices.
@@ -703,6 +709,32 @@ fn regex_patterns_escape_invalid_utf8() {
     // An escaped byte is the byte itself; an escaped backslash stays one.
     assert_eq!(crate::regex::pattern(b"\\\xff"), "\\xff");
     assert_eq!(crate::regex::pattern(b"\\\\\xff"), "\\\\\\xff");
+}
+
+#[test]
+fn evaluator_limits() {
+    // Arithmetic and `&` combine every pair of occurrences, into at most 4 values.
+    assert!(check("tcp.port + tcp.port == 886", &https_syn()));
+    for filter in [
+        "tcp.port + tcp.port + tcp.port == 6",
+        "tcp.port & tcp.port & tcp.port == 0",
+        "ip.addr & ip.addr & ip.addr == 0.0.0.0",
+    ] {
+        assert!(
+            error(filter)
+                .message
+                .contains("combinations of occurrences"),
+            "{filter}"
+        );
+    }
+    // `&` on bytes computes at most 32 bytes: one side needs a bounded length.
+    assert!(check(
+        "tcp.payload[0:4] & tcp.payload == \"GET \"",
+        &http_get()
+    ));
+    compile("ip.src & ip.dst == 10.0.0.0 and eth.src[0:2,4:] & ff:ff:ff:ff");
+    let e = error("tcp.payload & tcp.payload == tcp.payload");
+    assert!(e.message.contains("at most 32 bytes"), "{}", e.message);
 }
 
 #[test]

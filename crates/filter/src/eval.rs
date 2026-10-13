@@ -10,12 +10,22 @@ use crate::ir::{self, CmpOp, Lit, Quant, SetItem, Slice, SliceEnd, Test, Value};
 use crate::meta::Meta;
 use crate::regex::{self, Regex};
 
-/// Most occurrences a value can have (two VLAN tags, source and destination).
-const MAX: usize = 4;
+/// Most occurrences a value can have (two VLAN tags, source and destination). The checker rejects
+/// values that could have more, such as `tcp.port + tcp.port + tcp.port`.
+pub(crate) const MAX: usize = 4;
 
-/// Longest byte string computed during evaluation (slices of addresses, `&` on bytes). Longer
-/// results give no value.
-const OWNED: usize = 32;
+/// Longest byte string computed during evaluation (multi-range slices, `&` on bytes). The checker
+/// rejects values that could be longer.
+pub(crate) const OWNED: usize = 32;
+
+/// Most occurrences field `f` has in one packet: the outer headers only, and up to two VLAN tags.
+pub(crate) fn occurrences(f: Field) -> usize {
+    match f {
+        _ if tag_kind(f).is_some() => 2,
+        Field::EthAddr | Field::IpAddr | Field::Ipv6Addr | Field::TcpPort | Field::UdpPort => 2,
+        _ => 1,
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 enum V<'a> {

@@ -425,7 +425,7 @@ const AGREE: &[&str] = &[
     "udp.payload[10,20]",
     "udp.payload[0:2,2:10] == 12:34",
     "udp.payload[-1,0] == 00:12",
-    "len(udp.payload[0:2,1:]) == 5",
+    "len(udp.payload[0:2,-3:]) == 5",
     "udp.payload[0:2,1-2] == 12:34:34:01",
     "udp.payload[0:2,3][1:2] == 34:00",
     "udp.payload[ 0:2 , 3 ] == 12:34:00",
@@ -721,6 +721,20 @@ const STRICTER: &[&str] = &[
     "ip.proto == \"Unassigned\"",
     "icmp.type == \"Reserved\"",
     "vlan.priority == \"Spare\"",
+];
+
+/// Filters tshark accepts but Avulse rejects, because the result could exceed the evaluator's
+/// fixed buffers (no allocation, for the kernels): [`eval::MAX`] occurrences and [`eval::OWNED`]
+/// computed bytes.
+///
+/// [`eval::MAX`]: crate::eval::MAX
+/// [`eval::OWNED`]: crate::eval::OWNED
+const LIMITS: &[&str] = &[
+    "tcp.port + tcp.port + tcp.port == 6",
+    "tcp.port & tcp.port & tcp.port == 0",
+    "tcp.payload[0:1,1:] contains \"GET\"",
+    "len(udp.payload[0:2,1:]) == 5",
+    "tcp.payload & tcp.payload == tcp.payload",
 ];
 
 /// `matches` (with the `regex` feature): case-insensitive, over bytes, as in Wireshark.
@@ -1195,6 +1209,24 @@ fn tshark_rejects_extensions() {
         }
         if let Err(e) = Filter::compile(filter) {
             failures.push(format!("avulse rejects {filter:?}:\n{}", e.render(filter)));
+        }
+        failures
+    });
+}
+
+#[test]
+fn tshark_exceeds_the_evaluator() {
+    if enabled().is_none() {
+        return;
+    }
+    let caps = captures();
+    run(LIMITS, |&filter| {
+        let mut failures = Vec::new();
+        if let Err(e) = tshark(&caps[0].pcap, filter) {
+            failures.push(format!("tshark rejects {filter:?}: {e}"));
+        }
+        if Filter::compile(filter).is_ok() {
+            failures.push(format!("avulse accepts {filter:?}"));
         }
         failures
     });

@@ -9,7 +9,7 @@ use crate::ast::{self, ArithOp, Expr, MacroBody, Operand, Quant, RelOp, Rhs};
 use crate::error::{Diagnostic, Result, Span};
 use crate::fields::{self, Consts, Field, Origin, Ty};
 use crate::ir::{self, CmpOp, Lit, SetItem, Test, Value};
-use crate::{labels, lit, regex};
+use crate::{eval, labels, lit, regex};
 
 /// The type (and symbolic names) that the other side of a relation expects.
 #[derive(Clone, Copy)]
@@ -20,9 +20,6 @@ struct Ctx {
     /// The field compared with, whose Wireshark labels also name values (`"TCP"`).
     field: Option<Field>,
 }
-
-/// Most bytes a multi-range slice can hold (the evaluator's buffer for computed bytes).
-const MAX_CONCAT: i64 = 32;
 
 /// The context of an arithmetic operand.
 const INT: Ctx = Ctx {
@@ -258,25 +255,16 @@ impl<'a> Checker<'a> {
                     )
                     .help("slices apply to protocols, addresses and byte strings"));
                 }
-                // Several ranges are copied into a bounded buffer; reject what cannot fit.
-                let fixed = |r: &ast::Slice| match r.end {
-                    ast::SliceEnd::Len(n) if r.start >= 0 => Some(n),
-                    ast::SliceEnd::Inclusive(e) if r.start >= 0 && e >= r.start => {
-                        Some(e - r.start + 1)
-                    }
-                    _ => None,
-                };
-                let total = s
-                    .iter()
-                    .try_fold(0i64, |t, r| Some(t.saturating_add(fixed(r)?)));
-                if s.len() > 1 && total.is_some_and(|t| t > MAX_CONCAT) {
+                let value = Value::Slice(Box::new(b.value), s.clone());
+                // Several ranges are copied into a bounded buffer; reject what may not fit.
+                if s.len() > 1 && !fits_owned(&value) {
                     return Err(Diagnostic::error(
                         o.span(),
-                        format!("these ranges add up to more than {MAX_CONCAT} bytes"),
+                        format!("these ranges can add up to more than {} bytes", eval::OWNED),
                     )
-                    .help("compare fewer bytes, or use one range"));
+                    .help("give each range a length, e.g. `[0:4,8:4]`, or use one range"));
                 }
-                typed(Value::Slice(Box::new(b.value), s.clone()), Ty::Bytes, &[])
+                typed(value, Ty::Bytes, &[])
             }
             Operand::Group(inner, _) => self.resolve(inner, ctx),
             Operand::Raw(inner, _) => {
@@ -326,7 +314,9 @@ impl<'a> Checker<'a> {
             Operand::Arith(op, a, b, _) => {
                 let a = self.numeric(a, "arithmetic")?;
                 let b = self.numeric(b, "arithmetic")?;
-                typed(Value::Arith(*op, Box::new(a), Box::new(b)), Ty::Int, &[])
+                let value = Value::Arith(*op, Box::new(a), Box::new(b));
+                check_occurrences(&value, o)?;
+                typed(value, Ty::Int, &[])
             }
             Operand::Neg(a, _) => {
                 let a = self.numeric(a, "`-`")?;
@@ -369,6 +359,17 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 let value = Value::BitAnd(Box::new(a_t.value), Box::new(b_t.value));
+                check_occurrences(&value, o)?;
+                if ty.is_some() && !fits_owned(&value) {
+                    return Err(Diagnostic::error(
+                        o.span(),
+                        format!(
+                            "`&` on bytes gives at most {} bytes, and `{o}` can be longer",
+                            eval::OWNED
+                        ),
+                    )
+                    .help("slice a side first, e.g. `tcp.payload[0:4] & ff:ff:00:00`"));
+                }
                 match ty {
                     // Integers keep their constants: `tcp.flags & syn == syn`.
                     None => typed(value, a_t.ty, a_t.consts),
@@ -949,6 +950,83 @@ fn fits(v: u64, bits: u8, span: Span) -> Result<u64> {
 }
 
 /// Whether an operand is a constant integer expression (`1 + 2`, `-0x10`, `{'a' * 2}`).
+/// Most occurrences `v` can have: arithmetic and `&` combine every pair.
+fn occurrences(v: &Value) -> usize {
+    match v {
+        Value::Field(f) | Value::Layer(f, _) | Value::Raw(f, _) => eval::occurrences(*f),
+        Value::Slice(v, _)
+        | Value::Len(v)
+        | Value::Case { value: v, .. }
+        | Value::Neg(v)
+        | Value::Abs(v) => occurrences(v),
+        Value::BitAnd(a, b) | Value::Arith(_, a, b) => {
+            occurrences(a).saturating_mul(occurrences(b))
+        }
+        Value::Count(_) | Value::Extreme { .. } | Value::Lit(_) => 1,
+    }
+}
+
+/// Rejects a combination with more occurrences than the evaluator holds.
+fn check_occurrences(v: &Value, o: &Operand) -> Result<()> {
+    let n = occurrences(v);
+    if n <= eval::MAX {
+        return Ok(());
+    }
+    Err(Diagnostic::error(
+        o.span(),
+        format!(
+            "`{o}` has up to {n} combinations of occurrences, more than the {} values Avulse evaluates",
+            eval::MAX
+        ),
+    )
+    .help("use fields with one occurrence, e.g. `tcp.srcport` instead of `tcp.port`"))
+}
+
+/// Whether the byte string `v` always fits the evaluator's buffer for computed bytes.
+fn fits_owned(v: &Value) -> bool {
+    byte_len(v).is_some_and(|n| n <= eval::OWNED)
+}
+
+/// Longest byte string `v` can be, if that is bounded.
+fn byte_len(v: &Value) -> Option<usize> {
+    let shorter = |a: Option<usize>, b: Option<usize>| match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    match v {
+        Value::Field(f) | Value::Layer(f, _) => match fields::def(*f).ty {
+            Ty::Ether => Some(6),
+            Ty::Ipv4 => Some(4),
+            Ty::Ipv6 => Some(16),
+            _ => None,
+        },
+        Value::Lit(Lit::Ipv4(..)) => Some(4),
+        Value::Lit(Lit::Ipv6(..)) => Some(16),
+        Value::Lit(Lit::Ether(_)) => Some(6),
+        Value::Lit(Lit::Bytes(b)) => Some(b.len()),
+        Value::Slice(base, ranges) => {
+            let base = byte_len(base);
+            ranges.iter().try_fold(0usize, |total, r| {
+                let n = match r.end {
+                    ir::SliceEnd::Len(n) => usize::try_from(n).ok(),
+                    ir::SliceEnd::Inclusive(e) => e
+                        .checked_sub(r.start)
+                        .and_then(|d| usize::try_from(d + 1).ok()),
+                    // `[-n:]` is the last `n` bytes.
+                    ir::SliceEnd::Open if r.start < 0 => {
+                        usize::try_from(r.start.unsigned_abs()).ok()
+                    }
+                    ir::SliceEnd::Open => None,
+                };
+                total.checked_add(shorter(n, base)?)
+            })
+        }
+        Value::BitAnd(a, b) => shorter(byte_len(a), byte_len(b)),
+        Value::Case { value, .. } => byte_len(value),
+        _ => None,
+    }
+}
+
 fn is_const(o: &Operand) -> bool {
     match o {
         Operand::Word(w, _) => fields::lookup(w).is_none() && lit::parse_int(w).is_some(),

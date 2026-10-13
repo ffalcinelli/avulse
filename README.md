@@ -75,9 +75,11 @@ compiles selects the same packets, except:
 - **No reassembly.** As in Wireshark with reassembly off, `tcp.len` is absent on IP fragments.
 - **Stricter types.** A literal that cannot fit the field is an error (`ip.flags == 8`), where
   Wireshark accepts the filter and never matches.
-- **Computed byte strings are capped at 32 bytes.** A multi-range slice or a `&` on two byte
-  strings that comes out longer gives no value (or a compile error when the length is known). A
-  single-range slice has no limit.
+- **Fixed evaluation buffers.** The evaluator does not allocate, so that it can run in a kernel.
+  A multi-range slice or a `&` on two byte strings must be at most 32 bytes long, so every range
+  needs a bounded length (`tcp.payload[0:2,-3:]`, not `[0:2,1:]`). Arithmetic and `&` combine
+  every pair of occurrences into at most 4 values (`tcp.port + tcp.port`, not three of them). A
+  filter that could exceed either limit is a compile error. A single-range slice has no limit.
 - **Rust regular expressions, not PCRE2.** Look-around and backreferences are rejected, and `$`
   matches only at the very end, where PCRE2 also matches before a final newline (write `\n?$`).
 - **Signed arithmetic throughout.** `tcp.srcport + -1` subtracts one; Wireshark converts the `-1` to
