@@ -359,6 +359,7 @@ fn value<'a>(v: &'a Value, cx: &Cx<'a>) -> Vals<'a> {
         Value::Lit(l) => Vals::one(lit(l)),
         Value::Field(f) => load(*f, cx),
         Value::Layer(f, ranges) => load_layer(*f, ranges, cx),
+        Value::Raw(f, layers) => load_raw(*f, layers.as_deref(), cx),
         Value::Slice(base, ranges) => {
             let mut out = Vals::new();
             for x in value(base, cx).as_slice() {
@@ -561,6 +562,189 @@ fn load_layer<'a>(f: Field, ranges: &[Slice], cx: &Cx<'a>) -> Vals<'a> {
     for (layer, (i, t)) in (1..).zip(tags(p, ad)) {
         if in_layers(ranges, layer, count) {
             o.opt(tag_value(f, i, t, p));
+        }
+    }
+    o
+}
+
+/// Where the occurrences of a field lie in the packet: `(layer, start, length)` each.
+pub(crate) struct Spans {
+    n: usize,
+    v: [(i64, usize, usize); MAX],
+}
+
+impl Spans {
+    fn push(&mut self, layer: i64, start: usize, len: usize) {
+        if self.n < MAX {
+            self.v[self.n] = (layer, start, len);
+            self.n += 1;
+        }
+    }
+
+    pub(crate) fn as_slice(&self) -> &[(i64, usize, usize)] {
+        &self.v[..self.n]
+    }
+}
+
+/// The bytes on the wire of each occurrence of `f`, as Wireshark's `@field` reads them: a bit
+/// field covers the whole bytes it sits in, and a computed field (`frame.len`, `tcp.len`) covers
+/// none. Spans exist exactly when the field has values.
+pub(crate) fn raw_spans(f: Field, p: &Packet<'_>, meta: &Meta<'_>) -> Spans {
+    let mut s = Spans {
+        n: 0,
+        v: [(0, 0, 0); MAX],
+    };
+    let cx = Cx {
+        pkt: p,
+        meta,
+        regexes: &[],
+    };
+    if load(f, &cx).n == 0 {
+        return s;
+    }
+    // Per-tag fields: each tag is a layer of its protocol.
+    if let Some(ad) = tag_kind(f) {
+        for (layer, (i, _)) in (1..).zip(tags(p, ad)) {
+            let tag = 14 + 4 * i;
+            match f {
+                Field::Vlan | Field::Ieee8021ad => s.push(layer, tag, 4),
+                Field::VlanEtype => s.push(layer, tag + 2, 2),
+                // Unlike 802.1Q's, these two 802.1ad fields are one-byte bit fields.
+                Field::Ieee8021adPriority | Field::Ieee8021adDei => s.push(layer, tag, 1),
+                _ => s.push(layer, tag, 2),
+            }
+        }
+        return s;
+    }
+    let (l3, l4) = (p.l3_offset().unwrap_or(0), p.l4_offset().unwrap_or(0));
+    let mut at = |start: usize, len: usize| s.push(1, start, len);
+    match f {
+        Field::Frame => at(0, p.data().len()),
+        Field::FrameLen | Field::FrameCapLen => at(0, 0),
+        Field::Eth => at(0, 14),
+        Field::EthDst => at(0, 6),
+        Field::EthSrc => at(6, 6),
+        Field::EthAddr => {
+            at(0, 6);
+            at(6, 6);
+        }
+        Field::EthType => at(12, 2),
+        Field::Arp | Field::ArpHwType | Field::ArpProtoType | Field::ArpHwSize => {
+            let len = p.arp().map_or(0, |a| a.bytes().len());
+            match f {
+                Field::Arp => at(l3, len),
+                Field::ArpHwType => at(l3, 2),
+                Field::ArpProtoType => at(l3 + 2, 2),
+                _ => at(l3 + 4, 1),
+            }
+        }
+        Field::ArpProtoSize => at(l3 + 5, 1),
+        Field::ArpOpcode => at(l3 + 6, 2),
+        Field::ArpSrcHwMac
+        | Field::ArpSrcProtoIpv4
+        | Field::ArpDstHwMac
+        | Field::ArpDstProtoIpv4 => {
+            let (hs, ps) = p
+                .arp()
+                .map_or((0, 0), |a| (a.hw_size() as usize, a.proto_size() as usize));
+            match f {
+                Field::ArpSrcHwMac => at(l3 + 8, hs),
+                Field::ArpSrcProtoIpv4 => at(l3 + 8 + hs, ps),
+                Field::ArpDstHwMac => at(l3 + 8 + hs + ps, hs),
+                _ => at(l3 + 8 + 2 * hs + ps, ps),
+            }
+        }
+        Field::Ip => at(l3, p.ipv4().map_or(0, |h| h.header_len())),
+        Field::IpVersion | Field::IpHdrLen | Field::Ipv6Version => at(l3, 1),
+        Field::IpDsfield | Field::IpDsfieldDscp | Field::IpDsfieldEcn => at(l3 + 1, 1),
+        Field::IpLen => at(l3 + 2, 2),
+        Field::IpId => at(l3 + 4, 2),
+        Field::IpFlags | Field::IpFlagsRb | Field::IpFlagsDf | Field::IpFlagsMf => at(l3 + 6, 1),
+        Field::IpFragOffset => at(l3 + 6, 2),
+        Field::IpTtl => at(l3 + 8, 1),
+        Field::IpProto => at(l3 + 9, 1),
+        Field::IpChecksum => at(l3 + 10, 2),
+        Field::IpSrc => at(l3 + 12, 4),
+        Field::IpDst => at(l3 + 16, 4),
+        Field::IpAddr => {
+            at(l3 + 12, 4);
+            at(l3 + 16, 4);
+        }
+        Field::Ipv6 => {
+            let end = p.l4_offset().unwrap_or(p.payload_range().start);
+            at(l3, end.saturating_sub(l3));
+        }
+        Field::Ipv6Tclass | Field::Ipv6TclassDscp | Field::Ipv6TclassEcn => at(l3, 4),
+        Field::Ipv6Flow => at(l3 + 1, 3),
+        Field::Ipv6Plen => at(l3 + 4, 2),
+        Field::Ipv6Nxt => at(l3 + 6, 1),
+        Field::Ipv6Hlim => at(l3 + 7, 1),
+        Field::Ipv6Src => at(l3 + 8, 16),
+        Field::Ipv6Dst => at(l3 + 24, 16),
+        Field::Ipv6Addr => {
+            at(l3 + 8, 16);
+            at(l3 + 24, 16);
+        }
+        Field::Ipv6FraghdrOffset | Field::Ipv6FraghdrMore | Field::Ipv6FraghdrIdent => {
+            let h = p.ipv6_fragment_header().unwrap_or(0);
+            match f {
+                Field::Ipv6FraghdrIdent => at(h + 4, 4),
+                _ => at(h + 2, 2),
+            }
+        }
+        Field::Tcp => at(l4, p.tcp().map_or(0, |t| t.header_len())),
+        Field::TcpSrcport | Field::UdpSrcport => at(l4, 2),
+        Field::TcpDstport | Field::UdpDstport => at(l4 + 2, 2),
+        Field::TcpPort | Field::UdpPort => {
+            at(l4, 2);
+            at(l4 + 2, 2);
+        }
+        Field::TcpSeqRaw => at(l4 + 4, 4),
+        Field::TcpAckRaw => at(l4 + 8, 4),
+        Field::TcpHdrLen => at(l4 + 12, 1),
+        Field::TcpFlags => at(l4 + 12, 2),
+        // Each flag covers only the byte it is in.
+        Field::TcpFlagsRes | Field::TcpFlagsAe => at(l4 + 12, 1),
+        Field::TcpFlagsCwr
+        | Field::TcpFlagsEce
+        | Field::TcpFlagsUrg
+        | Field::TcpFlagsAck
+        | Field::TcpFlagsPush
+        | Field::TcpFlagsReset
+        | Field::TcpFlagsSyn
+        | Field::TcpFlagsFin => at(l4 + 13, 1),
+        Field::TcpWindowSizeValue => at(l4 + 14, 2),
+        Field::TcpChecksum => at(l4 + 16, 2),
+        Field::TcpUrgentPointer => at(l4 + 18, 2),
+        Field::TcpLen => at(l4, 0),
+        Field::TcpPayload | Field::UdpPayload => {
+            let r = p.payload_range();
+            at(r.start, r.len());
+        }
+        Field::Udp => at(l4, 8),
+        Field::UdpLength => at(l4 + 4, 2),
+        Field::UdpChecksum => at(l4 + 6, 2),
+        Field::IcmpChecksum | Field::Icmpv6Checksum => at(l4 + 2, 2),
+        Field::Icmp => at(l4, p.icmp().map_or(0, |i| i.bytes().len())),
+        Field::Icmpv6 => at(l4, p.icmpv6().map_or(0, |i| i.bytes().len())),
+        Field::IcmpType | Field::Icmpv6Type => at(l4, 1),
+        Field::IcmpCode | Field::Icmpv6Code => at(l4 + 1, 1),
+        Field::IcmpIdent | Field::Icmpv6EchoIdentifier => at(l4 + 4, 2),
+        Field::IcmpSeq | Field::Icmpv6EchoSequenceNumber => at(l4 + 6, 2),
+        // Metadata (and the per-tag fields, handled above) have no span here.
+        _ => {}
+    }
+    s
+}
+
+/// `@field`: the bytes of each occurrence in the selected layers.
+fn load_raw<'a>(f: Field, layers: Option<&[Slice]>, cx: &Cx<'a>) -> Vals<'a> {
+    let p = cx.pkt;
+    let count = tag_kind(f).map_or(1, |ad| tags(p, ad).count() as i64);
+    let mut o = Vals::new();
+    for &(layer, start, len) in raw_spans(f, p, cx.meta).as_slice() {
+        if layers.is_none_or(|r| in_layers(r, layer, count)) {
+            o.opt(p.data().get(start..start.saturating_add(len)).map(V::Bytes));
         }
     }
     o

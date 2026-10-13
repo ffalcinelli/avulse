@@ -76,6 +76,8 @@ pub enum Value {
     Field(Field),
     /// The occurrences of a field in the given protocol layers (`vlan.id#2`).
     Layer(Field, Vec<Slice>),
+    /// `@field`: the bytes on the wire of each occurrence, optionally in some layers only.
+    Raw(Field, Option<Vec<Slice>>),
     /// The bytes in `ranges`, concatenated; ranges that do not fit are skipped, as in Wireshark.
     Slice(Box<Value>, Vec<Slice>),
     BitAnd(Box<Value>, Box<Value>),
@@ -277,6 +279,13 @@ impl fmt::Display for Value {
             Value::Layer(field, layers) => {
                 f.write_str(def(*field).name)?;
                 crate::ast::fmt_layers(f, layers)
+            }
+            Value::Raw(field, layers) => {
+                write!(f, "@{}", def(*field).name)?;
+                match layers {
+                    Some(l) => crate::ast::fmt_layers(f, l),
+                    None => Ok(()),
+                }
             }
             Value::Slice(v, ranges) => {
                 write!(f, "{v}[")?;

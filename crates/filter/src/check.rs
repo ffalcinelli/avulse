@@ -183,7 +183,9 @@ impl<'a> Checker<'a> {
                 )
                 .help(format!("use it after `in`, e.g. `ip.addr in ${name}`"))),
             }),
-            Operand::Slice(..) | Operand::Layer(..) => Ok(Test::Exists(self.typed(o)?.value)),
+            Operand::Slice(..) | Operand::Layer(..) | Operand::Raw(..) => {
+                Ok(Test::Exists(self.typed(o)?.value))
+            }
             // As in Wireshark, a bare `&` or arithmetic tests that some result is not zero.
             Operand::Arith(..) | Operand::Neg(..) if is_const(o) => Err(not_a_test(o)),
             Operand::BitAnd(..) | Operand::Arith(..) | Operand::Neg(..) => {
@@ -277,6 +279,25 @@ impl<'a> Checker<'a> {
                 typed(Value::Slice(Box::new(b.value), s.clone()), Ty::Bytes, &[])
             }
             Operand::Group(inner, _) => self.resolve(inner, ctx),
+            Operand::Raw(inner, _) => {
+                let (word, layers) = match inner.as_ref() {
+                    Operand::Layer(base, layers, _) => (base.as_ref(), Some(layers.clone())),
+                    other => (other, None),
+                };
+                let Operand::Word(w, span) = word else {
+                    return Err(Diagnostic::error(word.span(), "`@` applies to a field"));
+                };
+                let name = field_name(w).0;
+                let d = fields::lookup(name).ok_or_else(|| unknown_field(name, *span))?;
+                if d.origin != Origin::Wireshark || d.field == Field::FrameInterfaceName {
+                    return Err(Diagnostic::error(
+                        *span,
+                        format!("`{name}` has no bytes in the packet"),
+                    )
+                    .help("`@` gives the bytes of a protocol field"));
+                }
+                typed(Value::Raw(d.field, layers), Ty::Bytes, &[])
+            }
             Operand::Layer(base, layers, _) => {
                 let d = match base.as_ref() {
                     Operand::Word(w, span) => {
@@ -413,7 +434,7 @@ impl<'a> Checker<'a> {
                     }
                     "count" => {
                         let t = self.typed(arg)?;
-                        if !matches!(t.value, Value::Field(_) | Value::Layer(..)) {
+                        if !matches!(t.value, Value::Field(_) | Value::Layer(..) | Value::Raw(..)) {
                             return Err(Diagnostic::error(
                                 arg.span(),
                                 "`count` takes a field name",

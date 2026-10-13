@@ -5,12 +5,12 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-13, Step 1 done)
+## Status (2026-10-13, Steps 1 and 1b done)
 
 | Area | State |
 | --- | --- |
 | `crates/proto` (`avulse-proto`) | Done for Phase 1. Zero-copy `no_std` parsing: Ethernet, 2 VLAN tags, ARP, IPv4, IPv6 (8 extension headers, fragments), TCP, UDP, ICMP, ICMPv6. Checksum recalculation. 12 tests, including all truncations and random input. |
-| `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. Semantics validated against tshark 4.6/4.7 (`src/tests/tshark.rs`). 38 unit tests, 4 tshark tests (opt-in) and a doctest. No bytecode and no WinDivert front-end yet. |
+| `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. Wireshark 4.6 syntax covered: quantifiers, arithmetic, layers, value labels, `@field`, `&` on bytes, multi-range slices, `upper`/`lower`, and `matches` (optional `regex` feature). Semantics validated against tshark 4.6/4.7 (`src/tests/tshark.rs`, including every field's byte span against PDML). 50 unit tests, 6 tshark tests (opt-in) and a doctest. No bytecode and no WinDivert front-end yet. |
 | `crates/cli` (`avulse`) | `avulse filter check \| fmt \| explain \| eval --hex … \| fields`. Exit codes: 0 match, 1 no match, 2 error. |
 | `crates/{ebpf,backend-linux,avulse,capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
@@ -162,9 +162,15 @@ refer to the packet selected in the Wireshark GUI).
 5. [x] `&` on bytes, `upper()`/`lower()` on string fields.
 6. [x] Multi-range slices (`frame[0:2,4]`), capped at 32 bytes.
 7. [x] `matches` / `~` behind the `regex` feature (`regex-automata`, user space only).
-8. [ ] `@field` raw bytes, checked against the field positions in `tshark -T pdml`.
+8. [x] `@field` raw bytes, checked against the field positions in `tshark -T pdml`.
 
 ### Step 2: Bytecode, verifier and `no_std` interpreter
+
+**Note from Step 1b.** The IR the bytecode must encode now has, besides fields, slices, `&`,
+`len` and `count`: quantified comparisons, membership and `contains` (`CmpOp` plus `Quant`); signed
+`Int` values with `Arith`, `Neg`, `Abs` and `Extreme` (`max`/`min`); `Layer` and `Raw` field reads;
+multi-range slices; and `Case` (`upper`/`lower`). `Test::Matches` is user space only: the verifier
+rejects it and the kernel backends pass such packets up (`Filter::user_space_only()`).
 
 **Why.** The Windows driver and the macOS system extension must not walk a heap IR built by user
 space. They get a flat, verified program. The IR evaluator stays the reference implementation.
@@ -300,7 +306,7 @@ starting each phase, expand it into steps in this file, in the same format as ab
 - [x] Phase 1: `avulse-proto`
 - [x] Phase 1: filter front half (parser, checker, IR, evaluator, CLI)
 - [x] Step 1: tshark validation
-- [ ] Step 1b: Wireshark syntax coverage (quantifiers, arithmetic, layers, labels, `&` on bytes, multi-range slices, `matches` done)
+- [x] Step 1b: Wireshark syntax coverage
 - [ ] Step 2: bytecode + verifier + interpreter
 - [ ] Step 3: WinDivert front-end + 241 vectors + `filter convert`
 - [ ] Step 4: TCP options, fuzz targets

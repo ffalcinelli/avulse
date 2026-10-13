@@ -99,8 +99,12 @@ Wireshark.
 
 - **Accepted Wireshark syntax:**
   - Operators: `== != === !== < <= > >=`, `eq ne …`, `and or not xor` and `&& || ! ^^`, `in {…}` and
-    `not in {…}` with `a..b` ranges, `&` bitmask, slices `[i:n]` / `[i-j]`, `contains`, `matches`, and
-    functions `len()` / `count()`.
+    `not in {…}` with `a..b` ranges, the `any`/`all` quantifiers, arithmetic `+ - * / %` with `{…}`
+    grouping, `&` on integers and bytes, slices `[i:n]` / `[i-j]` and lists of them, the layer
+    operator `#n` / `#[a-b]`, raw bytes `@field`, `contains`, `matches` / `~`, value-string labels
+    (`ip.proto == "TCP"`), and functions `len()`, `count()`, `max()`, `min()`, `abs()`, `upper()`,
+    `lower()`. Not supported: `string()`, `dec()`, `hex()`, `float()`, `vals()`, and `${field}`
+    references to the packet selected in the Wireshark GUI.
   - Field names for the protocols we parse: `frame.len`, `frame.interface_name`, `eth.*`, `vlan.*`,
     `ieee8021ad.*`, `arp.*`, `ip.*`, `ipv6.*` (with `ipv6.fraghdr.*`), `tcp.*`, `udp.*`, `icmp.*`, `icmpv6.*`.
   - The usual idioms: `ip.addr`, `tcp.port`, `eth.addr`.

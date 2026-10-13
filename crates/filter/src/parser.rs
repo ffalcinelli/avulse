@@ -357,7 +357,18 @@ impl Parser {
     }
 
     fn primary(&mut self) -> Result<Expr> {
-        let t = self.bump();
+        let mut t = self.bump();
+        // `@field#layer[slice]`: the layer belongs to the field, the slice to its bytes.
+        let raw = if t.tok == Tok::At {
+            let at = t.span;
+            t = self.bump();
+            if !matches!(t.tok, Tok::Word(_)) {
+                return Err(Diagnostic::error(t.span, "expected a field name after `@`"));
+            }
+            Some(at)
+        } else {
+            None
+        };
         let operand = match t.tok {
             Tok::LParen => {
                 let e = self.expr()?;
@@ -415,6 +426,10 @@ impl Parser {
                 })?;
             let span = operand.span().to(t.span);
             operand = Operand::Layer(Box::new(operand), layers, span);
+        }
+        if let Some(at) = raw {
+            let span = at.to(operand.span());
+            operand = Operand::Raw(Box::new(operand), span);
         }
         while self.peek() == &Tok::LBracket {
             let open = self.bump().span;

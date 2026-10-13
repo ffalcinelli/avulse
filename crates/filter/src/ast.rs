@@ -107,6 +107,8 @@ pub enum Operand {
     BitAnd(Box<Operand>, Box<Operand>, Span),
     Arith(ArithOp, Box<Operand>, Box<Operand>, Span),
     Neg(Box<Operand>, Span),
+    /// `@field`: the bytes a field covers on the wire.
+    Raw(Box<Operand>, Span),
     /// `{ … }`, which groups arithmetic (parentheses group tests).
     Group(Box<Operand>, Span),
     Call(String, Vec<Operand>, Span),
@@ -146,6 +148,7 @@ impl Operand {
             | Operand::Arith(_, _, _, s)
             | Operand::Neg(_, s)
             | Operand::Group(_, s)
+            | Operand::Raw(_, s)
             | Operand::Call(_, _, s) => *s,
         }
     }
@@ -370,6 +373,7 @@ impl fmt::Display for Operand {
             Operand::Arith(op, a, b, _) => write!(f, "{a} {op} {b}"),
             Operand::Neg(a, _) => write!(f, "-{a}"),
             Operand::Group(a, _) => write!(f, "{{{a}}}"),
+            Operand::Raw(a, _) => write!(f, "@{a}"),
             Operand::Call(name, args, _) => {
                 write!(f, "{name}(")?;
                 for (i, a) in args.iter().enumerate() {

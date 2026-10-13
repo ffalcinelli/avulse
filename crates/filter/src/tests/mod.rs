@@ -693,6 +693,34 @@ fn regex_patterns_escape_invalid_utf8() {
 }
 
 #[test]
+fn raw_field_bytes() {
+    let f = https_syn();
+    assert!(check(
+        "@tcp.port == 01:bb and @tcp.srcport == c7:38 and @ip.src == 0a:00:00:01",
+        &f
+    ));
+    // Bit fields cover the bytes they sit in; computed fields cover none.
+    assert!(check(
+        "@tcp.flags == 50:02 and @tcp.flags.syn == 02: and @ip.flags == 40:",
+        &f
+    ));
+    assert!(check("len(@frame.len) == 0 and @tcp.flags[1] & 02:", &f));
+    let tagged = eth_tpids(
+        ethertype::IPV4,
+        &[(ethertype::VLAN, 3), (ethertype::VLAN, 4)],
+        &ipv4(ip_proto::UDP, &udp(1, 2, b"")),
+    );
+    assert!(check(
+        "@vlan.id#2 == 00:04 and count(@vlan.id) == 2",
+        &tagged
+    ));
+    assert!(!check("@tcp.port", &tagged));
+    assert!(error("@outbound").message.contains("no bytes"));
+    assert!(error("@(tcp)").message.contains("field name after `@`"));
+    assert!(error("@1").message.contains("unknown field"));
+}
+
+#[test]
 fn errors_explain_themselves() {
     let e = error("tcp.prot == 80");
     assert!(e.message.contains("unknown field `tcp.prot`"));

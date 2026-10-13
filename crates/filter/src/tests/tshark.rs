@@ -429,6 +429,26 @@ const AGREE: &[&str] = &[
     // `upper`/`lower` (the only string field in a pcap is absent).
     "upper(frame.interface_name) == \"ETH0\"",
     "lower(frame.interface_name) contains \"eth\"",
+    // `@field`: the bytes on the wire (every span is also checked by `tshark_raw_spans`).
+    "@tcp.port == 01:bb",
+    "@tcp.srcport == c7:38",
+    "@tcp.flags == 50:02",
+    "@tcp.flags.syn == 02:",
+    "@tcp.flags & 00:02",
+    "@ip.flags == 40:",
+    "@ip.src == 0a:00:00:01",
+    "len(@tcp.flags) == 2",
+    "@vlan.id#1 == 00:03",
+    "@vlan.id#2 == 00:04",
+    "@vlan#2",
+    "count(@vlan.id) == 2",
+    "@frame.len",
+    "len(@frame.len) == 0",
+    "len(@tcp.len) == 0",
+    "@eth.addr == 00:11:22:33:44:55",
+    "@udp.payload[0:2] == 12:34",
+    "@ieee8021ad.priority == 00:",
+    "@ipv6.fraghdr.ident == ca:fe:f0:0d",
     // Leading dots force a field name.
     ".ip.src == 10.0.0.1",
     "ip.src == .ip.src",
@@ -785,13 +805,26 @@ const APP_PROTOCOLS: &[&str] = &["dns", "mdns", "http", "dhcpv6", "echo", "lldp"
 
 /// Frame numbers (1-based) that tshark selects, or its error message.
 fn tshark(capture: &[u8], filter: &str) -> Result<Vec<usize>, String> {
+    let out = run_tshark(
+        capture,
+        &["-Y", filter, "-T", "fields", "-e", "frame.number"],
+    )?;
+    Ok(out
+        .lines()
+        .map(|l| l.trim().parse().expect("frame number"))
+        .collect())
+}
+
+/// Runs tshark over the capture with reassembly and application dissectors off; its standard
+/// output, or its error message.
+fn run_tshark(capture: &[u8], args: &[&str]) -> Result<String, String> {
     let mut child = Command::new("tshark")
         .args(["-r", "-", "-n"])
         .args(["-o", "ip.defragment:FALSE"])
         .args(["-o", "ipv6.defragment:FALSE"])
         .args(["-o", "tcp.desegment_tcp_streams:FALSE"])
         .args(APP_PROTOCOLS.iter().flat_map(|p| ["--disable-protocol", p]))
-        .args(["-Y", filter, "-T", "fields", "-e", "frame.number"])
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -807,10 +840,34 @@ fn tshark(capture: &[u8], filter: &str) -> Result<Vec<usize>, String> {
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(|l| l.trim().parse().expect("frame number"))
-        .collect())
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// `(name, pos, size)` of every field and protocol tshark dissects, frame by frame, from its
+/// PDML output.
+fn pdml_fields(capture: &[u8]) -> Vec<Vec<(String, usize, usize)>> {
+    let attr = |line: &str, key: &str| -> Option<String> {
+        let start = line.find(&format!(" {key}=\""))? + key.len() + 3;
+        let end = line[start..].find('"')? + start;
+        Some(line[start..end].to_string())
+    };
+    let out = run_tshark(capture, &["-T", "pdml"]).expect("tshark -T pdml");
+    let mut frames = Vec::new();
+    for line in out.lines().map(str::trim) {
+        if line.starts_with("<packet>") {
+            frames.push(Vec::new());
+        } else if (line.starts_with("<field ") || line.starts_with("<proto "))
+            && let (Some(name), Some(pos), Some(size), Some(frame)) = (
+                attr(line, "name"),
+                attr(line, "pos"),
+                attr(line, "size"),
+                frames.last_mut(),
+            )
+        {
+            frame.push((name, pos.parse().expect("pos"), size.parse().expect("size")));
+        }
+    }
+    frames
 }
 
 fn avulse(frames: &Corpus, link: Link, filter: &str) -> Result<Vec<usize>, String> {
@@ -972,6 +1029,55 @@ fn tshark_has_pcre() {
         }
         failures
     });
+}
+
+/// `@field` reads the bytes Wireshark says a field covers: compare `raw_spans` with the positions
+/// and sizes in tshark's PDML output, for every field of every frame.
+#[test]
+fn tshark_raw_spans() {
+    if enabled().is_none() {
+        return;
+    }
+    let mut failures = Vec::new();
+    for cap in captures() {
+        let dissected = pdml_fields(&cap.pcap);
+        for (i, (frame, bytes)) in cap.frames.iter().enumerate() {
+            if SKIP.contains(frame) {
+                continue;
+            }
+            let pkt = Packet::parse(bytes, cap.link);
+            for d in FIELDS.iter().filter(|d| d.origin == Origin::Wireshark) {
+                if d.name == "frame.interface_name" {
+                    continue;
+                }
+                let mut want: Vec<(usize, usize)> = dissected[i]
+                    .iter()
+                    .filter(|(n, ..)| n == d.name)
+                    .map(|&(_, pos, size)| (pos, size))
+                    .collect();
+                let mut got: Vec<(usize, usize)> =
+                    crate::eval::raw_spans(d.field, &pkt, &Meta::default())
+                        .as_slice()
+                        .iter()
+                        .map(|&(_, start, len)| (start, len))
+                        .collect();
+                want.sort();
+                got.sort();
+                if want != got {
+                    failures.push(format!(
+                        "@{} in {frame} ({:?}): tshark {want:?}, avulse {got:?}",
+                        d.name, cap.link
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} raw span(s) differ:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 #[test]

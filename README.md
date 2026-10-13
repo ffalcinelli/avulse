@@ -34,6 +34,8 @@ outbound and ip.dst not in $lan and $web
   `max(tcp.srcport, tcp.dstport) < 1024`, `abs(tcp.srcport - tcp.dstport) == 1`. Results are signed.
   As in Wireshark, `-` and `/` need spaces (`tcp.srcport-1` is a field name), and `{ }` groups
   arithmetic while `( )` groups tests.
+- Raw bytes: `@tcp.flags == 50:02` is the bytes a field covers on the wire (a bit field covers the
+  bytes it sits in).
 - Layers: `vlan.id#2 == 20` (the second 802.1Q tag), `vlan.id#[-1]` (the last one), `ip#1`. Each
   VLAN tag is a layer; every other protocol is layer 1, since Avulse reads only the outer headers.
   A `#` followed by a digit or `[` is the layer operator, even after a space; any other `#` starts

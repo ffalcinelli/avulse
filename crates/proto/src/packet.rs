@@ -49,6 +49,7 @@ pub struct Packet<'a> {
     l3_offset: Option<usize>,
     protocol: Option<u8>,
     fragment: Option<Fragment>,
+    ipv6_frag_header: Option<usize>,
     transport: Transport<'a>,
     l4_offset: Option<usize>,
     payload: Range<usize>,
@@ -66,6 +67,7 @@ impl<'a> Packet<'a> {
             l3_offset: None,
             protocol: None,
             fragment: None,
+            ipv6_frag_header: None,
             transport: Transport::None,
             l4_offset: None,
             payload: data.len()..data.len(),
@@ -187,6 +189,7 @@ impl<'a> Packet<'a> {
                         break;
                     };
                     let field = be16(h, 2);
+                    self.ipv6_frag_header = Some(cur);
                     self.fragment = Some(Fragment {
                         offset: field >> 3,
                         more: field & 1 != 0,
@@ -286,6 +289,10 @@ impl<'a> Packet<'a> {
     }
     pub fn fragment(&self) -> Option<Fragment> {
         self.fragment
+    }
+    /// Offset of the IPv6 Fragment extension header.
+    pub fn ipv6_fragment_header(&self) -> Option<usize> {
+        self.ipv6_frag_header
     }
     pub fn transport(&self) -> Transport<'a> {
         self.transport

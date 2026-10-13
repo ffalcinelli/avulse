@@ -41,6 +41,7 @@ pub(crate) enum Tok {
     Bang,
     Amp,
     Tilde,
+    At,
     Plus,
     Minus,
     Star,
@@ -88,6 +89,7 @@ impl Tok {
             Tok::Bang => "!",
             Tok::Amp => "&",
             Tok::Tilde => "~",
+            Tok::At => "@",
             Tok::Plus => "+",
             Tok::Minus => "-",
             Tok::Star => "*",
@@ -179,6 +181,7 @@ pub(crate) fn lex(src: &str) -> Result<Vec<Token>> {
             b'-' if !at(i + 1).is_ascii_digit() => single(&mut i, Tok::Minus),
             b'/' => single(&mut i, Tok::Slash),
             b'+' => single(&mut i, Tok::Plus),
+            b'@' => single(&mut i, Tok::At),
             b'*' => single(&mut i, Tok::Star),
             b'%' => single(&mut i, Tok::Percent),
             b'(' => single(&mut i, Tok::LParen),
@@ -536,7 +539,7 @@ mod tests {
                 .message
                 .contains("field references")
         );
-        assert!(lex("tcp @ udp").unwrap_err().message.contains("unexpected"));
+        assert!(lex("tcp ` udp").unwrap_err().message.contains("unexpected"));
     }
 
     #[test]
