@@ -2,3 +2,4 @@
 *.bpf.o
 /bindings/python/dist
 __pycache__/
+/book/book

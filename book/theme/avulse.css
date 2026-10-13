@@ -1,0 +1,15 @@
+/* Filters the guide shows as errors: compile errors on purpose, checked by the docs test. */
+pre:has(> code.language-filter.error) {
+    position: relative;
+    border-inline-start: 3px solid #d64545;
+}
+
+pre:has(> code.language-filter.error)::after {
+    content: "error";
+    position: absolute;
+    top: 0.35em;
+    inset-inline-end: 3.2em;
+    font-size: 0.75em;
+    font-family: var(--mono-font);
+    color: #d64545;
+}

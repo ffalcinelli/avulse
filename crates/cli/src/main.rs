@@ -215,7 +215,7 @@ fn fields_text() -> String {
     s
 }
 
-/// The field reference of the guide (`book/src/filters/fields.md`).
+/// The field reference of the guide (`book/src/reference/fields.md`).
 fn fields_markdown() -> String {
     fn row(s: &mut String, d: &FieldDef) {
         let ty = match d.ty {

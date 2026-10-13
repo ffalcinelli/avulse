@@ -1,0 +1,19 @@
+[book]
+title = "The Avulse Guide"
+description = "Divert, modify and re-inject network packets on Linux, Windows and macOS, with Wireshark display filters."
+authors = ["Fabio Falcinelli"]
+language = "en"
+src = "src"
+
+[output.html]
+site-url = "/avulse/guide/"
+git-repository-url = "https://github.com/ffalcinelli/avulse"
+edit-url-template = "https://github.com/ffalcinelli/avulse/edit/main/book/{path}"
+default-theme = "light"
+preferred-dark-theme = "navy"
+additional-js = ["theme/filter-highlight.js"]
+additional-css = ["theme/avulse.css"]
+no-section-label = false
+
+[output.html.search]
+limit-results = 20
