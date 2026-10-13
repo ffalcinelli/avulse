@@ -324,6 +324,16 @@ fn wireshark_conformance() {
         ),
     );
     assert!(check("tcp.payload and not tcp.len", &frag));
+    // An atomic fragment (offset 0, no more fragments) is a whole datagram.
+    let atomic = eth(
+        ethertype::IPV6,
+        &[],
+        &ipv6(
+            ip_proto::IPV6_FRAG,
+            &ipv6_frag(ip_proto::TCP, 0, false, &tcp(1, 2, Tcp::ACK, b"hello")),
+        ),
+    );
+    assert!(check("tcp.len == 5 and ipv6.fraghdr.offset == 0", &atomic));
     let v6frag = eth(
         ethertype::IPV6,
         &[],

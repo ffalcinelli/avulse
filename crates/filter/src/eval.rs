@@ -920,10 +920,11 @@ fn load<'a>(f: Field, cx: &Cx<'a>) -> Vals<'a> {
         Field::TcpWindowSizeValue => o.opt(p.tcp().and_then(|t| u(t.window() as u64))),
         Field::TcpChecksum => o.opt(p.tcp().and_then(|t| u(t.checksum() as u64))),
         Field::TcpUrgentPointer => o.opt(p.tcp().and_then(|t| u(t.urgent_ptr() as u64))),
-        // Without reassembly, Wireshark leaves `tcp.len` unset on a first fragment.
+        // Without reassembly, Wireshark leaves `tcp.len` unset on a first fragment. An IPv6
+        // atomic fragment (offset 0, no more fragments, RFC 6946) is a whole datagram.
         Field::TcpLen => o.opt(
             p.tcp()
-                .filter(|_| p.fragment().is_none())
+                .filter(|_| p.fragment().is_none_or(|fr| fr.offset == 0 && !fr.more))
                 .and_then(|_| u(p.payload().len() as u64)),
         ),
         Field::TcpPayload => o.opt(

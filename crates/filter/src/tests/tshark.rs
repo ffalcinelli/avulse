@@ -121,6 +121,14 @@ fn corpus() -> Corpus {
             "v6_frag_last",
             v6(ipp::IPV6_FRAG, &ipv6_frag(ipp::UDP, 5, false, b"zzzzzzzz")),
         ),
+        // An atomic fragment (RFC 6946): a whole datagram, so `tcp.len` is set.
+        (
+            "v6_atomic_tcp",
+            v6(
+                ipp::IPV6_FRAG,
+                &ipv6_frag(ipp::TCP, 0, false, &tcp(1000, 80, Tcp::ACK, b"abc")),
+            ),
+        ),
         ("v6_hbh_tcp", hbh_tcp.clone()),
         ("echo", v4(ipp::ICMP, &icmp(8, 0, [0, 7, 0, 9], b"ping"))),
         ("echo_reply", v4(ipp::ICMP, &icmp(0, 0, [0, 7, 0, 9], b""))),
