@@ -16,6 +16,6 @@ name = "avulse"
 path = "src/main.rs"
 
 [dependencies]
-avulse-filter.workspace = true
+avulse-filter = { workspace = true, features = ["regex"] }
 avulse-proto.workspace = true
 clap = { version = "4.6.7", features = ["derive"] }

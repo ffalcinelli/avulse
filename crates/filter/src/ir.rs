@@ -2,6 +2,7 @@
 //! code generator and the bytecode compiler (planned) by lowering it.
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -35,6 +36,15 @@ pub enum Test {
     Contains {
         lhs: Value,
         rhs: Value,
+        quant: Quant,
+    },
+    /// `quant` occurrence of `lhs` matches a regular expression: byte-oriented, case-insensitive
+    /// unless the pattern says `(?-i)`. `index` refers to the patterns compiled with the filter.
+    /// User space only.
+    Matches {
+        lhs: Value,
+        pattern: String,
+        index: usize,
         quant: Quant,
     },
     Not(Box<Test>),
@@ -130,6 +140,19 @@ impl Lit {
     }
 }
 
+impl Test {
+    /// Whether the test needs user space (it uses `matches`).
+    pub fn user_space_only(&self) -> bool {
+        match self {
+            Test::Matches { .. } => true,
+            Test::Not(t) => t.user_space_only(),
+            Test::And(v) | Test::Or(v) => v.iter().any(Test::user_space_only),
+            Test::Xor(a, b) => a.user_space_only() || b.user_space_only(),
+            _ => false,
+        }
+    }
+}
+
 /// Flattens nested `and`/`or`, removes double negations and folds constants.
 pub fn simplify(t: Test) -> Test {
     match t {
@@ -209,6 +232,15 @@ impl fmt::Display for Test {
                 Quant::Any => write!(f, "(contains {lhs} {rhs})"),
                 Quant::All => write!(f, "(all_contains {lhs} {rhs})"),
             },
+            Test::Matches {
+                lhs,
+                pattern,
+                quant,
+                ..
+            } => {
+                let all = if *quant == Quant::All { "all_" } else { "" };
+                write!(f, "({all}matches {lhs} {pattern:?})")
+            }
             Test::Not(t) => write!(f, "(not {t})"),
             Test::And(v) => list(f, "and", v),
             Test::Or(v) => list(f, "or", v),

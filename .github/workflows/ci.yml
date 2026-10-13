@@ -23,6 +23,9 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets
+      # The CLI turns on avulse-filter's `regex` feature in workspace builds; check it without.
+      - run: cargo clippy -p avulse-filter --all-targets
+      - run: cargo test -p avulse-filter
 
   test:
     strategy:
@@ -51,7 +54,7 @@ jobs:
           sudo add-apt-repository -y ppa:wireshark-dev/stable
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark
-      - run: cargo test -p avulse-filter tshark -- --nocapture
+      - run: cargo test -p avulse-filter --features regex tshark -- --nocapture
         env:
           AVULSE_TSHARK: "1"
 
@@ -65,3 +68,4 @@ jobs:
           toolchain: stable
           targets: thumbv7em-none-eabihf
       - run: cargo build -p avulse-proto -p avulse-filter --target thumbv7em-none-eabihf
+      - run: cargo build -p avulse-filter --features regex --target thumbv7em-none-eabihf

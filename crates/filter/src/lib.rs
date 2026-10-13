@@ -30,6 +30,7 @@ mod lexer;
 mod lit;
 pub mod meta;
 mod parser;
+pub mod regex;
 
 use alloc::vec::Vec;
 
@@ -44,6 +45,8 @@ pub use parser::parse;
 pub struct Filter {
     ir: ir::Test,
     warnings: Vec<Diagnostic>,
+    /// The compiled patterns of `matches`, indexed by `ir::Test::Matches::index`.
+    regexes: Vec<regex::Regex>,
 }
 
 impl Filter {
@@ -54,11 +57,17 @@ impl Filter {
         Ok(Filter {
             ir,
             warnings: checker.warnings,
+            regexes: checker.regexes,
         })
     }
 
     pub fn matches(&self, packet: &Packet<'_>, meta: &Meta<'_>) -> bool {
-        eval::matches(&self.ir, packet, meta)
+        eval::matches(&self.ir, packet, meta, &self.regexes)
+    }
+
+    /// Whether the filter needs user space: `matches` cannot run in the kernel backends.
+    pub fn user_space_only(&self) -> bool {
+        self.ir.user_space_only()
     }
 
     pub fn ir(&self) -> &ir::Test {

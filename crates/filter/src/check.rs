@@ -9,7 +9,7 @@ use crate::ast::{self, ArithOp, Expr, MacroBody, Operand, Quant, RelOp, Rhs};
 use crate::error::{Diagnostic, Result, Span};
 use crate::fields::{self, Consts, Field, Origin, Ty};
 use crate::ir::{self, CmpOp, Lit, SetItem, Test, Value};
-use crate::{labels, lit};
+use crate::{labels, lit, regex};
 
 /// The type (and symbolic names) that the other side of a relation expects.
 #[derive(Clone, Copy)]
@@ -61,6 +61,8 @@ pub(crate) struct Checker<'a> {
     stack: Vec<&'a str>,
     used: Vec<&'a str>,
     pub warnings: Vec<Diagnostic>,
+    /// The compiled patterns of `matches`, in the order of their `index`.
+    pub regexes: Vec<regex::Regex>,
 }
 
 impl<'a> Checker<'a> {
@@ -70,6 +72,7 @@ impl<'a> Checker<'a> {
             stack: Vec::new(),
             used: Vec::new(),
             warnings: Vec::new(),
+            regexes: Vec::new(),
         }
     }
 
@@ -633,11 +636,11 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> Result<Test> {
         match (op, rhs) {
-            (RelOp::Matches, _) => Err(Diagnostic::error(
+            (RelOp::Matches, Rhs::Operand(r)) => self.matches(quant, lhs, r),
+            (RelOp::Matches, Rhs::Set(_)) => Err(Diagnostic::error(
                 span,
-                "`matches` (regular expressions) is not supported yet",
-            )
-            .help("use `contains` or a payload slice")),
+                "`matches` takes a regular expression, not a set",
+            )),
             (RelOp::In | RelOp::NotIn, Rhs::Set(set)) => {
                 let l = self.typed(lhs)?;
                 if l.ty == Ty::Proto {
@@ -696,6 +699,37 @@ impl<'a> Checker<'a> {
             }
             (_, Rhs::Set(_)) => Err(Diagnostic::error(span, format!("`{op}` cannot take a set"))),
         }
+    }
+
+    fn matches(&mut self, quant: Option<Quant>, lhs: &'a Operand, r: &Operand) -> Result<Test> {
+        let l = self.typed(lhs)?;
+        if !matches!(l.ty, Ty::Bytes | Ty::Proto | Ty::Str | Ty::Ether) {
+            return Err(Diagnostic::error(
+                lhs.span(),
+                format!("`matches` needs bytes or a string, but `{lhs}` is {}", l.ty),
+            ));
+        }
+        let Operand::Str(bytes, span) = r else {
+            return Err(Diagnostic::error(
+                r.span(),
+                "`matches` takes a double-quoted regular expression",
+            )
+            .help("e.g. `tcp.payload matches \"^GET \"`"));
+        };
+        let pattern = regex::pattern(bytes);
+        let re = regex::compile(&pattern).map_err(|why| {
+            Diagnostic::error(*span, format!("invalid regular expression: {why}")).help(
+                "patterns use Rust's regex syntax: no look-around and no backreferences, unlike \
+                 Wireshark's PCRE2",
+            )
+        })?;
+        self.regexes.push(re);
+        Ok(Test::Matches {
+            lhs: l.value,
+            pattern,
+            index: self.regexes.len() - 1,
+            quant: quant.unwrap_or(Quant::Any),
+        })
     }
 
     fn comparison(

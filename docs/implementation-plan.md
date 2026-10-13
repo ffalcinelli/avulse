@@ -161,7 +161,7 @@ refer to the packet selected in the Wireshark GUI).
    `scripts/gen_labels.py`.
 5. [x] `&` on bytes, `upper()`/`lower()` on string fields.
 6. [x] Multi-range slices (`frame[0:2,4]`), capped at 32 bytes.
-7. [ ] `matches` / `~` behind the `regex` feature (`regex-automata`, user space only).
+7. [x] `matches` / `~` behind the `regex` feature (`regex-automata`, user space only).
 8. [ ] `@field` raw bytes, checked against the field positions in `tshark -T pdml`.
 
 ### Step 2: Bytecode, verifier and `no_std` interpreter
@@ -261,10 +261,8 @@ equivalent on the vector packets.
 
 ### Step 4: Language gaps (small, independent)
 
-- **`matches`:** user-space only. Behind a `regex` cargo feature, so the default build stays no_std.
-  `explain` marks it "user space"; the bytecode verifier rejects it.
-- **Bitwise `&` on byte slices** (`udp.payload[2:2] & 80:00`): byte-wise AND producing bytes. Truthy
-  means any non-zero byte.
+(`matches` and `&` on bytes moved to Step 1b and are done.)
+
 - **TCP options:** `tcp.options.mss_val`, `tcp.options.wscale.shift`, `tcp.options.sack_perm`,
   `tcp.option_kind`. Parse options in `proto` (bounded loop).
 - `cargo-fuzz` targets for the parser/checker (arbitrary UTF-8 must never panic) and for `eval` on
@@ -302,9 +300,9 @@ starting each phase, expand it into steps in this file, in the same format as ab
 - [x] Phase 1: `avulse-proto`
 - [x] Phase 1: filter front half (parser, checker, IR, evaluator, CLI)
 - [x] Step 1: tshark validation
-- [ ] Step 1b: Wireshark syntax coverage (quantifiers, arithmetic, layers, labels, `&` on bytes, multi-range slices done)
+- [ ] Step 1b: Wireshark syntax coverage (quantifiers, arithmetic, layers, labels, `&` on bytes, multi-range slices, `matches` done)
 - [ ] Step 2: bytecode + verifier + interpreter
 - [ ] Step 3: WinDivert front-end + 241 vectors + `filter convert`
-- [ ] Step 4: `matches`, bitwise on bytes, TCP options, fuzz targets
+- [ ] Step 4: TCP options, fuzz targets
 - [ ] Step 5: spikes A, B, C
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement

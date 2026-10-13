@@ -50,6 +50,9 @@ outbound and ip.dst not in $lan and $web
 - Wireshark's value labels, quoted or not and in any case: `ip.proto == "TCP"`,
   `icmp.type == "Echo (ping) request"`, `ip.flags.df == "Set"`. A label shared by several values
   (`"Unassigned"`) is an error: write the number.
+- Regular expressions: `tcp.payload matches "^(GET|POST) "`, or `~`. As in Wireshark they are
+  case-insensitive unless the pattern says `(?-i)`, and they run over bytes (`"\\x81"` matches that
+  byte). They need the `regex` feature (the CLI has it) and run in user space only.
 - Symbolic constants: `tcp.flags & syn`, `icmp.type == echo-request`, `eth.type == arp`.
 - Extensions: `inbound`, `outbound`, `loopback`, `iface`, `layer`, `event`, `process.pid`,
   `local.addr`, `remote.port`, `let` macros used as `$name`.
@@ -73,6 +76,8 @@ compiles selects the same packets, except:
 - **Computed byte strings are capped at 32 bytes.** A multi-range slice or a `&` on two byte
   strings that comes out longer gives no value (or a compile error when the length is known). A
   single-range slice has no limit.
+- **Rust regular expressions, not PCRE2.** Look-around and backreferences are rejected, and `$`
+  matches only at the very end, where PCRE2 also matches before a final newline (write `\n?$`).
 - **Signed arithmetic throughout.** `tcp.srcport + -1` subtracts one; Wireshark converts the `-1` to
   the field's unsigned type. Avulse also accepts literals beyond the field's range in arithmetic
   (`tcp.srcport + 1 == 65536`), which Wireshark rejects.

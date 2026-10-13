@@ -617,6 +617,81 @@ fn long_frame() -> alloc::vec::Vec<u8> {
     f
 }
 
+#[cfg(feature = "regex")]
+#[test]
+fn regular_expressions() {
+    let f = http_get();
+    // Case-insensitive by default, over bytes, as in Wireshark.
+    assert!(check(
+        "tcp.payload matches \"get\" and not tcp.payload matches \"(?-i)get\"",
+        &f
+    ));
+    assert!(check(
+        "tcp.payload ~ \"^GET /\" and frame matches \"HTTP/1\\\\.1\"",
+        &f
+    ));
+    assert!(check(
+        "all tcp.payload matches \"T\" and eth.src matches \"\\\\x00\\\\x11\"",
+        &f
+    ));
+    let raw = eth(
+        ethertype::IPV4,
+        &[],
+        &ipv4(ip_proto::UDP, &udp(1, 2, b"a\x81\xc3\xa9")),
+    );
+    assert!(check(
+        "udp.payload matches \"\\x81\" and udp.payload matches \"[\\\\x80-\\\\xff]\"",
+        &raw
+    ));
+    assert!(check("udp.payload matches \"\u{e9}$\"", &raw));
+    let meta = Meta {
+        iface: Some("Eth0"),
+        ..Meta::default()
+    };
+    assert!(check_with("upper(iface) matches \"(?-i)^ETH\"", &f, &meta));
+    let c = compile("tcp.payload matches \"x\"");
+    assert!(c.user_space_only());
+    assert!(!compile("tcp").user_space_only());
+    assert!(
+        error("tcp.payload matches \"(a)\\\\1\"")
+            .message
+            .contains("backreferences")
+    );
+    assert!(
+        error("tcp.payload matches \"G(?=E)\"")
+            .message
+            .contains("look-around")
+    );
+    assert!(
+        error("ip.src matches \"10\"")
+            .message
+            .contains("needs bytes")
+    );
+    assert!(
+        error("tcp.payload matches 47:45")
+            .message
+            .contains("double-quoted")
+    );
+}
+
+#[cfg(not(feature = "regex"))]
+#[test]
+fn regular_expressions_need_the_feature() {
+    assert!(
+        error("tcp.payload matches \"x\"")
+            .message
+            .contains("`regex` feature")
+    );
+}
+
+#[test]
+fn regex_patterns_escape_invalid_utf8() {
+    assert_eq!(
+        crate::regex::pattern(b"a\x81\xc3\xa9\\d"),
+        "a\\x81\u{e9}\\d"
+    );
+}
+
 #[test]
 fn errors_explain_themselves() {
     let e = error("tcp.prot == 80");
@@ -656,9 +731,9 @@ fn errors_explain_themselves() {
     assert!(error("80").message.contains("not a test"));
     assert!(error("len(tcp.payload)").help.unwrap().contains("> 0"));
     assert!(
-        error("tcp.payload matches \"x\"")
+        error("tcp.payload matches {1}")
             .message
-            .contains("matches")
+            .contains("double-quoted")
     );
     assert!(
         error("tcp.flags.syn > 0")

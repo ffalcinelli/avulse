@@ -18,7 +18,8 @@ cargo fmt --check
 cargo clippy --workspace --all-targets             # CI sets RUSTFLAGS=-D warnings
 cargo build -p avulse-proto -p avulse-filter --target thumbv7em-none-eabihf   # no_std check (CI job)
 cargo run -p avulse-cli -- filter check 'tcp.port == 80'   # also: fmt | explain | eval --hex … [--link ip] | fields
-AVULSE_TSHARK=1 cargo test -p avulse-filter tshark -- --nocapture   # compare with tshark 4.6+ (CI job `tshark`)
+AVULSE_TSHARK=1 cargo test -p avulse-filter --features regex tshark -- --nocapture   # compare with tshark 4.6+ (CI job `tshark`)
+cargo test -p avulse-filter                       # without the `regex` feature (workspace builds turn it on via the CLI)
 ```
 
 CI (`.github/workflows/ci.yml`) runs fmt and clippy, then `cargo test` on Linux, Windows and macOS, the tshark comparison (Wireshark stable PPA), and the `no_std` build. Edition 2024, resolver 3. Workspace lints: `unsafe_op_in_unsafe_fn = deny` and `clippy::all = warn`, which counts as an error in CI.
@@ -27,7 +28,7 @@ CI (`.github/workflows/ci.yml`) runs fmt and clippy, then `cargo test` on Linux,
 
 ### `no_std` is a hard constraint
 
-`crates/proto` and `crates/filter` are `#![no_std]` (filter uses `alloc`) and `#![forbid(unsafe_code)]`. The same code is meant to run inside the Windows KMDF driver and the macOS system extension, so one engine gives one set of semantics everywhere. Do not add `std` or dependencies that need it. Use `core::net` for IP types. Tests opt in with `extern crate std`. The `thumbv7em-none-eabihf` CI build is what enforces this.
+`crates/proto` and `crates/filter` are `#![no_std]` (filter uses `alloc`) and `#![forbid(unsafe_code)]`. The same code is meant to run inside the Windows KMDF driver and the macOS system extension, so one engine gives one set of semantics everywhere. Do not add `std` or dependencies that need it. The optional `regex` feature (`matches`, via `regex-automata` with `alloc` only) keeps `no_std` too, but it is user space only: it is the one evaluation path that may allocate. Use `core::net` for IP types. Tests opt in with `extern crate std`. The `thumbv7em-none-eabihf` CI build is what enforces this.
 
 ### `avulse-proto`
 

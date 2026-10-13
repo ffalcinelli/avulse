@@ -8,6 +8,7 @@ use avulse_proto::{Network, Packet, VlanTag, ethertype};
 use crate::fields::Field;
 use crate::ir::{self, CmpOp, Lit, Quant, SetItem, Slice, SliceEnd, Test, Value};
 use crate::meta::Meta;
+use crate::regex::{self, Regex};
 
 /// Most occurrences a value can have (two VLAN tags, source and destination).
 const MAX: usize = 4;
@@ -150,10 +151,11 @@ impl<'a> Vals<'a> {
 struct Cx<'a> {
     pkt: &'a Packet<'a>,
     meta: &'a Meta<'a>,
+    regexes: &'a [Regex],
 }
 
-pub(crate) fn matches(t: &Test, pkt: &Packet<'_>, meta: &Meta<'_>) -> bool {
-    test(t, &Cx { pkt, meta })
+pub(crate) fn matches(t: &Test, pkt: &Packet<'_>, meta: &Meta<'_>, regexes: &[Regex]) -> bool {
+    test(t, &Cx { pkt, meta, regexes })
 }
 
 fn test<'a>(t: &'a Test, cx: &Cx<'a>) -> bool {
@@ -197,10 +199,32 @@ fn test<'a>(t: &'a Test, cx: &Cx<'a>) -> bool {
                     }),
                 )
         }
+        Test::Matches {
+            lhs, index, quant, ..
+        } => {
+            let Some(re) = cx.regexes.get(*index) else {
+                return false;
+            };
+            let l = value(lhs, cx);
+            let l = l.as_slice();
+            !l.is_empty() && quantify(*quant, l.iter().map(|v| regex_match(re, v)))
+        }
         Test::Not(t) => !test(t, cx),
         Test::And(v) => v.iter().all(|t| test(t, cx)),
         Test::Or(v) => v.iter().any(|t| test(t, cx)),
         Test::Xor(a, b) => test(a, cx) != test(b, cx),
+    }
+}
+
+/// Runs a pattern over a value. This is the one place where evaluation may allocate (inside the
+/// regex engine, and to fold `upper()`/`lower()` strings): `matches` is user space only.
+fn regex_match(re: &Regex, v: &V<'_>) -> bool {
+    match v {
+        V::Folded(..) => v.seq().is_some_and(|s| {
+            let folded: alloc::vec::Vec<u8> = s.iter().collect();
+            regex::is_match(re, &folded)
+        }),
+        v => v.bytes().is_some_and(|b| regex::is_match(re, b)),
     }
 }
 

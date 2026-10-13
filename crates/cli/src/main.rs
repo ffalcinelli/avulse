@@ -143,7 +143,12 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         FilterCommand::Explain(src) => {
-            out(&format!("{}\n", compile(&src.read()?)?.ir()));
+            let f = compile(&src.read()?)?;
+            let mut text = format!("{}\n", f.ir());
+            if f.user_space_only() {
+                text += "note: `matches` runs in user space only; kernel backends pass these packets up\n";
+            }
+            out(&text);
             Ok(ExitCode::SUCCESS)
         }
         FilterCommand::Eval {

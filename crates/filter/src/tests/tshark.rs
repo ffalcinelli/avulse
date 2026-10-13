@@ -692,6 +692,47 @@ const STRICTER: &[&str] = &[
     "vlan.priority == \"Spare\"",
 ];
 
+/// `matches` (with the `regex` feature): case-insensitive, over bytes, as in Wireshark.
+#[cfg(feature = "regex")]
+const MATCHES: &[&str] = &[
+    "tcp.payload matches \"get\"",
+    "tcp.payload matches \"(?-i)get\"",
+    "tcp.payload ~ \"^GET /\"",
+    "tcp.payload matches \"^get$\"",
+    "tcp.payload matches \"HTTP/1\\\\.1\\r\\n$\"",
+    "tcp.payload matches \"(?m)1$\"",
+    "tcp.payload matches \"1.\\n?$\"",
+    "tcp.payload matches \"(?s)1..$\"",
+    "udp.payload matches \"\\x12\\x34\"",
+    "udp.payload matches \"\\\\x12\\\\x34\"",
+    "udp.payload matches \"[\\\\x80-\\\\xff]\"",
+    "udp.payload matches \"^\\\\w{3,4}$\"",
+    "udp.payload matches \"[a-z]\"",
+    "frame matches \"GET\"",
+    "udp matches \"\\\\x00\\\\x35\"",
+    "eth.src matches \"\\\\x00\\\\x11\"",
+    "all eth.addr matches \"\\\\x00\"",
+    "all tcp.payload matches \"T\"",
+    "tcp.payload[0:3] matches \"get\"",
+    "upper(frame.interface_name) matches \"ETH\"",
+];
+
+/// Like [`DIVERGENCES`], for `matches`: PCRE2's `$` also matches before a final newline.
+#[cfg(feature = "regex")]
+const REGEX_DIVERGENCES: &[(&str, &[&str], &[&str])] =
+    &[("tcp.payload matches \"1.$\"", &["http_vlan"], &[])];
+
+#[cfg(not(feature = "regex"))]
+const REGEX_DIVERGENCES: &[(&str, &[&str], &[&str])] = &[];
+
+/// Filters tshark accepts and Avulse rejects: PCRE2 syntax that Rust's regex engine lacks.
+#[cfg(feature = "regex")]
+const PCRE_ONLY: &[&str] = &[
+    "tcp.payload matches \"(G)\\\\1\"",
+    "tcp.payload matches \"G(?=E)\"",
+    "tcp.payload matches \"(?<!x)GET\"",
+];
+
 /// Avulse extensions that tshark rejects. They never change what a valid Wireshark filter means.
 const EXTENSIONS: &[&str] = &[
     "tcp.port in {80 443}",
@@ -909,7 +950,28 @@ fn tshark_agrees() {
     run(&filters, |f| compare(&caps, f, SKIP));
     let labels = label_filters();
     run(&labels, |f| compare(&caps, f, SKIP));
+    #[cfg(feature = "regex")]
+    run(MATCHES, |f| compare(&caps, f, SKIP));
     run(OUTER, |f| compare(&caps, f, &[]));
+}
+
+#[cfg(feature = "regex")]
+#[test]
+fn tshark_has_pcre() {
+    if enabled().is_none() {
+        return;
+    }
+    let caps = captures();
+    run(PCRE_ONLY, |&filter| {
+        let mut failures = Vec::new();
+        if let Err(e) = tshark(&caps[0].pcap, filter) {
+            failures.push(format!("tshark rejects {filter:?}: {e}"));
+        }
+        if Filter::compile(filter).is_ok() {
+            failures.push(format!("avulse accepts {filter:?}"));
+        }
+        failures
+    });
 }
 
 #[test]
@@ -919,7 +981,12 @@ fn tshark_divergences() {
     }
     let caps = captures();
     let eth = &caps[0];
-    run(DIVERGENCES, |&(filter, want_t, want_a)| {
+    let rows: Vec<_> = DIVERGENCES
+        .iter()
+        .chain(REGEX_DIVERGENCES)
+        .copied()
+        .collect();
+    run(&rows, |&(filter, want_t, want_a)| {
         let (t, a) = match (
             tshark(&eth.pcap, filter),
             avulse(&eth.frames, eth.link, filter),
