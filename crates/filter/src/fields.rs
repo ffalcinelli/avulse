@@ -217,11 +217,16 @@ fields! {
     EthAddr: "eth.addr", Ty::Ether, Wireshark, NONE, "Source or destination MAC";
     EthType: "eth.type", U16, Wireshark, ETHERTYPES, "EtherType of the outer header";
 
-    Vlan: "vlan", Ty::Proto, Wireshark, NONE, "802.1Q/802.1ad tag (each tag)";
+    Vlan: "vlan", Ty::Proto, Wireshark, NONE, "802.1Q tag (each tag; 802.1ad tags are `ieee8021ad`)";
     VlanPriority: "vlan.priority", Ty::Uint(3), Wireshark, NONE, "Priority code point";
     VlanDei: "vlan.dei", Ty::Bool, Wireshark, NONE, "Drop eligible indicator";
     VlanId: "vlan.id", Ty::Uint(12), Wireshark, NONE, "VLAN ID";
     VlanEtype: "vlan.etype", U16, Wireshark, ETHERTYPES, "EtherType after the tag";
+
+    Ieee8021ad: "ieee8021ad", Ty::Proto, Wireshark, NONE, "802.1ad service tag (TPID 0x88a8, outer QinQ tag)";
+    Ieee8021adPriority: "ieee8021ad.priority", Ty::Uint(3), Wireshark, NONE, "Priority code point";
+    Ieee8021adDei: "ieee8021ad.dei", Ty::Uint(1), Wireshark, NONE, "Drop eligible indicator";
+    Ieee8021adId: "ieee8021ad.id", Ty::Uint(12), Wireshark, NONE, "Service VLAN ID";
 
     Arp: "arp", Ty::Proto, Wireshark, NONE, "ARP packet";
     ArpHwType: "arp.hw.type", U16, Wireshark, NONE, "Hardware type";
@@ -235,7 +240,7 @@ fields! {
     ArpDstProtoIpv4: "arp.dst.proto_ipv4", Ty::Ipv4, Wireshark, NONE, "Target IPv4 address";
 
     Ip: "ip", Ty::Proto, Wireshark, NONE, "IPv4 header";
-    IpVersion: "ip.version", Ty::Uint(4), Wireshark, NONE, "Version";
+    IpVersion: "ip.version", Ty::Uint(4), Wireshark, NONE, "Version (of the IPv4 or the IPv6 header, as in Wireshark)";
     IpHdrLen: "ip.hdr_len", U8, Wireshark, NONE, "Header length in bytes";
     IpDsfield: "ip.dsfield", U8, Wireshark, NONE, "Differentiated services field";
     IpDsfieldDscp: "ip.dsfield.dscp", Ty::Uint(6), Wireshark, NONE, "DSCP";
@@ -254,7 +259,7 @@ fields! {
     IpDst: "ip.dst", Ty::Ipv4, Wireshark, NONE, "Destination address";
     IpAddr: "ip.addr", Ty::Ipv4, Wireshark, NONE, "Source or destination address";
 
-    Ipv6: "ipv6", Ty::Proto, Wireshark, NONE, "IPv6 header";
+    Ipv6: "ipv6", Ty::Proto, Wireshark, NONE, "IPv6 header and extension headers";
     Ipv6Version: "ipv6.version", Ty::Uint(4), Wireshark, NONE, "Version";
     Ipv6Tclass: "ipv6.tclass", U8, Wireshark, NONE, "Traffic class";
     Ipv6TclassDscp: "ipv6.tclass.dscp", Ty::Uint(6), Wireshark, NONE, "DSCP";
@@ -266,9 +271,9 @@ fields! {
     Ipv6Src: "ipv6.src", Ty::Ipv6, Wireshark, NONE, "Source address";
     Ipv6Dst: "ipv6.dst", Ty::Ipv6, Wireshark, NONE, "Destination address";
     Ipv6Addr: "ipv6.addr", Ty::Ipv6, Wireshark, NONE, "Source or destination address";
-    Ipv6FragmentOffset: "ipv6.fragment.offset", Ty::Uint(13), Wireshark, NONE, "Fragment offset (8-byte units)";
-    Ipv6FragmentMore: "ipv6.fragment.more", Ty::Bool, Wireshark, NONE, "More fragments";
-    Ipv6FragmentId: "ipv6.fragment.id", U32, Wireshark, NONE, "Fragment identification";
+    Ipv6FraghdrOffset: "ipv6.fraghdr.offset", Ty::Uint(13), Wireshark, NONE, "Fragment offset (8-byte units)";
+    Ipv6FraghdrMore: "ipv6.fraghdr.more", Ty::Bool, Wireshark, NONE, "More fragments";
+    Ipv6FraghdrIdent: "ipv6.fraghdr.ident", U32, Wireshark, NONE, "Fragment identification";
 
     Tcp: "tcp", Ty::Proto, Wireshark, NONE, "TCP header";
     TcpSrcport: "tcp.srcport", U16, Wireshark, NONE, "Source port";
@@ -291,7 +296,7 @@ fields! {
     TcpWindowSizeValue: "tcp.window_size_value", U16, Wireshark, NONE, "Window (unscaled)";
     TcpChecksum: "tcp.checksum", U16, Wireshark, NONE, "Checksum";
     TcpUrgentPointer: "tcp.urgent_pointer", U16, Wireshark, NONE, "Urgent pointer";
-    TcpLen: "tcp.len", U32, Wireshark, NONE, "Payload length";
+    TcpLen: "tcp.len", U32, Wireshark, NONE, "Payload length (absent on IP fragments)";
     TcpPayload: "tcp.payload", Ty::Bytes, Wireshark, NONE, "Payload (when not empty)";
 
     Udp: "udp", Ty::Proto, Wireshark, NONE, "UDP header";

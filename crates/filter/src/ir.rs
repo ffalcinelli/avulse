@@ -37,7 +37,10 @@ pub enum Test {
 }
 
 /// Comparison with Wireshark's quantifiers over multi-occurrence fields (`ip.addr`, `tcp.port`,
-/// `vlan.id`). Every comparison is false when either side has no occurrence.
+/// `vlan.id`). Every comparison is false when either side has no occurrence. These semantics are
+/// checked against tshark 4.6 and 4.7 by `tests/tshark.rs`; `not in` lowers to "exists and not
+/// in". Known differences: Avulse matches only the outermost headers (not the datagram an ICMP
+/// error quotes) and drops a header that is cut short, where Wireshark keeps the fields that fit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CmpOp {
     /// Some pair is equal.

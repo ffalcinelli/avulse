@@ -26,16 +26,39 @@ let web = tcp.port in {80, 443, 8000..8100}
 outbound and ip.dst not in $lan and $web
 ```
 
-- Wireshark semantics, including multi-value fields: `ip.addr == x` matches either address, and
-  `ip.addr != x` means neither is `x`. `!==` (or `~=`) means "some differs". A comparison with an
-  absent field is false.
+- Wireshark 4.6+ semantics, including multi-value fields: `ip.addr == x` matches either address,
+  and `ip.addr != x` means neither is `x`. `!==` means "some differs". `ip.dst not in {…}` needs an
+  IPv4 header, like any comparison: one with an absent field is false.
 - Sets, ranges and CIDR: `tcp.dstport in {80, 443, 8000..8100}`, `ip.src == 10.0.0.0/8`.
 - Slices and payloads: `eth.src[0:3] == 00:11:22`, `tcp.payload contains "GET"`, `len(udp.payload) > 512`.
+  An integer compared with bytes is one byte, as in Wireshark 4.6: `tcp[13] == 18` is 0x12, and
+  `tcp[13] == 18:` is 0x18.
 - Symbolic constants: `tcp.flags & syn`, `icmp.type == echo-request`, `eth.type == arp`.
 - Extensions: `inbound`, `outbound`, `loopback`, `iface`, `layer`, `event`, `process.pid`,
   `local.addr`, `remote.port`, `let` macros used as `$name`.
 - Fields that need stream state or application dissectors (`tcp.seq`, `tcp.stream`, `http.*`,
   `dns.*`) are rejected with a hint.
+
+### Differences from Wireshark
+
+A test compares Avulse with `tshark` 4.6+ on every supported field and on a table of filters
+(`AVULSE_TSHARK=1 cargo test -p avulse-filter tshark`). A filter that Wireshark accepts and Avulse
+compiles selects the same packets, except:
+
+- **Outermost headers only.** Wireshark also dissects the datagram that an ICMP error quotes, so
+  there `udp.port == 53` matches a "port unreachable" about DNS traffic. Avulse, like WinDivert,
+  reads only the outer headers.
+- **No partial headers.** Wireshark keeps the fields of a header that is cut short as far as the
+  bytes go. Avulse drops the incomplete header, so its fields are absent.
+- **No reassembly.** As in Wireshark with reassembly off, `tcp.len` is absent on IP fragments.
+- **Stricter types.** A literal that cannot fit the field is an error (`ip.flags == 8`), where
+  Wireshark accepts the filter and never matches.
+
+Avulse also accepts some syntax that Wireshark rejects, and that never changes the meaning of a
+Wireshark filter: `#`, `//` and `/* */` comments, `let` macros, `~=` (Wireshark 3.6's spelling of
+`!==`), space-separated sets (`{80 443}`), the metadata fields above, and symbolic constants
+Wireshark does not know (`syn`, `echo-request`, `ip.proto == tcp`, where Wireshark reads `tcp` as
+the protocol field).
 
 ```console
 $ avulse filter check 'tcp.prot == 80'

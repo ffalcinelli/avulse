@@ -3,7 +3,7 @@
 use core::cmp::Ordering;
 use core::net::IpAddr;
 
-use avulse_proto::{Network, Packet};
+use avulse_proto::{Network, Packet, VlanTag, ethertype};
 
 use crate::fields::Field;
 use crate::ir::{CmpOp, Lit, SetItem, SliceEnd, Test, Value};
@@ -252,6 +252,15 @@ fn ip(a: IpAddr) -> V<'static> {
     }
 }
 
+/// VLAN tags with their position: the 802.1ad (TPID 0x88a8) tags when `ad`, else the others,
+/// which Wireshark dissects as `vlan`.
+fn tags<'p>(p: &'p Packet<'_>, ad: bool) -> impl Iterator<Item = (usize, &'p VlanTag)> {
+    p.vlans()
+        .iter()
+        .enumerate()
+        .filter(move |(_, t)| (t.tpid == ethertype::QINQ) == ad)
+}
+
 /// Source and destination addresses of the IP header.
 fn ip_pair(pkt: &Packet<'_>) -> Option<(V<'static>, V<'static>)> {
     match pkt.network() {
@@ -292,26 +301,24 @@ fn load<'a>(f: Field, cx: &Cx<'a>) -> Vals<'a> {
         }
         Field::EthType => o.opt(p.eth().and_then(|e| u(e.ethertype() as u64))),
 
-        Field::Vlan => {
-            for i in 0..p.vlans().len() {
+        Field::Vlan | Field::Ieee8021ad => {
+            for (i, _) in tags(p, f == Field::Ieee8021ad) {
                 // The tag body (TCI and inner EtherType) follows each TPID.
                 let off = 14 + 4 * i;
                 o.opt(p.data().get(off..off + 4).map(V::Bytes));
             }
         }
-        Field::VlanPriority => p
-            .vlans()
-            .iter()
-            .for_each(|t| o.push(V::Uint(t.priority() as u64))),
-        Field::VlanDei => p.vlans().iter().for_each(|t| o.push(V::Bool(t.dei()))),
-        Field::VlanId => p
-            .vlans()
-            .iter()
-            .for_each(|t| o.push(V::Uint(t.id() as u64))),
-        Field::VlanEtype => p
-            .vlans()
-            .iter()
-            .for_each(|t| o.push(V::Uint(t.ethertype as u64))),
+        Field::VlanPriority => {
+            tags(p, false).for_each(|(_, t)| o.push(V::Uint(t.priority() as u64)))
+        }
+        Field::VlanDei => tags(p, false).for_each(|(_, t)| o.push(V::Bool(t.dei()))),
+        Field::VlanId => tags(p, false).for_each(|(_, t)| o.push(V::Uint(t.id() as u64))),
+        Field::VlanEtype => tags(p, false).for_each(|(_, t)| o.push(V::Uint(t.ethertype as u64))),
+        Field::Ieee8021adPriority => {
+            tags(p, true).for_each(|(_, t)| o.push(V::Uint(t.priority() as u64)))
+        }
+        Field::Ieee8021adDei => tags(p, true).for_each(|(_, t)| o.push(V::Uint(t.dei() as u64))),
+        Field::Ieee8021adId => tags(p, true).for_each(|(_, t)| o.push(V::Uint(t.id() as u64))),
 
         Field::Arp => o.opt(p.arp().map(|a| V::Bytes(a.bytes()))),
         Field::ArpHwType => o.opt(p.arp().and_then(|a| u(a.hw_type() as u64))),
@@ -333,7 +340,13 @@ fn load<'a>(f: Field, cx: &Cx<'a>) -> Vals<'a> {
         ),
 
         Field::Ip => o.opt(p.ipv4().map(|h| V::Bytes(h.bytes()))),
-        Field::IpVersion => o.opt(p.ipv4().and_then(|h| u(h.version() as u64))),
+        // Wireshark's IPv6 dissector also sets `ip.version`.
+        Field::IpVersion => o.opt(
+            p.ipv4()
+                .map(|h| h.version())
+                .or(p.ipv6().map(|h| h.version()))
+                .map(|v| V::Uint(v as u64)),
+        ),
         Field::IpHdrLen => o.opt(p.ipv4().and_then(|h| u(h.header_len() as u64))),
         Field::IpDsfield => o.opt(p.ipv4().and_then(|h| u(h.dsfield() as u64))),
         Field::IpDsfieldDscp => o.opt(p.ipv4().and_then(|h| u(h.dscp() as u64))),
@@ -357,7 +370,12 @@ fn load<'a>(f: Field, cx: &Cx<'a>) -> Vals<'a> {
             }
         }
 
-        Field::Ipv6 => o.opt(p.ipv6().map(|h| V::Bytes(h.bytes()))),
+        // Like Wireshark's `ipv6` protocol item, the fixed header and the extension headers.
+        Field::Ipv6 => o.opt(p.ipv6().and_then(|_| {
+            let start = p.l3_offset()?;
+            let end = p.l4_offset().unwrap_or(p.payload_range().start);
+            p.data().get(start..end).map(V::Bytes)
+        })),
         Field::Ipv6Version => o.opt(p.ipv6().and_then(|h| u(h.version() as u64))),
         Field::Ipv6Tclass => o.opt(p.ipv6().and_then(|h| u(h.traffic_class() as u64))),
         Field::Ipv6TclassDscp => o.opt(p.ipv6().and_then(|h| u(h.dscp() as u64))),
@@ -374,11 +392,11 @@ fn load<'a>(f: Field, cx: &Cx<'a>) -> Vals<'a> {
                 o.push(V::Ipv6(h.dst().octets(), 128));
             }
         }
-        Field::Ipv6FragmentOffset | Field::Ipv6FragmentMore | Field::Ipv6FragmentId => {
+        Field::Ipv6FraghdrOffset | Field::Ipv6FraghdrMore | Field::Ipv6FraghdrIdent => {
             if let (Some(_), Some(fr)) = (p.ipv6(), p.fragment()) {
                 o.push(match f {
-                    Field::Ipv6FragmentOffset => V::Uint(fr.offset as u64),
-                    Field::Ipv6FragmentMore => V::Bool(fr.more),
+                    Field::Ipv6FraghdrOffset => V::Uint(fr.offset as u64),
+                    Field::Ipv6FraghdrMore => V::Bool(fr.more),
                     _ => V::Uint(fr.id as u64),
                 });
             }
@@ -410,7 +428,12 @@ fn load<'a>(f: Field, cx: &Cx<'a>) -> Vals<'a> {
         Field::TcpWindowSizeValue => o.opt(p.tcp().and_then(|t| u(t.window() as u64))),
         Field::TcpChecksum => o.opt(p.tcp().and_then(|t| u(t.checksum() as u64))),
         Field::TcpUrgentPointer => o.opt(p.tcp().and_then(|t| u(t.urgent_ptr() as u64))),
-        Field::TcpLen => o.opt(p.tcp().and_then(|_| u(p.payload().len() as u64))),
+        // Without reassembly, Wireshark leaves `tcp.len` unset on a first fragment.
+        Field::TcpLen => o.opt(
+            p.tcp()
+                .filter(|_| p.fragment().is_none())
+                .and_then(|_| u(p.payload().len() as u64)),
+        ),
         Field::TcpPayload => o.opt(
             p.tcp()
                 .filter(|_| !p.payload().is_empty())

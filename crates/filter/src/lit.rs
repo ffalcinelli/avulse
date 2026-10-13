@@ -52,9 +52,16 @@ pub(crate) fn parse_ipv6(s: &str) -> Option<([u8; 16], u8)> {
     Some((a.parse::<Ipv6Addr>().ok()?.octets(), p))
 }
 
-/// Byte strings: `aa:bb:cc`, `aa-bb-cc`, `aa.bb.cc`, `aabb.ccdd.eeff` (Cisco style) or a single
-/// byte `aa`.
+/// Byte strings: `aa:bb:cc`, `aa-bb-cc`, `aa.bb.cc`, `aabb.ccdd.eeff` (Cisco style), a single
+/// byte `aa`, or a single byte with a trailing colon `aa:` (which keeps `12:` from reading as
+/// the integer 12).
 pub(crate) fn parse_bytes(s: &str) -> Option<Vec<u8>> {
+    if let Some(b) = s.strip_suffix(':').filter(|b| (1..=2).contains(&b.len())) {
+        return u8::from_str_radix(b, 16)
+            .ok()
+            .filter(|_| b.bytes().all(|c| c.is_ascii_hexdigit()))
+            .map(|x| alloc::vec![x]);
+    }
     let hex = |g: &str| {
         u8::from_str_radix(g, 16)
             .ok()
@@ -138,6 +145,8 @@ mod tests {
             Some(alloc::vec![0, 0x11, 0x22, 0x33, 0x44, 0x55])
         );
         assert_eq!(parse_bytes("ff"), Some(alloc::vec![0xff]));
+        assert_eq!(parse_bytes("12:"), Some(alloc::vec![0x12]));
+        assert_eq!(parse_bytes(":"), None);
         assert_eq!(parse_bytes("a:b"), Some(alloc::vec![0xa, 0xb]));
         assert_eq!(parse_bytes("00:11-22"), None);
         assert_eq!(parse_bytes("ip.src"), None);

@@ -18,9 +18,10 @@ cargo fmt --check
 cargo clippy --workspace --all-targets             # CI sets RUSTFLAGS=-D warnings
 cargo build -p avulse-proto -p avulse-filter --target thumbv7em-none-eabihf   # no_std check (CI job)
 cargo run -p avulse-cli -- filter check 'tcp.port == 80'   # also: fmt | explain | eval --hex … [--link ip] | fields
+AVULSE_TSHARK=1 cargo test -p avulse-filter tshark -- --nocapture   # compare with tshark 4.6+ (CI job `tshark`)
 ```
 
-CI (`.github/workflows/ci.yml`) runs fmt and clippy, then `cargo test` on Linux, Windows and macOS, then the `no_std` build. Edition 2024, resolver 3. Workspace lints: `unsafe_op_in_unsafe_fn = deny` and `clippy::all = warn`, which counts as an error in CI.
+CI (`.github/workflows/ci.yml`) runs fmt and clippy, then `cargo test` on Linux, Windows and macOS, the tshark comparison (Wireshark stable PPA), and the `no_std` build. Edition 2024, resolver 3. Workspace lints: `unsafe_op_in_unsafe_fn = deny` and `clippy::all = warn`, which counts as an error in CI.
 
 ## Architecture
 
@@ -38,10 +39,11 @@ CI (`.github/workflows/ci.yml`) runs fmt and clippy, then `cargo test` on Linux,
 
 - **`fields.rs` is the field registry.** The `fields!` macro generates both the `Field` enum and `FIELDS` (name, type, `Origin::{Wireshark, Extension, Flag}`, symbolic-constant table, description). To add a field, add a row there and the matching arm in `eval.rs` (which reads the value from `Packet`/`Meta`). `UNSUPPORTED` and `APPLICATION` list Wireshark fields that are rejected with a hint because they need stream state or dissectors.
 - **`meta.rs` (`Meta`)** carries everything that is not in the packet bytes: layer, event, direction, loopback, iface, process, and the flow tuple for the FLOW/SOCKET layers. `Layer` and `Event` keep WinDivert's numbering (`Ethernet = 5` is new).
-- **Semantics follow Wireshark 4.x and are the main correctness risk.** Fields can have several occurrences (`ip.addr`, `tcp.port`, `vlan.id`, at most 4 values; see `MAX` in `eval.rs`). `==` means some pair is equal, `!=` means no pair is equal, `~=`/`!==` means some pair differs, and any comparison with an absent field is false. Type mismatches are compile errors, never a silent false. Diagnostics carry spans and "did you mean" help (`error.rs`).
+- **Semantics follow Wireshark 4.6+ and are the main correctness risk.** Fields can have several occurrences (`ip.addr`, `tcp.port`, `vlan.id`, at most 4 values; see `MAX` in `eval.rs`). `==` means some pair is equal, `!=` means no pair is equal, `!==` (`~=`) means some pair differs, `not in` means present and no value in the set, and any comparison with an absent field is false. An integer compared with bytes is one byte (`tcp[13] == 18` is 0x12). Type mismatches are compile errors, never a silent false. Diagnostics carry spans and "did you mean" help (`error.rs`).
+- **`src/tests/tshark.rs` is the oracle.** It compares every Wireshark field and a table of filters with `tshark` over generated captures (`AVULSE_TSHARK=1 cargo test -p avulse-filter tshark`, needs tshark 4.6+). Add a row there whenever you add a field or change semantics; intentional differences go in its `DIVERGENCES`/`EXTENSIONS`/`STRICTER` tables and in the README.
 - The IR is the shared contract for future backends: runtime eBPF codegen on Linux with a superset-in-kernel fallback, and a bytecode verifier and interpreter in the Windows/macOS kernels. Keep it backend-neutral.
 
-Tests sit in `src/tests.rs` of each crate. They build frames by hand with helpers such as `eth()`, `ipv4()`, `tcp()` and `udp()`.
+Tests sit in `src/tests.rs` (proto) and `src/tests/` (filter: `mod.rs`, frame builders in `frames.rs`, a pcap writer, `tshark.rs`). They build frames by hand with helpers such as `eth()`, `ipv4()`, `tcp()` and `udp()`.
 
 ## Planned work (from the roadmap; follow these decisions)
 

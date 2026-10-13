@@ -5,16 +5,16 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-13, `main` at `02bddec`, CI green)
+## Status (2026-10-13, Step 1 done)
 
 | Area | State |
 | --- | --- |
 | `crates/proto` (`avulse-proto`) | Done for Phase 1. Zero-copy `no_std` parsing: Ethernet, 2 VLAN tags, ARP, IPv4, IPv6 (8 extension headers, fragments), TCP, UDP, ICMP, ICMPv6. Checksum recalculation. 12 tests, including all truncations and random input. |
-| `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. 33 tests and a doctest. No bytecode, no WinDivert front-end, no tshark validation yet. |
+| `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. Semantics validated against tshark 4.6/4.7 (`src/tests/tshark.rs`). 38 unit tests, 4 tshark tests (opt-in) and a doctest. No bytecode and no WinDivert front-end yet. |
 | `crates/cli` (`avulse`) | `avulse filter check \| fmt \| explain \| eval --hex … \| fields`. Exit codes: 0 match, 1 no match, 2 error. |
 | `crates/{ebpf,backend-linux,avulse,capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
-| CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, no_std build (`thumbv7em-none-eabihf`). |
+| CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`). |
 | Release (`.github/workflows/release.yml`) | Builds and publishes the Python placeholder on `v*` tags. **No crates.io job yet.** |
 
 ### Accounts and registries (already set up)
@@ -39,8 +39,10 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 - No `rustup`. `rustc`/`cargo` 1.99 come from Arch. For a local no_std check, use the installed
   `wasm32v1-none` target: `cargo build -p avulse-proto -p avulse-filter --target wasm32v1-none`. CI
   uses `thumbv7em-none-eabihf`.
-- **`tshark` is not installed.** The owner needs to run `sudo pacman -S wireshark-cli`, which step 1
-  depends on.
+- **`tshark` 4.7.4 is installed** (with `dftest`, handy to see how Wireshark compiles a filter). Docker
+  works without sudo: to run the tshark test against another Wireshark, build an image (e.g.
+  `ubuntu:24.04` + `ppa:wireshark-dev/stable` gives 4.6) and put a `tshark` wrapper script that runs
+  `docker run -i --rm <image> tshark "$@"` first on the `PATH`. That takes about 6 minutes instead of 20 s.
 - **Pushing:**
   - Push over SSH with `GIT_SSH_COMMAND='ssh -o BatchMode=yes' git push …`, wrapped in `timeout`.
     Plain SSH pushes have hung.
@@ -65,7 +67,36 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 
 ## Next steps, in order
 
-### Step 1: Validate the Wireshark semantics against `tshark`
+### Step 1: Validate the Wireshark semantics against `tshark` (done)
+
+**Outcome.** `crates/filter/src/tests/tshark.rs` builds an Ethernet and a raw-IP capture from the
+frame builders (`src/tests/frames.rs`, pcap writer in `src/tests/pcap.rs`), and runs about 300 filters
+through tshark and Avulse: a presence test for every Wireshark field in `FIELDS`, plus a hand-written
+table. Separate tables pin the intentional divergences, the extensions tshark rejects, and the filters
+Avulse rejects on purpose. It needs tshark 4.6+: 4.2 (Ubuntu 24.04) differs on byte literals, on
+`len(ipv6)` of non-first fragments and on upper-case keywords. The answers:
+
+- Confirmed: `ip.flags` is the 3-bit value; `ip.frag_offset` is in 8-byte units; `tcp`/`udp`/`ip`
+  slices cover the header only and `icmp`/`icmpv6` the whole message; comparisons with an absent field
+  are false; `and` binds tighter than `or` and mixing them is accepted; a bare boolean field tests
+  presence; empty payloads are absent; `eth.type` is the outer TPID; `icmp.ident`/`seq` exist only for
+  echo-like types; `in` accepts IP ranges.
+- Fixed:
+  - `not in` is "present and no value in the set" (it was `not (… in …)`, true on absent fields).
+  - An integer compared with bytes is one byte (`tcp[13] == 18` is 0x12); `18:` is the hex byte; the
+    ambiguous one- and two-digit forms warn. An integer against a protocol (`tcp contains 80`) is an
+    error.
+  - The outer 802.1ad tag (TPID 0x88a8) is `ieee8021ad.*` (new fields); `vlan.*` covers 0x8100 and
+    0x9100 tags only.
+  - `ip.version` is also set for IPv6; `ipv6` (and `len(ipv6)`) spans the extension headers.
+  - `ipv6.fragment.*` were not Wireshark names: they are now `ipv6.fraghdr.offset/more/ident`.
+  - `tcp.len` is absent on IP fragments.
+- Documented divergences (README, "Differences from Wireshark"): only the outermost headers (no
+  ICMP-quoted datagram, owner decision), no partial headers on truncated packets, and stricter literal
+  ranges. Extensions tshark rejects: comments, `~=`, `let`, space-separated sets, symbolic constants
+  Wireshark lacks (owner decision: keep them).
+
+The original plan of the step follows.
 
 **Why.** The filter claims that a filter pasted from Wireshark means the same thing in Avulse. Several
 behaviours were implemented from memory of Wireshark 4.x and are unverified. Settle them before
@@ -248,9 +279,9 @@ starting each phase, expand it into steps in this file, in the same format as ab
 - [x] Phase 0.1: repo, workspace, CI, names claimed (GitHub, crates.io, PyPI), trusted publishers
 - [x] Phase 1: `avulse-proto`
 - [x] Phase 1: filter front half (parser, checker, IR, evaluator, CLI)
-- [ ] Step 1: tshark validation
+- [x] Step 1: tshark validation
 - [ ] Step 2: bytecode + verifier + interpreter
 - [ ] Step 3: WinDivert front-end + 241 vectors + `filter convert`
 - [ ] Step 4: `matches`, bitwise on bytes, TCP options, fuzz targets
 - [ ] Step 5: spikes A, B, C
-- [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement, `wireshark-cli`
+- [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement

@@ -98,14 +98,16 @@ The native syntax **is** a Wireshark display-filter subset, plus extensions. We 
 Wireshark.
 
 - **Accepted Wireshark syntax:**
-  - Operators: `== != ~= < <= > >=`, `eq ne …`, `and or not` and `&& || !`, `in {…}` with `a..b` ranges, `&`
-    bitmask, slices `[i:n]` / `[i-j]`, `contains`, `matches`, and functions `len()` / `count()`.
-  - Field names for the protocols we parse: `frame.len`, `frame.interface_name`, `eth.*`, `vlan.*`, `arp.*`,
-    `ip.*`, `ipv6.*`, `tcp.*`, `udp.*`, `icmp.*`, `icmpv6.*`.
+  - Operators: `== != === !== < <= > >=`, `eq ne …`, `and or not xor` and `&& || ! ^^`, `in {…}` and
+    `not in {…}` with `a..b` ranges, `&` bitmask, slices `[i:n]` / `[i-j]`, `contains`, `matches`, and
+    functions `len()` / `count()`.
+  - Field names for the protocols we parse: `frame.len`, `frame.interface_name`, `eth.*`, `vlan.*`,
+    `ieee8021ad.*`, `arp.*`, `ip.*`, `ipv6.*` (with `ipv6.fraghdr.*`), `tcp.*`, `udp.*`, `icmp.*`, `icmpv6.*`.
   - The usual idioms: `ip.addr`, `tcp.port`, `eth.addr`.
-- **Semantics follow Wireshark 4.x.** On multi-valued fields, `==` means *any* and `!=` means *all not*, and `~=`
-  means *any not*. Absent fields follow Wireshark's rules. A filter that copies and pastes from Wireshark and
-  parses must mean the same thing.
+- **Semantics follow Wireshark 4.6 and later.** On multi-valued fields, `==` means *any* and `!=` means *all
+  not*, and `!==` means *any not*. `not in` means the field is present and none of its values is in the set.
+  A comparison with an absent field is false. A filter that copies and pastes from Wireshark and parses must mean
+  the same thing. The differences are listed in the README ("Differences from Wireshark").
 - **Clear rejections.** Fields that need dissector state are rejected with a clear message: `http.*`, `tls.*`, or
   anything that needs TCP reassembly. `matches` (PCRE) only runs in user space, through the fallback path, and
   `filter explain` says so.
@@ -113,10 +115,12 @@ Wireshark.
   - `let` definitions, used as `$name` / `${name}` (Wireshark macro style);
   - direction and layer fields: `inbound`, `outbound`, `loopback`, `impostor`, `ifidx`;
   - flow/socket fields: `event`, `process.pid`, `process.name`, `local.*`, `remote.*`;
-  - symbolic constants: `syn`, `echo-request`, `arp` request…
-- **Oracle.** Wireshark's own `dftest` and `tshark -Y` are a free oracle. Phase 1 adds a differential test that
-  runs `tshark -Y <filter>` and our evaluator over the same pcaps (generated plus real captures) and asserts the
-  same packet set.
+  - symbolic constants that Wireshark does not know: `syn`, `echo-request`, `ip.proto == tcp`…
+  - `#`, `//` and `/* */` comments, `~=` (Wireshark 3.6's spelling of `!==`), and space-separated sets.
+- **Oracle.** Wireshark's own `dftest` and `tshark -Y` are a free oracle. `crates/filter/src/tests/tshark.rs` is a
+  differential test: it runs `tshark -Y <filter>` and our evaluator over the same generated captures and asserts
+  the same packet set (`AVULSE_TSHARK=1`, needs tshark 4.6+; a CI job installs it from the Wireshark stable
+  PPA).
 - **Front-ends.** Three front-ends compile to one IR: native/Wireshark, WinDivert (compat shim) and, optionally
   after 1.0, tcpdump/pcap syntax.
 

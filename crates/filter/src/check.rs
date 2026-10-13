@@ -278,7 +278,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Converts a literal to the type expected by the other operand.
-    fn literal(&self, o: &Operand, ctx: Ctx) -> Result<Lit> {
+    fn literal(&mut self, o: &Operand, ctx: Ctx) -> Result<Lit> {
         let span = o.span();
         let mismatch = || {
             let mut d = Diagnostic::error(span, format!("expected {}, found `{o}`", ctx.ty));
@@ -339,6 +339,46 @@ impl<'a> Checker<'a> {
                 None if looks_like_field(w) => return Err(unknown_field(w, span)),
                 None => return Err(mismatch().help("MAC addresses look like 00:11:22:33:44:55")),
             },
+            // As in Wireshark, an integer is one byte: `tcp[13] == 18` is 0x12, `tcp[13] == 18:`
+            // is 0x18.
+            (Operand::Word(w, _), Ty::Proto) if lit::parse_uint(w).is_some() => {
+                return Err(Diagnostic::error(
+                    span,
+                    format!("the integer `{w}` cannot be compared with a protocol"),
+                )
+                .help(format!(
+                    "write a byte string such as `{w}:` or a quoted string"
+                )));
+            }
+            (Operand::Word(w, _), Ty::Bytes) if lit::parse_uint(w).is_some() => {
+                match lit::parse_uint(w).and_then(|v| u8::try_from(v).ok()) {
+                    Some(b) => {
+                        // Only where the hex reading differs: `18`, not `9` or `02`.
+                        if w.len() <= 2 && u8::from_str_radix(w, 16).ok() != Some(b) {
+                            self.warnings.push(
+                                Diagnostic::warning(
+                                    span,
+                                    format!(
+                                        "`{w}` is the integer {b} (0x{b:02x}), as in Wireshark 4.6"
+                                    ),
+                                )
+                                .help(format!(
+                                    "older Wireshark versions read it as the byte 0x{w}; write \
+                                     `0x{b:02x}` or `{w}:` to make the intent explicit"
+                                )),
+                            );
+                        }
+                        Lit::Bytes(vec![b])
+                    }
+                    None => {
+                        return Err(Diagnostic::error(
+                            span,
+                            format!("`{w}` is too large for a byte value"),
+                        )
+                        .help("write a byte string such as `11:40`, or slice one byte"));
+                    }
+                }
+            }
             (Operand::Word(w, _), Ty::Bytes | Ty::Proto) => match lit::parse_bytes(w) {
                 Some(b) => Lit::Bytes(b),
                 None if looks_like_field(w) => return Err(unknown_field(w, span)),
@@ -365,11 +405,14 @@ impl<'a> Checker<'a> {
                     return Err(proto_compare(lhs));
                 }
                 let set = self.set(set, &l)?;
-                let t = Test::In { lhs: l.value, set };
                 Ok(if op == RelOp::NotIn {
-                    Test::Not(Box::new(t))
+                    // Wireshark: the field is present and none of its values is in the set.
+                    Test::And(vec![
+                        Test::Exists(l.value.clone()),
+                        Test::Not(Box::new(Test::In { lhs: l.value, set })),
+                    ])
                 } else {
-                    t
+                    Test::In { lhs: l.value, set }
                 })
             }
             (_, Rhs::Operand(r)) => {
@@ -526,7 +569,11 @@ fn expect_typed(r: Resolved<'_>) -> Result<Typed> {
 
 fn contains_ctx(ty: Ty) -> Ctx {
     Ctx {
-        ty: if ty == Ty::Str { Ty::Str } else { Ty::Bytes },
+        // A protocol keeps its type so that `tcp contains 80` is rejected as in Wireshark.
+        ty: match ty {
+            Ty::Str | Ty::Proto => ty,
+            _ => Ty::Bytes,
+        },
         consts: &[],
     }
 }

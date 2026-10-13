@@ -1,117 +1,16 @@
+mod frames;
+mod pcap;
+mod tshark;
+
 use alloc::string::String;
-use alloc::vec;
-use alloc::vec::Vec;
 use core::net::{IpAddr, Ipv4Addr};
 
 use avulse_proto::{Link, Packet, Tcp, ethertype, ip_proto};
 
+use frames::*;
+
 use crate::ir::Test;
 use crate::{Event, Filter, FlowTuple, Layer, Level, Meta};
-
-const MAC_A: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
-const MAC_B: [u8; 6] = [0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb];
-
-fn eth(et: u16, tags: &[u16], payload: &[u8]) -> Vec<u8> {
-    let mut v = [MAC_B, MAC_A].concat();
-    for (i, tci) in tags.iter().enumerate() {
-        let tpid = if i == 0 && tags.len() > 1 {
-            ethertype::QINQ
-        } else {
-            ethertype::VLAN
-        };
-        v.extend_from_slice(&tpid.to_be_bytes());
-        v.extend_from_slice(&tci.to_be_bytes());
-    }
-    v.extend_from_slice(&et.to_be_bytes());
-    v.extend_from_slice(payload);
-    v
-}
-
-/// 10.0.0.1 -> 192.168.1.2
-fn ipv4(proto: u8, payload: &[u8]) -> Vec<u8> {
-    let mut v = vec![0x45, 0x00];
-    v.extend_from_slice(&((20 + payload.len()) as u16).to_be_bytes());
-    v.extend_from_slice(&[
-        0x12, 0x34, 0x40, 0x00, 64, proto, 0, 0, 10, 0, 0, 1, 192, 168, 1, 2,
-    ]);
-    v.extend_from_slice(payload);
-    v
-}
-
-/// fe80::1 -> 2001:db8::2
-fn ipv6(next: u8, payload: &[u8]) -> Vec<u8> {
-    let mut v = vec![0x60, 0, 0, 0];
-    v.extend_from_slice(&(payload.len() as u16).to_be_bytes());
-    v.extend_from_slice(&[
-        next, 64, 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-    ]);
-    v.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
-    v.extend_from_slice(payload);
-    v
-}
-
-fn tcp(sport: u16, dport: u16, flags: u16, payload: &[u8]) -> Vec<u8> {
-    let mut v = Vec::new();
-    v.extend_from_slice(&sport.to_be_bytes());
-    v.extend_from_slice(&dport.to_be_bytes());
-    v.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 2]);
-    v.extend_from_slice(&((5u16 << 12) | flags).to_be_bytes());
-    v.extend_from_slice(&[0x10, 0x00, 0, 0, 0, 0]);
-    v.extend_from_slice(payload);
-    v
-}
-
-fn udp(sport: u16, dport: u16, payload: &[u8]) -> Vec<u8> {
-    let mut v = Vec::new();
-    v.extend_from_slice(&sport.to_be_bytes());
-    v.extend_from_slice(&dport.to_be_bytes());
-    v.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
-    v.extend_from_slice(&[0, 0]);
-    v.extend_from_slice(payload);
-    v
-}
-
-fn https_syn() -> Vec<u8> {
-    eth(
-        ethertype::IPV4,
-        &[],
-        &ipv4(ip_proto::TCP, &tcp(51000, 443, Tcp::SYN, b"")),
-    )
-}
-
-fn http_get() -> Vec<u8> {
-    eth(
-        ethertype::IPV4,
-        &[100],
-        &ipv4(
-            ip_proto::TCP,
-            &tcp(51000, 80, Tcp::PSH | Tcp::ACK, b"GET / HTTP/1.1\r\n"),
-        ),
-    )
-}
-
-fn dns_query() -> Vec<u8> {
-    eth(
-        ethertype::IPV4,
-        &[],
-        &ipv4(ip_proto::UDP, &udp(5353, 53, b"\x12\x34\x01\x00")),
-    )
-}
-
-fn arp_request() -> Vec<u8> {
-    let mut a = vec![0, 1, 8, 0, 6, 4, 0, 1];
-    a.extend_from_slice(&MAC_A);
-    a.extend_from_slice(&[10, 0, 0, 1, 0, 0, 0, 0, 0, 0, 10, 0, 0, 2]);
-    eth(ethertype::ARP, &[], &a)
-}
-
-fn v6_udp() -> Vec<u8> {
-    eth(
-        ethertype::IPV6,
-        &[7, 0x1fff],
-        &ipv6(ip_proto::UDP, &udp(546, 547, b"x")),
-    )
-}
 
 fn compile(src: &str) -> Filter {
     Filter::compile(src).unwrap_or_else(|e| panic!("{}", e.render(src)))
@@ -238,9 +137,11 @@ fn vlan_and_qinq() {
         &http_get()
     ));
     let f = v6_udp();
-    assert!(check("vlan.id == 7 and vlan.id == 4095", &f));
-    assert!(check("count(vlan.id) == 2", &f));
-    assert!(check("vlan.dei == 1", &f));
+    // As in Wireshark, the outer 802.1ad tag is `ieee8021ad`, the inner 802.1Q tag `vlan`.
+    assert!(check("ieee8021ad.id == 7 and vlan.id == 4095", &f));
+    assert!(!check("vlan.id == 7", &f));
+    assert!(check("count(vlan.id) == 1 and count(ieee8021ad) == 1", &f));
+    assert!(check("vlan.dei == 1 and ieee8021ad.dei == 0", &f));
     assert!(!check("vlan", &https_syn()));
 }
 
@@ -367,6 +268,74 @@ impl Lossy for Test {
     fn to_string_lossy(&self) -> String {
         alloc::format!("{self}")
     }
+}
+
+/// Behaviours settled against tshark 4.x (see `tshark.rs`), checked here without it.
+#[test]
+fn wireshark_conformance() {
+    let syn = https_syn();
+    // `not in`: present, and no value in the set.
+    assert!(!check("ip.addr not in {10.0.0.0/8}", &syn));
+    assert!(check("ip.addr not in {1.0.0.0/8}", &syn));
+    assert!(!check("ipv6.addr not in {1::/16}", &syn));
+    assert!(check("not ipv6.addr in {1::/16}", &syn));
+
+    // An integer compared with bytes is one byte; `nn:` is hex.
+    assert!(check(
+        "tcp[13] == 2 and tcp[13] == 02 and tcp[13] == 02:",
+        &syn
+    ));
+    assert!(check("ip[9] == 6 and ip[8] == 64 and ip[8] == 40:", &syn));
+    assert!(!check("ip[8] == 40", &syn));
+    // Wireshark before 4.6 read `18` as 0x18, so it gets a warning; `2` and `0x12` do not.
+    assert_eq!(compile("tcp[13] == 18").warnings().len(), 1);
+    assert!(
+        compile("tcp[13] == 2 or tcp[13] == 0x12 or tcp[13] == 12:")
+            .warnings()
+            .is_empty()
+    );
+    assert!(error("ip[8] == 256").message.contains("too large"));
+    assert!(error("tcp contains 80").message.contains("protocol"));
+
+    // `ip.version` is also set for IPv6; `ipv6` spans the extension headers.
+    let v6 = v6_udp();
+    assert!(check("ip.version == 6 and not ip", &v6));
+    let hbh = eth(
+        ethertype::IPV6,
+        &[],
+        &ipv6(
+            ip_proto::HOPOPT,
+            &ipv6_hbh(ip_proto::TCP, &tcp(1, 2, Tcp::SYN, b"")),
+        ),
+    );
+    assert!(check("len(ipv6) == 48 and ipv6.nxt == 0 and tcp", &hbh));
+
+    // Fragments: no `tcp.len` without reassembly; `ipv6.fraghdr.*`.
+    let frag = eth(
+        ethertype::IPV4,
+        &[],
+        &ipv4_with(
+            V4 {
+                frag: 0x2000,
+                ..V4::default()
+            },
+            ip_proto::TCP,
+            &tcp(1, 2, Tcp::ACK, b"hello"),
+        ),
+    );
+    assert!(check("tcp.payload and not tcp.len", &frag));
+    let v6frag = eth(
+        ethertype::IPV6,
+        &[],
+        &ipv6(
+            ip_proto::IPV6_FRAG,
+            &ipv6_frag(ip_proto::UDP, 5, true, b"zzzzzzzz"),
+        ),
+    );
+    assert!(check(
+        "ipv6.fraghdr.offset == 5 and ipv6.fraghdr.more and ipv6.fraghdr.ident == 0xcafef00d",
+        &v6frag
+    ));
 }
 
 #[test]

@@ -37,6 +37,24 @@ jobs:
           toolchain: stable
       - run: cargo test --workspace
 
+  tshark:
+    # Checks that filters select the same packets as Wireshark (crates/filter/src/tests/tshark.rs).
+    # Ubuntu's own tshark is too old: the test needs Wireshark 4.6 or later.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - name: Install tshark from the Wireshark stable PPA
+        run: |
+          sudo add-apt-repository -y ppa:wireshark-dev/stable
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark
+      - run: cargo test -p avulse-filter tshark -- --nocapture
+        env:
+          AVULSE_TSHARK: "1"
+
   no-std:
     # The parser and the filter engine run in the Windows driver and the macOS system extension.
     runs-on: ubuntu-latest
