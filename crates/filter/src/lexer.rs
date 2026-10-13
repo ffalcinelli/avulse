@@ -15,6 +15,8 @@ pub(crate) enum Tok {
     Str(Vec<u8>),
     Char(u8),
     Macro(String),
+    /// The layer operator: the text after `#`, without brackets (`2`, `1-2,4`).
+    Layer(String),
     LParen,
     RParen,
     LBrace,
@@ -54,6 +56,7 @@ impl Tok {
             Tok::Str(_) => "a string".into(),
             Tok::Char(_) => "a character".into(),
             Tok::Macro(m) => format!("`${m}`"),
+            Tok::Layer(l) => format!("`#[{l}]`"),
             Tok::Eof => "the end of the filter".into(),
             t => format!("`{}`", t.symbol()),
         }
@@ -118,16 +121,32 @@ pub(crate) fn lex(src: &str) -> Result<Vec<Token>> {
         }
         let start = i;
         let tok = match c {
+            // The layer operator, `#2` or `#[1-2]`, even after a space as in Wireshark. Any other
+            // `#` starts a comment, except right after a word, where it is a mistake.
+            b'#' if at(i + 1).is_ascii_digit() => {
+                let n = b[i + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+                i += 1 + n;
+                Tok::Layer(src[start + 1..i].into())
+            }
+            b'#' if at(i + 1) == b'[' => match src[i..].find(']') {
+                Some(close) => {
+                    i += close + 1;
+                    Tok::Layer(src[start + 2..i - 1].into())
+                }
+                None => {
+                    return Err(Diagnostic::error(
+                        Span::new(i, b.len()),
+                        "unterminated layer range",
+                    ));
+                }
+            },
             b'#' => {
                 if i > 0 && is_word_byte(b[i - 1]) {
-                    let end = i + 1 + b[i + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
                     return Err(Diagnostic::error(
-                        Span::new(i, end),
-                        "the layer operator `#` is not supported",
+                        Span::new(i, i + 1),
+                        "expected a layer number after `#`",
                     )
-                    .help(
-                        "Avulse does not decode tunnels, so each protocol appears at most once",
-                    ));
+                    .help("layers look like `vlan.id#2` or `vlan.id#[1-2]`"));
                 }
                 i += b[i..]
                     .iter()
@@ -503,11 +522,12 @@ mod tests {
     #[test]
     fn errors() {
         assert!(
-            lex("ip.src#2 == 1.2.3.4")
+            lex("ip.src#x == 1.2.3.4")
                 .unwrap_err()
                 .message
-                .contains("layer operator")
+                .contains("layer number")
         );
+        assert!(lex("vlan#[1").unwrap_err().message.contains("unterminated"));
         assert!(lex("tcp | udp").unwrap_err().help.unwrap().contains("or"));
         assert!(lex("\"open").unwrap_err().message.contains("unterminated"));
         assert!(
@@ -517,6 +537,21 @@ mod tests {
                 .contains("field references")
         );
         assert!(lex("tcp @ udp").unwrap_err().message.contains("unexpected"));
+    }
+
+    #[test]
+    fn layers_and_comments() {
+        assert_eq!(
+            kinds("vlan.id#2 vlan #[1-2, 4] # comment #2\ntcp"),
+            vec![
+                w("vlan.id"),
+                Tok::Layer("2".into()),
+                w("vlan"),
+                Tok::Layer("1-2, 4".into()),
+                w("tcp"),
+                Tok::Eof
+            ]
+        );
     }
 
     #[test]

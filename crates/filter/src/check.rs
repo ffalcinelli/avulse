@@ -169,7 +169,7 @@ impl<'a> Checker<'a> {
                 )
                 .help(format!("use it after `in`, e.g. `ip.addr in ${name}`"))),
             }),
-            Operand::Slice(..) => Ok(Test::Exists(self.typed(o)?.value)),
+            Operand::Slice(..) | Operand::Layer(..) => Ok(Test::Exists(self.typed(o)?.value)),
             // As in Wireshark, a bare `&` or arithmetic tests that some result is not zero.
             Operand::Arith(..) | Operand::Neg(..) if is_const(o) => Err(not_a_test(o)),
             Operand::BitAnd(..) | Operand::Arith(..) | Operand::Neg(..) => {
@@ -245,6 +245,27 @@ impl<'a> Checker<'a> {
                 typed(Value::Slice(Box::new(b.value), *s), Ty::Bytes, &[])
             }
             Operand::Group(inner, _) => self.resolve(inner, ctx),
+            Operand::Layer(base, layers, _) => {
+                let d = match base.as_ref() {
+                    Operand::Word(w, span) => {
+                        let name = field_name(w).0;
+                        fields::lookup(name).ok_or_else(|| unknown_field(name, *span))?
+                    }
+                    _ => {
+                        return Err(Diagnostic::error(
+                            base.span(),
+                            "the layer operator `#` applies to a field or a protocol",
+                        ));
+                    }
+                };
+                if d.origin != Origin::Wireshark {
+                    return Err(Diagnostic::error(
+                        base.span(),
+                        format!("`{}` is not part of a protocol layer", d.name),
+                    ));
+                }
+                typed(Value::Layer(d.field, layers.clone()), d.ty, d.consts)
+            }
             Operand::Arith(..) | Operand::Neg(..) if is_const(o) => match ctx {
                 Some(ctx) => typed(Value::Lit(self.literal(o, ctx)?), ctx.ty, &[]),
                 None => Ok(Resolved::Literal(o)),
@@ -315,7 +336,7 @@ impl<'a> Checker<'a> {
                     }
                     "count" => {
                         let t = self.typed(arg)?;
-                        if !matches!(t.value, Value::Field(_)) {
+                        if !matches!(t.value, Value::Field(_) | Value::Layer(..)) {
                             return Err(Diagnostic::error(
                                 arg.span(),
                                 "`count` takes a field name",

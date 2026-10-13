@@ -403,6 +403,19 @@ impl Parser {
             }
         };
         let mut operand = operand;
+        if let Tok::Layer(text) = self.peek().clone() {
+            let t = self.bump();
+            let layers = text
+                .split(',')
+                .map(|r| parse_slice(r.trim()).filter(same_sign))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| {
+                    Diagnostic::error(t.span, format!("invalid layer range `#[{text}]`"))
+                        .help("layers are `#n`, `#[a-b]`, `#[a:count]`, `#[a:]` or a list such as `#[1,3]`; negative ones count from the last")
+                })?;
+            let span = operand.span().to(t.span);
+            operand = Operand::Layer(Box::new(operand), layers, span);
+        }
         while self.peek() == &Tok::LBracket {
             let open = self.bump().span;
             let slice = match self.bump() {
@@ -513,6 +526,14 @@ fn int(s: &str) -> Option<i64> {
     }
     let v: i64 = digits.parse().ok()?;
     Some(if neg { -v } else { v })
+}
+
+/// `a-b` with a negative and a positive end is ambiguous, so Wireshark rejects it.
+fn same_sign(s: &Slice) -> bool {
+    match s.end {
+        SliceEnd::Inclusive(e) => (s.start < 0) == (e < 0) && s.start <= e,
+        _ => true,
+    }
 }
 
 fn parse_slice(text: &str) -> Option<Slice> {

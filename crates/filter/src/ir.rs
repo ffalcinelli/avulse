@@ -64,6 +64,8 @@ pub enum CmpOp {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Value {
     Field(Field),
+    /// The occurrences of a field in the given protocol layers (`vlan.id#2`).
+    Layer(Field, Vec<Slice>),
     Slice(Box<Value>, Slice),
     BitAnd(Box<Value>, Box<Value>),
     /// Byte length of each occurrence.
@@ -234,6 +236,10 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Field(field) => f.write_str(def(*field).name),
+            Value::Layer(field, layers) => {
+                f.write_str(def(*field).name)?;
+                crate::ast::fmt_layers(f, layers)
+            }
             Value::Slice(v, s) => match s.end {
                 SliceEnd::Len(n) => write!(f, "{v}[{}:{n}]", s.start),
                 SliceEnd::Inclusive(e) => write!(f, "{v}[{}-{e}]", s.start),

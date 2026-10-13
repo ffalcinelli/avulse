@@ -435,6 +435,59 @@ fn arithmetic() {
 }
 
 #[test]
+fn layers() {
+    let tagged = eth_tpids(
+        ethertype::IPV4,
+        &[(ethertype::VLAN, 3), (ethertype::VLAN, 4)],
+        &ipv4(ip_proto::UDP, &udp(1, 2, b"")),
+    );
+    assert!(check(
+        "vlan.id#1 == 3 and vlan.id#2 == 4 and vlan.id #2 == 4",
+        &tagged
+    ));
+    assert!(!check(
+        "vlan.id#1 == 4 or vlan.id#0 == 3 or vlan#3",
+        &tagged
+    ));
+    assert!(check(
+        "vlan.id#[-1] == 4 and vlan.id#[-2] == 3 and vlan.id#[2:] == 4",
+        &tagged
+    ));
+    assert!(check(
+        "count(vlan.id#[1-2]) == 2 and count(vlan.id#[:2]) == 1",
+        &tagged
+    ));
+    assert!(check(
+        "ip#1 and ip.addr#[-1] == 10.0.0.1 and not ip#2 and udp.port#1 == 2",
+        &tagged
+    ));
+    assert!(check("vlan.id#[1,2] == 4 and len(vlan#2) == 4", &tagged));
+    // Absurd ranges select nothing instead of overflowing.
+    assert!(!check("vlan.id#[5:9223372036854775807] == 4", &tagged));
+    assert!(!check("frame[5:9223372036854775807] == 00", &tagged));
+    assert_eq!(
+        compile("vlan.id#[1-2,4:] == 3").ir().to_string_lossy(),
+        "(any_eq vlan.id#[1-2,4:] 3)"
+    );
+    assert!(error("vlan.id#1#2 == 3").message.contains("expected `and`"));
+    assert!(
+        error("outbound#1")
+            .message
+            .contains("not part of a protocol layer")
+    );
+    assert!(
+        error("vlan.id#[2-1] == 1")
+            .message
+            .contains("invalid layer range")
+    );
+    assert!(
+        error("vlan.id#[-1-2] == 1")
+            .message
+            .contains("invalid layer range")
+    );
+}
+
+#[test]
 fn errors_explain_themselves() {
     let e = error("tcp.prot == 80");
     assert!(e.message.contains("unknown field `tcp.prot`"));

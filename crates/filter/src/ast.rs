@@ -100,6 +100,9 @@ pub enum Operand {
     Char(u8, Span),
     Macro(String, Span),
     Slice(Box<Operand>, Slice, Span),
+    /// `field#n` or `field#[ranges]`: the occurrences in the given protocol layers (1-based,
+    /// negative from the last).
+    Layer(Box<Operand>, Vec<Slice>, Span),
     BitAnd(Box<Operand>, Box<Operand>, Span),
     Arith(ArithOp, Box<Operand>, Box<Operand>, Span),
     Neg(Box<Operand>, Span),
@@ -137,6 +140,7 @@ impl Operand {
             | Operand::Char(_, s)
             | Operand::Macro(_, s)
             | Operand::Slice(_, _, s)
+            | Operand::Layer(_, _, s)
             | Operand::BitAnd(_, _, s)
             | Operand::Arith(_, _, _, s)
             | Operand::Neg(_, s)
@@ -159,6 +163,36 @@ pub enum SliceEnd {
     Len(i64),
     Inclusive(i64),
     Open,
+}
+
+impl fmt::Display for Slice {
+    /// The inside of the brackets: `2`, `2:3`, `2-4`, `2:`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.end {
+            SliceEnd::Len(1) => write!(f, "{}", self.start),
+            SliceEnd::Len(n) => write!(f, "{}:{n}", self.start),
+            SliceEnd::Inclusive(e) => write!(f, "{}-{e}", self.start),
+            SliceEnd::Open => write!(f, "{}:", self.start),
+        }
+    }
+}
+
+/// Writes a layer selector: `#2`, or `#[1-2,4]`.
+pub(crate) fn fmt_layers(f: &mut fmt::Formatter<'_>, layers: &[Slice]) -> fmt::Result {
+    if let [s] = layers
+        && s.end == SliceEnd::Len(1)
+        && s.start >= 0
+    {
+        return write!(f, "#{}", s.start);
+    }
+    write!(f, "#[")?;
+    for (i, s) in layers.iter().enumerate() {
+        if i > 0 {
+            write!(f, ",")?;
+        }
+        write!(f, "{s}")?;
+    }
+    write!(f, "]")
 }
 
 impl Expr {
@@ -317,15 +351,10 @@ impl fmt::Display for Operand {
                 _ => write!(f, "'\\x{c:02x}'"),
             },
             Operand::Macro(m, _) => write!(f, "${m}"),
-            Operand::Slice(base, s, _) => {
-                write!(f, "{base}[")?;
-                match s.end {
-                    SliceEnd::Len(1) => write!(f, "{}", s.start)?,
-                    SliceEnd::Len(n) => write!(f, "{}:{n}", s.start)?,
-                    SliceEnd::Inclusive(e) => write!(f, "{}-{e}", s.start)?,
-                    SliceEnd::Open => write!(f, "{}:", s.start)?,
-                }
-                write!(f, "]")
+            Operand::Slice(base, s, _) => write!(f, "{base}[{s}]"),
+            Operand::Layer(base, layers, _) => {
+                write!(f, "{base}")?;
+                fmt_layers(f, layers)
             }
             Operand::BitAnd(a, b, _) => write!(f, "{a} & {b}"),
             Operand::Arith(op, a, b, _) => write!(f, "{a} {op} {b}"),

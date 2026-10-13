@@ -6,7 +6,7 @@ use core::net::IpAddr;
 use avulse_proto::{Network, Packet, VlanTag, ethertype};
 
 use crate::fields::Field;
-use crate::ir::{self, CmpOp, Lit, Quant, SetItem, SliceEnd, Test, Value};
+use crate::ir::{self, CmpOp, Lit, Quant, SetItem, Slice, SliceEnd, Test, Value};
 use crate::meta::Meta;
 
 /// Most occurrences a value can have (two VLAN tags, source and destination).
@@ -258,6 +258,7 @@ fn value<'a>(v: &'a Value, cx: &Cx<'a>) -> Vals<'a> {
     match v {
         Value::Lit(l) => Vals::one(lit(l)),
         Value::Field(f) => load(*f, cx),
+        Value::Layer(f, ranges) => load_layer(*f, ranges, cx),
         Value::Slice(base, s) => {
             let mut out = Vals::new();
             for x in value(base, cx).as_slice() {
@@ -329,11 +330,11 @@ fn value<'a>(v: &'a Value, cx: &Cx<'a>) -> Vals<'a> {
 
 fn slice<'a>(v: V<'a>, start: i64, end: SliceEnd) -> Option<V<'a>> {
     let len = v.bytes()?.len() as i64;
-    let abs = |i: i64| if i < 0 { len + i } else { i };
+    let abs = |i: i64| if i < 0 { len.saturating_add(i) } else { i };
     let s = abs(start);
     let e = match end {
-        SliceEnd::Len(n) => s + n,
-        SliceEnd::Inclusive(e) => abs(e) + 1,
+        SliceEnd::Len(n) => s.saturating_add(n),
+        SliceEnd::Inclusive(e) => abs(e).saturating_add(1),
         SliceEnd::Open => len,
     };
     if s < 0 || e < s || e > len {
@@ -356,6 +357,77 @@ fn ip(a: IpAddr) -> V<'static> {
         IpAddr::V4(a) => V::Ipv4(a.octets(), 32),
         IpAddr::V6(a) => V::Ipv6(a.octets(), 128),
     }
+}
+
+/// Which tags a VLAN field reads: `Some(true)` for 802.1ad, `Some(false)` for 802.1Q, `None` for
+/// fields that are not per tag.
+fn tag_kind(f: Field) -> Option<bool> {
+    match f {
+        Field::Vlan | Field::VlanPriority | Field::VlanDei | Field::VlanId | Field::VlanEtype => {
+            Some(false)
+        }
+        Field::Ieee8021ad
+        | Field::Ieee8021adPriority
+        | Field::Ieee8021adDei
+        | Field::Ieee8021adId => Some(true),
+        _ => None,
+    }
+}
+
+/// The value of a per-tag field for the tag at position `i` of the tag stack.
+fn tag_value<'a>(f: Field, i: usize, t: &VlanTag, p: &Packet<'a>) -> Option<V<'a>> {
+    Some(match f {
+        // The tag body (TCI and inner EtherType) follows each TPID.
+        Field::Vlan | Field::Ieee8021ad => V::Bytes(p.data().get(14 + 4 * i..18 + 4 * i)?),
+        Field::VlanPriority | Field::Ieee8021adPriority => V::Uint(t.priority() as u64),
+        Field::VlanDei => V::Bool(t.dei()),
+        Field::Ieee8021adDei => V::Uint(t.dei() as u64),
+        Field::VlanId | Field::Ieee8021adId => V::Uint(t.id() as u64),
+        Field::VlanEtype => V::Uint(t.ethertype as u64),
+        _ => return None,
+    })
+}
+
+/// Whether protocol layer `layer` (1-based) of `count` is selected by `ranges`, where negative
+/// positions count from the last layer, as in Wireshark.
+fn in_layers(ranges: &[Slice], layer: i64, count: i64) -> bool {
+    let abs = |i: i64| {
+        if i < 0 {
+            i.saturating_add(count + 1)
+        } else {
+            i
+        }
+    };
+    ranges.iter().any(|r| {
+        let start = abs(r.start);
+        let end = match r.end {
+            SliceEnd::Len(n) => start.saturating_add(n).saturating_sub(1),
+            SliceEnd::Inclusive(e) => abs(e),
+            SliceEnd::Open => count,
+        };
+        (start..=end).contains(&layer)
+    })
+}
+
+/// The occurrences of `f` in the selected layers. Each VLAN tag is a layer of its protocol; every
+/// other protocol appears once, as layer 1, because only the outermost headers are parsed.
+fn load_layer<'a>(f: Field, ranges: &[Slice], cx: &Cx<'a>) -> Vals<'a> {
+    let p = cx.pkt;
+    let Some(ad) = tag_kind(f) else {
+        return if in_layers(ranges, 1, 1) {
+            load(f, cx)
+        } else {
+            Vals::new()
+        };
+    };
+    let count = tags(p, ad).count() as i64;
+    let mut o = Vals::new();
+    for (layer, (i, t)) in (1..).zip(tags(p, ad)) {
+        if in_layers(ranges, layer, count) {
+            o.opt(tag_value(f, i, t, p));
+        }
+    }
+    o
 }
 
 /// VLAN tags with their position: the 802.1ad (TPID 0x88a8) tags when `ad`, else the others,
@@ -407,24 +479,18 @@ fn load<'a>(f: Field, cx: &Cx<'a>) -> Vals<'a> {
         }
         Field::EthType => o.opt(p.eth().and_then(|e| u(e.ethertype() as u64))),
 
-        Field::Vlan | Field::Ieee8021ad => {
-            for (i, _) in tags(p, f == Field::Ieee8021ad) {
-                // The tag body (TCI and inner EtherType) follows each TPID.
-                let off = 14 + 4 * i;
-                o.opt(p.data().get(off..off + 4).map(V::Bytes));
-            }
+        Field::Vlan
+        | Field::VlanPriority
+        | Field::VlanDei
+        | Field::VlanId
+        | Field::VlanEtype
+        | Field::Ieee8021ad
+        | Field::Ieee8021adPriority
+        | Field::Ieee8021adDei
+        | Field::Ieee8021adId => {
+            let ad = tag_kind(f) == Some(true);
+            tags(p, ad).for_each(|(i, t)| o.opt(tag_value(f, i, t, p)));
         }
-        Field::VlanPriority => {
-            tags(p, false).for_each(|(_, t)| o.push(V::Uint(t.priority() as u64)))
-        }
-        Field::VlanDei => tags(p, false).for_each(|(_, t)| o.push(V::Bool(t.dei()))),
-        Field::VlanId => tags(p, false).for_each(|(_, t)| o.push(V::Uint(t.id() as u64))),
-        Field::VlanEtype => tags(p, false).for_each(|(_, t)| o.push(V::Uint(t.ethertype as u64))),
-        Field::Ieee8021adPriority => {
-            tags(p, true).for_each(|(_, t)| o.push(V::Uint(t.priority() as u64)))
-        }
-        Field::Ieee8021adDei => tags(p, true).for_each(|(_, t)| o.push(V::Uint(t.dei() as u64))),
-        Field::Ieee8021adId => tags(p, true).for_each(|(_, t)| o.push(V::Uint(t.id() as u64))),
 
         Field::Arp => o.opt(p.arp().map(|a| V::Bytes(a.bytes()))),
         Field::ArpHwType => o.opt(p.arp().and_then(|a| u(a.hw_type() as u64))),
