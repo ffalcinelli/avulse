@@ -111,7 +111,7 @@ Wireshark.
 - **Semantics follow Wireshark 4.6 and later.** On multi-valued fields, `==` means *any* and `!=` means *all
   not*, and `!==` means *any not*. `not in` means the field is present and none of its values is in the set.
   A comparison with an absent field is false. A filter that copies and pastes from Wireshark and parses must mean
-  the same thing. The differences are listed in the README ("Differences from Wireshark").
+  the same thing. The differences are listed in the guide (`book/src/filters/wireshark.md`).
 - **Compatibility rule.** A filter that compiles means what it means in Wireshark. Avulse may reject more (types,
   the evaluator's fixed buffers), with an error and a hint, but it never gives a different result silently.
   Each audience gets its own compatibility: people writing new filters get Wireshark's language, which they

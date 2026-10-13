@@ -1,8 +1,8 @@
 # Contributing
 
 Thanks for your interest in Avulse. It is pre-alpha, so the design still moves: for anything
-larger than a fix, open an issue first. [`docs/roadmap.md`](docs/roadmap.md) is the design, and
-[`docs/implementation-plan.md`](docs/implementation-plan.md) the current status and next steps.
+larger than a fix, open an issue first. [`docs/roadmap.md`](https://github.com/ffalcinelli/avulse/blob/main/docs/roadmap.md) is the design, and
+[`docs/implementation-plan.md`](https://github.com/ffalcinelli/avulse/blob/main/docs/implementation-plan.md) the current status and next steps.
 
 ## Setup
 

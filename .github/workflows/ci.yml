@@ -69,3 +69,22 @@ jobs:
           targets: thumbv7em-none-eabihf
       - run: cargo build -p avulse-proto -p avulse-filter --target thumbv7em-none-eabihf
       - run: cargo build -p avulse-filter --features regex --target thumbv7em-none-eabihf
+
+  docs:
+    # rustdoc with broken links as errors, the WebAssembly build of the playground, and the guide.
+    # The filters in the guide are compiled by `cargo test` (crates/cli/tests/docs.rs).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: mdbook@0.5.4
+      - run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: cargo clippy -p avulse-wasm --target wasm32-unknown-unknown
+      - run: mdbook build book

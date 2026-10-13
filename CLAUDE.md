@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Avulse is a cross-platform (Linux, Windows, macOS) packet-diverting library. It aims to be a superset of WinDivert: it adds an ETHERNET layer, uses a Wireshark-compatible filter language, and will ship a WinDivert-compatible shim so that pydivert/jdivert can move onto it. It is the fifth repo in `~/Workspace/divert/` (see `../CLAUDE.md` for its siblings: windivert, ebpfdivert, pydivert, jdivert). It is dual-licensed LGPL-3.0-or-later / GPL-2.0-or-later, and BPF programs must be GPL-compatible.
 
-**Status: pre-alpha.** Only `avulse-proto`, `avulse-filter` and the `avulse filter …` CLI are implemented. `ebpf`, `backend-linux`, `capi`, `windivert-compat`, the `avulse` facade crate and `bindings/python` are empty placeholders that reserve names. `docs/roadmap.md` is the design document (phases, the layer/backend feature matrix, filter-language decisions, and what to reuse from ebpfdivert). Read it before starting work on a new phase.
+**Status: pre-alpha.** Only `avulse-proto`, `avulse-filter`, the `avulse filter …` CLI and `avulse-wasm` (the website's filter playground) are implemented. `ebpf`, `backend-linux`, `capi`, `windivert-compat`, the `avulse` facade crate and `bindings/python` are empty placeholders that reserve names. `docs/roadmap.md` is the design document (phases, the layer/backend feature matrix, filter-language decisions, and what to reuse from ebpfdivert). Read it before starting work on a new phase.
 
 **Start each session with `docs/implementation-plan.md`.** It holds the current status, the accounts and workstation quirks (pushing over SSH, no `tshark`, no `rustup`), the open Wireshark-semantics questions, and the ordered next steps with acceptance criteria. Tick steps there as they land, and commit it together with the code.
 
@@ -19,6 +19,8 @@ cargo clippy --workspace --all-targets             # CI sets RUSTFLAGS=-D warnin
 cargo build -p avulse-proto -p avulse-filter --target thumbv7em-none-eabihf   # no_std check (CI job)
 cargo run -p avulse-cli -- filter check 'tcp.port == 80'   # also: fmt | explain | eval --hex … [--link ip] | fields
 AVULSE_TSHARK=1 cargo test -p avulse-filter --features regex tshark -- --nocapture   # compare with tshark 4.6+ (CI job `tshark`)
+AVULSE_BLESS=1 cargo test -p avulse-cli --test docs   # regenerate book/src/reference/fields.md after changing FIELDS
+scripts/build-site.sh && python3 -m http.server -d target/site   # whole website; needs mdbook, wasm-pack, uv (~/.cargo/bin here)
 cargo test -p avulse-filter                       # without the `regex` feature (workspace builds turn it on via the CLI)
 ```
 
@@ -42,10 +44,20 @@ CI (`.github/workflows/ci.yml`) runs fmt and clippy, then `cargo test` on Linux,
 - **`labels.rs` is generated** by `scripts/gen_labels.py` from `tshark -G values`: Wireshark's value-string labels (`ip.proto == "TCP"`) for every Wireshark field, merged across Wireshark versions (labels change between releases; a label that means different values is ambiguous and rejected). Rerun it after adding fields with every tshark at hand, e.g. `python3 scripts/gen_labels.py tshark "docker run --rm -i <4.6 image> tshark"`; multi-table fields need an entry in its `TABLE`.
 - **`meta.rs` (`Meta`)** carries everything that is not in the packet bytes: layer, event, direction, loopback, iface, process, and the flow tuple for the FLOW/SOCKET layers. `Layer` and `Event` keep WinDivert's numbering (`Ethernet = 5` is new).
 - **Semantics follow Wireshark 4.6+ and are the main correctness risk.** Fields can have several occurrences (`ip.addr`, `tcp.port`, `vlan.id`, at most 4 values; see `MAX` in `eval.rs`). `==` means some pair is equal, `!=` means no pair is equal, `!==` (`~=`) means some pair differs, `not in` means present and no value in the set, and any comparison with an absent field is false. An integer compared with bytes is one byte (`tcp[13] == 18` is 0x12). Type mismatches are compile errors, never a silent false. Diagnostics carry spans and "did you mean" help (`error.rs`).
-- **`src/tests/tshark.rs` is the oracle.** It compares every Wireshark field and a table of filters with `tshark` over generated captures (`AVULSE_TSHARK=1 cargo test -p avulse-filter tshark`, needs tshark 4.6+). Add a row there whenever you add a field or change semantics; intentional differences go in its `DIVERGENCES`/`EXTENSIONS`/`STRICTER` tables and in the README.
+- **`src/tests/tshark.rs` is the oracle.** It compares every Wireshark field and a table of filters with `tshark` over generated captures (`AVULSE_TSHARK=1 cargo test -p avulse-filter tshark`, needs tshark 4.6+). Add a row there whenever you add a field or change semantics; intentional differences go in its `DIVERGENCES`/`EXTENSIONS`/`STRICTER` tables and in the guide (`book/src/filters/wireshark.md`).
 - The IR is the shared contract for future backends: runtime eBPF codegen on Linux with a superset-in-kernel fallback, and a bytecode verifier and interpreter in the Windows/macOS kernels. Keep it backend-neutral.
 
 Tests sit in `src/tests.rs` (proto) and `src/tests/` (filter: `mod.rs`, frame builders in `frames.rs`, a pcap writer, `tshark.rs`). They build frames by hand with helpers such as `eth()`, `ipv4()`, `tcp()` and `udp()`.
+
+## Documentation and website
+
+Published to <https://ffalcinelli.github.io/avulse/> by `.github/workflows/pages.yml`, which runs `scripts/build-site.sh`: `site/` (hand-written landing page; `playground.js` loads `crates/wasm` built by wasm-pack into `/pkg/`), `book/` (mdBook guide, `/guide/`), rustdoc (`/api/rust/`) and pdoc of `bindings/python` (`/api/python/`).
+
+- The guide is the language reference. The README stays a short front page that links to it.
+- Every public item needs docs (`missing_docs` is a workspace lint, so CI fails without them). CI's `docs` job runs rustdoc with `-D warnings`, clippy for `wasm32-unknown-unknown` and `mdbook build`.
+- `crates/cli/tests/docs.rs` compiles every ```` ```filter ```` block in `book/src` and `README.md` (```` ```filter,error ```` blocks must fail; a blank line separates filters, except after `let` lines), and checks that `book/src/reference/fields.md` matches `avulse filter fields --format markdown`.
+- The Rust code in both READMEs runs as doctests (`cfg(doctest)` module in `crates/filter/src/lib.rs`). The guide `{{#include}}`s `crates/*/examples/`.
+- `avulse-wasm` keeps `wasm-bindgen` behind `cfg(target_arch = "wasm32")`; its logic is plain Rust tested natively. When the language changes, update its samples' tests and, if useful, the playground's `EXAMPLES`.
 
 ## Planned work (from the roadmap; follow these decisions)
 

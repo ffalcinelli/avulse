@@ -5,16 +5,18 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-13, Steps 1 and 1b done)
+## Status (2026-10-13, Steps 1 and 1b done, docs and website added)
 
 | Area | State |
 | --- | --- |
 | `crates/proto` (`avulse-proto`) | Done for Phase 1. Zero-copy `no_std` parsing: Ethernet, 2 VLAN tags, ARP, IPv4, IPv6 (8 extension headers, fragments), TCP, UDP, ICMP, ICMPv6. Checksum recalculation. 12 tests, including all truncations and random input. |
 | `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. Wireshark 4.6 syntax covered: quantifiers, arithmetic, layers, value labels, `@field`, `&` on bytes, multi-range slices, `upper`/`lower`, and `matches` (optional `regex` feature). Semantics validated against tshark 4.6/4.7 (`src/tests/tshark.rs`, including every field's byte span against PDML). 55 unit tests, 7 tshark tests (opt-in) and a doctest. No bytecode and no WinDivert front-end yet. |
-| `crates/cli` (`avulse`) | `avulse filter check \| fmt \| explain \| eval --hex … \| fields`. Exit codes: 0 match, 1 no match, 2 error. |
+| `crates/cli` (`avulse`) | `avulse filter check \| fmt \| explain \| eval --hex … \| fields [--format markdown]`. Exit codes: 0 match, 1 no match, 2 error. |
+| `crates/wasm` (`avulse-wasm`) | The filter engine for the website's playground (wasm-bindgen, `publish = false`). |
+| Docs and website | README (front page), guide (`book/`, mdBook), `site/` with the playground, rustdoc and pdoc, built by `scripts/build-site.sh` and deployed by `pages.yml` to <https://ffalcinelli.github.io/avulse/>. Every public item is documented (`missing_docs`). |
 | `crates/{ebpf,backend-linux,avulse,capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
-| CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`). |
+| CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook). `pages.yml` deploys the website. |
 | Release (`.github/workflows/release.yml`) | Builds and publishes the Python placeholder on `v*` tags. **No crates.io job yet.** |
 
 ### Accounts and registries (already set up)
@@ -63,7 +65,10 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 2. The no_std build passes for `avulse-proto` and `avulse-filter`.
 3. `proto` and `filter` stay `#![no_std]`, `#![forbid(unsafe_code)]`, with no panicking paths in
    evaluation code (no `unwrap`, no unchecked indexing on packet data).
-4. User-facing behaviour changes are reflected in `README.md`, `docs/roadmap.md` and `CLAUDE.md`.
+4. User-facing behaviour changes are reflected in the guide (`book/src/`), `docs/roadmap.md` and
+   `CLAUDE.md`, and in `README.md` when they change its summary. `RUSTDOCFLAGS=-D warnings cargo doc
+   --workspace --no-deps --all-features` is clean, and the docs test (`cargo test -p avulse-cli --test
+   docs`) passes.
 5. Commit messages use the imperative mood, with a body explaining why, and end with the
    `Co-Authored-By:` trailer the session asks for.
 
@@ -316,6 +321,7 @@ starting each phase, expand it into steps in this file, in the same format as ab
 - [x] Phase 1: filter front half (parser, checker, IR, evaluator, CLI)
 - [x] Step 1: tshark validation
 - [x] Step 1b: Wireshark syntax coverage
+- [x] Docs: README, guide, website with playground, Rust and Python API docs
 - [ ] Step 2: bytecode + verifier + interpreter
 - [ ] Step 3: WinDivert front-end + 241 vectors + `filter convert`
 - [ ] Step 4: TCP options, fuzz targets

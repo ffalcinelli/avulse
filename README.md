@@ -1,96 +1,56 @@
 # Avulse
 
+[![CI](https://github.com/ffalcinelli/avulse/actions/workflows/ci.yml/badge.svg)](https://github.com/ffalcinelli/avulse/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-guide-0a6f93)](https://ffalcinelli.github.io/avulse/guide/)
+[![crates.io](https://img.shields.io/crates/v/avulse)](https://crates.io/crates/avulse)
+[![PyPI](https://img.shields.io/pypi/v/avulse)](https://pypi.org/project/avulse/)
+[![License](https://img.shields.io/badge/license-LGPL--3.0%2B%20OR%20GPL--2.0%2B-blue)](LICENSE)
+
 Divert, modify and re-inject network packets on Linux, Windows and macOS. Avulse covers every
-WinDivert feature, adds an Ethernet layer, and uses a Wireshark-compatible filter language.
+WinDivert feature, adds an Ethernet layer, and uses Wireshark display filters.
 
 > *Avulsion*: a river suddenly abandoning its channel for a new one.
 
-**Status: pre-alpha.** No packet capture yet. What works today:
+**Status: pre-alpha.** The packet parser, the filter language and the `avulse filter` CLI work.
+Packet capture does not exist yet, and the crates.io and PyPI packages only reserve the name.
 
-- `avulse-proto`: zero-copy, `no_std` parsing of Ethernet, VLAN/QinQ, ARP, IPv4, IPv6 (extension
-  headers, fragments), TCP, UDP, ICMP and ICMPv6, plus checksum recalculation.
-- `avulse-filter`: the filter language (parser, type checker, IR, evaluator), `no_std` with `alloc`.
-- `avulse filter check|fmt|explain|eval|fields`.
+**[Website](https://ffalcinelli.github.io/avulse/)** ·
+**[Filter playground](https://ffalcinelli.github.io/avulse/#playground)** ·
+**[Guide](https://ffalcinelli.github.io/avulse/guide/)** ·
+**[Rust API](https://ffalcinelli.github.io/avulse/api/rust/)** ·
+**[Roadmap](docs/roadmap.md)**
 
-See [docs/roadmap.md](docs/roadmap.md) for the plan.
+## Why Avulse
 
-## Filters
+- **Everything WinDivert does**: the NETWORK, NETWORK_FORWARD, FLOW, SOCKET and REFLECT layers,
+  flags, priorities and batching, plus a WinDivert-compatible shim for existing programs,
+  [pydivert](https://github.com/ffalcinelli/pydivert) and
+  [jdivert](https://github.com/ffalcinelli/jdivert).
+- **An Ethernet layer**: whole frames, non-IP traffic (ARP, LLDP) and VLAN tags.
+- **Wireshark display filters**, with Wireshark 4.6 semantics checked against `tshark`, strict
+  types and helpful errors.
+- **One engine everywhere**: parsing and matching are `no_std` Rust that never allocates or
+  panics while matching, so the same code runs in user space and in kernel drivers.
+- **Exact matching in the kernel** (planned): eBPF generated at runtime on Linux, verified
+  bytecode in the Windows driver and the macOS system extension.
 
-Filters are Wireshark display filters, restricted to fields that one packet determines, plus a
-few extensions:
+## Try it
 
-```text
+The [playground](https://ffalcinelli.github.io/avulse/#playground) runs the filter engine in your
+browser. Or install the CLI:
+
+```console
+$ cargo install --locked --git https://github.com/ffalcinelli/avulse avulse-cli
+```
+
+A filter is a Wireshark display filter, plus `let` macros and metadata such as the direction:
+
+```filter
 let lan = {10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16}
 let web = tcp.port in {80, 443, 8000..8100}
 
 outbound and ip.dst not in $lan and $web
 ```
-
-- Wireshark 4.6+ semantics, including multi-value fields: `ip.addr == x` matches either address,
-  and `ip.addr != x` means neither is `x`. `!==` means "some differs". `ip.dst not in {…}` needs an
-  IPv4 header, like any comparison: one with an absent field is false.
-- Quantifiers: `all tcp.port > 1024`, `any ip.addr !== 10.0.0.1`, `all ip.addr in {10.0.0.0/8}`.
-- Arithmetic and functions: `tcp.srcport + 1 == tcp.dstport`, `{len(tcp) - 20} * 2 > 8`,
-  `max(tcp.srcport, tcp.dstport) < 1024`, `abs(tcp.srcport - tcp.dstport) == 1`. Results are signed.
-  As in Wireshark, `-` and `/` need spaces (`tcp.srcport-1` is a field name), and `{ }` groups
-  arithmetic while `( )` groups tests.
-- Raw bytes: `@tcp.flags == 50:02` is the bytes a field covers on the wire (a bit field covers the
-  bytes it sits in).
-- Layers: `vlan.id#2 == 20` (the second 802.1Q tag), `vlan.id#[-1]` (the last one), `ip#1`. Each
-  VLAN tag is a layer; every other protocol is layer 1, since Avulse reads only the outer headers.
-  A `#` followed by a digit or `[` is the layer operator, even after a space; any other `#` starts
-  a comment.
-- Sets, ranges and CIDR: `tcp.dstport in {80, 443, 8000..8100}`, `ip.src == 10.0.0.0/8`.
-- Slices and payloads: `eth.src[0:3] == 00:11:22`, `tcp.payload contains "GET"`, `len(udp.payload) > 512`.
-- Multi-range slices concatenate: `eth.src[0:3,5] == 00:11:22:55`. Ranges that do not fit are
-  skipped, as in Wireshark.
-- `&` on bytes and addresses: `udp.payload[2:2] & 80:00`, `eth.dst[0] & 1`,
-  `ip.src & 255.255.0.0 == 192.168.0.0`. The result is as long as the shorter side; bare, it tests
-  for a set bit. `upper()` and `lower()` fold the string fields (`upper(iface) == "ETH0"`).
-  An integer compared with bytes is one byte, as in Wireshark 4.6: `tcp[13] == 18` is 0x12, and
-  `tcp[13] == 18:` is 0x18.
-- Wireshark's value labels, quoted or not and in any case: `ip.proto == "TCP"`,
-  `icmp.type == "Echo (ping) request"`, `ip.flags.df == "Set"`. A label shared by several values
-  (`"Unassigned"`) is an error: write the number.
-- Regular expressions: `tcp.payload matches "^(GET|POST) "`, or `~`. As in Wireshark they are
-  case-insensitive unless the pattern says `(?-i)`, and they run over bytes (`"\\x81"` matches that
-  byte). They need the `regex` feature (the CLI has it) and run in user space only.
-- Symbolic constants: `tcp.flags & syn`, `icmp.type == echo-request`, `eth.type == arp`.
-- Extensions: `inbound`, `outbound`, `loopback`, `iface`, `layer`, `event`, `process.pid`,
-  `local.addr`, `remote.port`, `let` macros used as `$name`.
-- Fields that need stream state or application dissectors (`tcp.seq`, `tcp.stream`, `http.*`,
-  `dns.*`) are rejected with a hint.
-
-### Differences from Wireshark
-
-A test compares Avulse with `tshark` 4.6+ on every supported field and on a table of filters
-(`AVULSE_TSHARK=1 cargo test -p avulse-filter tshark`). A filter that Wireshark accepts and Avulse
-compiles selects the same packets, except:
-
-- **Outermost headers only.** Wireshark also dissects the datagram that an ICMP error quotes, so
-  there `udp.port == 53` matches a "port unreachable" about DNS traffic. Avulse, like WinDivert,
-  reads only the outer headers.
-- **No partial headers.** Wireshark keeps the fields of a header that is cut short as far as the
-  bytes go. Avulse drops the incomplete header, so its fields are absent.
-- **No reassembly.** As in Wireshark with reassembly off, `tcp.len` is absent on IP fragments.
-- **Stricter types.** A literal that cannot fit the field is an error (`ip.flags == 8`), where
-  Wireshark accepts the filter and never matches.
-- **Fixed evaluation buffers.** The evaluator does not allocate, so that it can run in a kernel.
-  A multi-range slice or a `&` on two byte strings must be at most 32 bytes long, so every range
-  needs a bounded length (`tcp.payload[0:2,-3:]`, not `[0:2,1:]`). Arithmetic and `&` combine
-  every pair of occurrences into at most 4 values (`tcp.port + tcp.port`, not three of them). A
-  filter that could exceed either limit is a compile error. A single-range slice has no limit.
-- **Rust regular expressions, not PCRE2.** Look-around and backreferences are rejected, and `$`
-  matches only at the very end, where PCRE2 also matches before a final newline (write `\n?$`).
-- **Signed arithmetic throughout.** `tcp.srcport + -1` subtracts one; Wireshark converts the `-1` to
-  the field's unsigned type. Avulse also accepts literals beyond the field's range in arithmetic
-  (`tcp.srcport + 1 == 65536`), which Wireshark rejects.
-
-Avulse also accepts some syntax that Wireshark rejects, and that never changes the meaning of a
-Wireshark filter: `#`, `//` and `/* */` comments, `let` macros, `~=` (Wireshark 3.6's spelling of
-`!==`), space-separated sets (`{80 443}`), the metadata fields above, and symbolic constants
-Wireshark does not know (`syn`, `echo-request`, `ip.proto == tcp`, where Wireshark reads `tcp` as
-the protocol field).
 
 ```console
 $ avulse filter check 'tcp.prot == 80'
@@ -105,6 +65,57 @@ $ avulse filter explain 'tcp.flags & syn and not tcp.flags & ack'
 
 $ avulse filter fields     # every supported field
 ```
+
+The [guide](https://ffalcinelli.github.io/avulse/guide/) describes the language, and lists the
+[differences from Wireshark](https://ffalcinelli.github.io/avulse/guide/filters/wireshark.html)
+and the [fields](https://ffalcinelli.github.io/avulse/guide/reference/fields.html).
+
+## As a library
+
+The crates are not on crates.io yet; use them from Git
+([details](https://ffalcinelli.github.io/avulse/guide/libraries/rust.html)).
+
+```rust
+use avulse_filter::{Filter, Meta};
+use avulse_proto::{Link, Packet};
+
+let filter = Filter::compile("outbound and tcp.dstport in {80, 443}").unwrap();
+
+// IPv4 + TCP SYN from 192.168.1.2:40000 to 93.184.215.14:443.
+let bytes = [
+    0x45, 0, 0, 40, 0, 1, 0x40, 0, 64, 6, 0, 0, 192, 168, 1, 2, 93, 184, 215, 14, //
+    0x9c, 0x40, 0x01, 0xbb, 0, 0, 0, 1, 0, 0, 0, 0, 0x50, 0x02, 0xff, 0xff, 0, 0, 0, 0,
+];
+let packet = Packet::parse(&bytes, Link::Ip);
+assert!(filter.matches(&packet, &Meta { outbound: true, ..Meta::default() }));
+```
+
+## Workspace
+
+| Crate | State |
+| --- | --- |
+| [`avulse-proto`](crates/proto) | Zero-copy parsing of Ethernet, VLAN/QinQ, ARP, IPv4, IPv6, TCP, UDP, ICMP, ICMPv6; checksums. `no_std`. |
+| [`avulse-filter`](crates/filter) | The filter language: parser, type checker, IR, evaluator. `no_std` + `alloc`. |
+| [`avulse-cli`](crates/cli) | The `avulse` command: `filter check`, `fmt`, `explain`, `eval`, `fields`. |
+| [`avulse-wasm`](crates/wasm) | The engine compiled to WebAssembly, for the playground. |
+| `avulse`, `avulse-ebpf`, `avulse-backend-linux`, `avulse-capi`, `avulse-windivert-compat` | Placeholders for the coming phases. |
+| [`bindings/python`](bindings/python) | The `avulse` PyPI package: a placeholder. |
+
+## Related projects
+
+- [WinDivert](https://reqrypt.org/windivert.html): the Windows packet diverter whose model Avulse
+  extends.
+- [ebpfdivert](https://github.com/ffalcinelli/ebpfdivert): a WinDivert-compatible library for
+  Linux, built on eBPF; Avulse reuses its kernel-side design.
+- [pydivert](https://github.com/ffalcinelli/pydivert) and
+  [jdivert](https://github.com/ffalcinelli/jdivert): Python and Java bindings for WinDivert and
+  ebpfdivert.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the checks and conventions, and
+[docs/roadmap.md](docs/roadmap.md) and [docs/implementation-plan.md](docs/implementation-plan.md)
+for the design and the next steps.
 
 ## License
 
