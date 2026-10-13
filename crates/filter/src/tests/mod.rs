@@ -693,6 +693,14 @@ fn regex_patterns_escape_invalid_utf8() {
 }
 
 #[test]
+fn bitwise_and_chains_resolve_once() {
+    // Resolving each side twice made a left-nested chain exponential.
+    let chain = alloc::format!("tcp.flags{} == 0", " & 1".repeat(40));
+    compile(&chain);
+    assert_eq!(compile("frame[0] & 18 & 1 == 0").warnings().len(), 1);
+}
+
+#[test]
 fn raw_field_bytes() {
     let f = https_syn();
     assert!(check(

@@ -334,11 +334,11 @@ impl<'a> Checker<'a> {
             }
             Operand::BitAnd(a, b, _) => {
                 // `&` commutes, so a literal on the left takes the type of the right side.
-                let (a, b) = match self.resolve(a, None)? {
-                    Resolved::Literal(_) => (b, a),
-                    Resolved::Typed(_) => (a, b),
+                // Resolve each side once: a left-nested chain would otherwise be exponential.
+                let (a, b, a_t) = match self.resolve(a, None)? {
+                    Resolved::Typed(t) => (a, b, t),
+                    Resolved::Literal(_) => (b, a, self.typed(b)?),
                 };
-                let a_t = self.typed(a)?;
                 let bytes = |ty| matches!(ty, Ty::Bytes | Ty::Ether | Ty::Ipv4 | Ty::Ipv6);
                 let ty = match a_t.ty {
                     Ty::Uint(_) | Ty::Int => None,
