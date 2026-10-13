@@ -7,21 +7,25 @@ use alloc::vec::Vec;
 
 use crate::ast::{self, ArithOp, Expr, MacroBody, Operand, Quant, RelOp, Rhs};
 use crate::error::{Diagnostic, Result, Span};
-use crate::fields::{self, Consts, Origin, Ty};
+use crate::fields::{self, Consts, Field, Origin, Ty};
 use crate::ir::{self, CmpOp, Lit, SetItem, Test, Value};
-use crate::lit;
+use crate::{labels, lit};
 
-/// The type (and symbolic constants) that the other side of a relation expects.
+/// The type (and symbolic names) that the other side of a relation expects.
 #[derive(Clone, Copy)]
 struct Ctx {
     ty: Ty,
+    /// Avulse's symbolic constants (`syn`, `echo-request`).
     consts: Consts,
+    /// The field compared with, whose Wireshark labels also name values (`"TCP"`).
+    field: Option<Field>,
 }
 
 /// The context of an arithmetic operand.
 const INT: Ctx = Ctx {
     ty: Ty::Int,
     consts: &[],
+    field: None,
 };
 
 struct Typed {
@@ -35,6 +39,10 @@ impl Typed {
         Ctx {
             ty: self.ty,
             consts: self.consts,
+            field: match self.value {
+                Value::Field(f) | Value::Layer(f, _) => Some(f),
+                _ => None,
+            },
         }
     }
 }
@@ -198,7 +206,7 @@ impl<'a> Checker<'a> {
                 if !forced
                     && let Some(ctx) = ctx
                     && matches!(ctx.ty, Ty::Uint(_))
-                    && let Some(v) = fields::constant(ctx.consts, w)
+                    && let Some(v) = named(ctx, w, *span)?
                 {
                     return typed(Value::Lit(Lit::Uint(v)), ctx.ty, &[]);
                 }
@@ -392,8 +400,15 @@ impl<'a> Checker<'a> {
         }
         let mismatch = || {
             let mut d = Diagnostic::error(span, format!("expected {}, found `{o}`", ctx.ty));
-            if !ctx.consts.is_empty() {
-                let names: Vec<&str> = ctx.consts.iter().map(|(n, _)| *n).take(8).collect();
+            let labels = ctx.field.map_or(&[][..], labels::labels);
+            let names: Vec<&str> = ctx
+                .consts
+                .iter()
+                .chain(labels)
+                .map(|(n, _)| *n)
+                .take(8)
+                .collect();
+            if !names.is_empty() {
                 d = d.help(format!("known names: {}", names.join(", ")));
             }
             d
@@ -411,7 +426,7 @@ impl<'a> Checker<'a> {
             },
             (Operand::Char(c, _), Ty::Int) => Lit::Int(*c as i64),
             (Operand::Word(w, _), Ty::Uint(bits)) => {
-                let v = fields::constant(ctx.consts, w)
+                let v = named(ctx, w, span)?
                     .or_else(|| lit::parse_uint(w))
                     .ok_or_else(|| {
                         if looks_like_field(w) {
@@ -423,10 +438,38 @@ impl<'a> Checker<'a> {
                 Lit::Uint(fits(v, bits, span)?)
             }
             (Operand::Char(c, _), Ty::Uint(bits)) => Lit::Uint(fits(*c as u64, bits, span)?),
-            (Operand::Word(w, _), Ty::Bool) => Lit::Bool(lit::parse_bool(w).ok_or_else(|| {
-                Diagnostic::error(span, format!("expected a boolean, found `{w}`"))
-                    .help("booleans are 1, 0, true or false")
-            })?),
+            // Labels such as `"Set"`, quoted or not, as in Wireshark.
+            (Operand::Str(s, _), Ty::Uint(_) | Ty::Bool)
+                if !ctx.consts.is_empty()
+                    || ctx.field.is_some_and(|f| !labels::labels(f).is_empty()) =>
+            {
+                let w = core::str::from_utf8(s).unwrap_or_default();
+                let v = named(ctx, w, span)?.ok_or_else(|| {
+                    let mut d = mismatch();
+                    d.message = format!(
+                        "`\"{w}\"` is not a name of a value of `{}`",
+                        ctx.field.map_or("", |f| fields::def(f).name)
+                    );
+                    d
+                })?;
+                match ctx.ty {
+                    Ty::Bool => Lit::Bool(v != 0),
+                    _ => Lit::Uint(v),
+                }
+            }
+            (Operand::Word(w, _), Ty::Bool) => match lit::parse_bool(w) {
+                Some(b) => Lit::Bool(b),
+                None => match named(ctx, w, span)? {
+                    Some(v) => Lit::Bool(v != 0),
+                    None => {
+                        return Err(Diagnostic::error(
+                            span,
+                            format!("expected a boolean, found `{w}`"),
+                        )
+                        .help("booleans are 1, 0, true or false"));
+                    }
+                },
+            },
             (Operand::Word(w, _), Ty::Ipv4) => match lit::parse_ipv4(w) {
                 Some((a, p)) => Lit::Ipv4(a, p),
                 None if lit::parse_ipv6(w).is_some() => {
@@ -697,6 +740,33 @@ fn expect_typed(r: Resolved<'_>) -> Result<Typed> {
     }
 }
 
+/// A name for a value of the field the context compares with: Avulse's constants first, then
+/// Wireshark's labels, case-insensitively. A label of several values is an error: Wireshark then
+/// compares the displayed text, which Avulse does not do.
+fn named(ctx: Ctx, w: &str, span: Span) -> Result<Option<u64>> {
+    if let Some(v) = fields::constant(ctx.consts, w) {
+        return Ok(Some(v));
+    }
+    let Some(f) = ctx.field else {
+        return Ok(None);
+    };
+    let mut found = labels::labels(f)
+        .iter()
+        .filter(|(l, _)| l.eq_ignore_ascii_case(w))
+        .map(|&(_, v)| v);
+    let Some(first) = found.next() else {
+        return Ok(None);
+    };
+    if found.any(|v| v != first) {
+        return Err(Diagnostic::error(
+            span,
+            format!("`{w}` names several values of `{}`", fields::def(f).name),
+        )
+        .help("write the number, or a set of them with `in {…}`"));
+    }
+    Ok(Some(first))
+}
+
 fn contains_ctx(ty: Ty) -> Ctx {
     Ctx {
         // A protocol keeps its type so that `tcp contains 80` is rejected as in Wireshark.
@@ -705,6 +775,7 @@ fn contains_ctx(ty: Ty) -> Ctx {
             _ => Ty::Bytes,
         },
         consts: &[],
+        field: None,
     }
 }
 

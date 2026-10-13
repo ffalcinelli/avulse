@@ -25,6 +25,7 @@ pub mod error;
 mod eval;
 pub mod fields;
 pub mod ir;
+mod labels;
 mod lexer;
 mod lit;
 pub mod meta;

@@ -42,6 +42,9 @@ outbound and ip.dst not in $lan and $web
 - Slices and payloads: `eth.src[0:3] == 00:11:22`, `tcp.payload contains "GET"`, `len(udp.payload) > 512`.
   An integer compared with bytes is one byte, as in Wireshark 4.6: `tcp[13] == 18` is 0x12, and
   `tcp[13] == 18:` is 0x18.
+- Wireshark's value labels, quoted or not and in any case: `ip.proto == "TCP"`,
+  `icmp.type == "Echo (ping) request"`, `ip.flags.df == "Set"`. A label shared by several values
+  (`"Unassigned"`) is an error: write the number.
 - Symbolic constants: `tcp.flags & syn`, `icmp.type == echo-request`, `eth.type == arp`.
 - Extensions: `inbound`, `outbound`, `loopback`, `iface`, `layer`, `event`, `process.pid`,
   `local.addr`, `remote.port`, `let` macros used as `$name`.

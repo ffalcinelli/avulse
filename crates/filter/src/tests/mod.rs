@@ -488,6 +488,38 @@ fn layers() {
 }
 
 #[test]
+fn wireshark_labels() {
+    let f = https_syn();
+    assert!(check(
+        "ip.proto == \"TCP\" and ip.proto == tcp and ip.proto == Tcp",
+        &f
+    ));
+    assert!(check(
+        "eth.type == IPv4 and ip.proto in {\"UDP\", \"TCP\"} and ip.proto > \"ICMP\"",
+        &f
+    ));
+    assert!(check(
+        "ip.flags.df == \"Set\" and ip.flags.mf == \"not set\" and tcp.flags.syn == Set",
+        &f
+    ));
+    assert!(check("ip.dsfield.dscp == \"Default\"", &f));
+    let e = error("ip.proto == \"Unassigned\"");
+    assert!(e.message.contains("several values"), "{e:?}");
+    assert!(error("ip.proto == \"6\"").message.contains("not a name"));
+    assert!(
+        error("tcp.port == \"80\"")
+            .message
+            .contains("expected an unsigned integer")
+    );
+    assert!(
+        error("ip.proto == foo")
+            .help
+            .unwrap()
+            .contains("known names")
+    );
+}
+
+#[test]
 fn errors_explain_themselves() {
     let e = error("tcp.prot == 80");
     assert!(e.message.contains("unknown field `tcp.prot`"));
