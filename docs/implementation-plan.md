@@ -42,7 +42,9 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 - **`tshark` 4.7.4 is installed** (with `dftest`, handy to see how Wireshark compiles a filter). Docker
   works without sudo: to run the tshark test against another Wireshark, build an image (e.g.
   `ubuntu:24.04` + `ppa:wireshark-dev/stable` gives 4.6) and put a `tshark` wrapper script that runs
-  `docker run -i --rm <image> tshark "$@"` first on the `PATH`. That takes about 6 minutes instead of 20 s.
+  `docker run -i --rm <image> tshark "$@"` first on the `PATH`. That takes about 12 minutes instead
+  of 50 s. `scripts/gen_labels.py` takes such commands too, to merge the label tables of 4.6 and
+  4.7 (4.7 renamed many `ip.proto` labels).
 - **Pushing:**
   - Push over SSH with `GIT_SSH_COMMAND='ssh -o BatchMode=yes' git push …`, wrapped in `timeout`.
     Plain SSH pushes have hung.

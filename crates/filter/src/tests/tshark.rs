@@ -8,6 +8,7 @@
 
 extern crate std;
 
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -962,7 +963,10 @@ fn compare(caps: &[Capture], filter: &str, skip: &[&str]) -> Vec<String> {
 
 /// `field == "label"` for the first, middle and last unambiguous label of every field that has
 /// labels, which checks that `labels.rs` was generated from the right tables.
-fn label_filters() -> Vec<String> {
+///
+/// `labels.rs` merges several Wireshark versions, so with `known` (the `(field, label)` pairs of
+/// the tshark at hand, from [`tshark_labels`]) only labels that this tshark has are picked.
+fn label_filters(known: Option<&BTreeSet<(String, String)>>) -> Vec<String> {
     let mut out = Vec::new();
     for d in FIELDS {
         let table = crate::labels::labels(d.field);
@@ -974,6 +978,7 @@ fn label_filters() -> Vec<String> {
                     .all(|(m, w)| !m.eq_ignore_ascii_case(l) || w == v)
             })
             .map(|(l, _)| *l)
+            .filter(|l| known.is_none_or(|k| k.contains(&(d.name.to_string(), l.to_string()))))
             .collect();
         let mut picks = [0, unique.len() / 2, unique.len().saturating_sub(1)]
             .into_iter()
@@ -987,6 +992,29 @@ fn label_filters() -> Vec<String> {
     out
 }
 
+/// The `(field, label)` pairs of the tshark at hand, from `tshark -G values`.
+fn tshark_labels() -> BTreeSet<(String, String)> {
+    let out = Command::new("tshark")
+        .args(["-G", "values"])
+        .output()
+        .expect("tshark -G values");
+    let mut known = BTreeSet::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let cols: Vec<&str> = line.split('\t').collect();
+        match cols.as_slice() {
+            ["V" | "V64", field, _, label] => {
+                known.insert((field.to_string(), label.to_string()));
+            }
+            ["T", field, yes, no] => {
+                known.insert((field.to_string(), yes.to_string()));
+                known.insert((field.to_string(), no.to_string()));
+            }
+            _ => {}
+        }
+    }
+    known
+}
+
 /// A bare presence test for every Wireshark field, so that new fields are covered too.
 fn presence_filters() -> Vec<&'static str> {
     FIELDS
@@ -994,6 +1022,29 @@ fn presence_filters() -> Vec<&'static str> {
         .filter(|d| d.origin == Origin::Wireshark && d.name != "frame.interface_name")
         .map(|d| d.name)
         .collect()
+}
+
+/// `filter fmt` must print every table filter in a form that compiles to the same IR, and
+/// printing it again must not change it. This needs no tshark.
+#[test]
+fn fmt_round_trips() {
+    let mut filters: Vec<String> = AGREE.iter().chain(OUTER).map(|f| f.to_string()).collect();
+    filters.extend(label_filters(None));
+    #[cfg(feature = "regex")]
+    filters.extend(MATCHES.iter().map(|f| f.to_string()));
+    let mut failures = Vec::new();
+    for f in &filters {
+        let printed = format!("{}", crate::parse(f).expect("table filters parse"));
+        let again = crate::parse(&printed).map(|p| format!("{p}"));
+        let same_ir = Filter::compile(&printed).map(|c| c.ir().clone()).ok()
+            == Filter::compile(f).map(|c| c.ir().clone()).ok();
+        if again.as_deref() != Ok(printed.as_str()) || !same_ir {
+            failures.push(format!(
+                "{f:?} prints as {printed:?}, which reprints as {again:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
@@ -1005,7 +1056,7 @@ fn tshark_agrees() {
     let mut filters = presence_filters();
     filters.extend_from_slice(AGREE);
     run(&filters, |f| compare(&caps, f, SKIP));
-    let labels = label_filters();
+    let labels = label_filters(Some(&tshark_labels()));
     run(&labels, |f| compare(&caps, f, SKIP));
     #[cfg(feature = "regex")]
     run(MATCHES, |f| compare(&caps, f, SKIP));
