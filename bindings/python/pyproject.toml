@@ -10,13 +10,31 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "LGPL-3.0-or-later OR GPL-2.0-or-later"
 authors = [{ name = "Fabio Falcinelli", email = "fabio.falcinelli@gmail.com" }]
-keywords = ["windivert", "packet", "divert", "ebpf", "firewall"]
+keywords = ["windivert", "packet", "divert", "ebpf", "firewall", "wireshark"]
 classifiers = [
     "Development Status :: 1 - Planning",
-    "Topic :: System :: Networking",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Networking",
+    "Topic :: System :: Networking :: Firewalls",
+    "Typing :: Typed",
 ]
 
+[project.optional-dependencies]
+docs = ["pdoc>=15"]
+
 [project.urls]
-Homepage = "https://github.com/ffalcinelli/avulse"
+Homepage = "https://ffalcinelli.github.io/avulse/"
+Documentation = "https://ffalcinelli.github.io/avulse/api/python/"
 Repository = "https://github.com/ffalcinelli/avulse"
+Issues = "https://github.com/ffalcinelli/avulse/issues"
+Roadmap = "https://github.com/ffalcinelli/avulse/blob/main/docs/roadmap.md"
