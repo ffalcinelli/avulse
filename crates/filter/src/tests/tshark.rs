@@ -24,10 +24,10 @@ use super::pcap;
 use crate::fields::{FIELDS, Origin};
 use crate::{Filter, Meta};
 
-type Corpus = Vec<(&'static str, Vec<u8>)>;
+pub(super) type Corpus = Vec<(&'static str, Vec<u8>)>;
 
 /// Ethernet frames covering every header the parser knows, plus truncations.
-fn corpus() -> Corpus {
+pub(super) fn corpus() -> Corpus {
     let v4 = |proto: u8, l4: &[u8]| eth(et::IPV4, &[], &ipv4(proto, l4));
     let v6 = |next: u8, l4: &[u8]| eth(et::IPV6, &[], &ipv6(next, l4));
     let truncated = |mut f: Vec<u8>, len: usize| {
@@ -210,7 +210,7 @@ fn corpus() -> Corpus {
 }
 
 /// The untagged IP frames of the corpus without their Ethernet header.
-fn raw_corpus(eth_corpus: &Corpus) -> Corpus {
+pub(super) fn raw_corpus(eth_corpus: &Corpus) -> Corpus {
     eth_corpus
         .iter()
         .filter(|(_, f)| matches!(f.get(12..14), Some([0x08, 0x00] | [0x86, 0xdd])))
@@ -228,7 +228,7 @@ fn raw_corpus(eth_corpus: &Corpus) -> Corpus {
 const SKIP: &[&str] = &["unreachable", "trunc_ip", "trunc_tcp", "trunc_v6_ext"];
 
 /// Filters that must select the same frames in tshark and Avulse.
-const AGREE: &[&str] = &[
+pub(super) const AGREE: &[&str] = &[
     // Quantifiers and absent fields.
     "ip.addr == 192.168.1.2",
     "ip.addr != 10.0.0.1",
@@ -682,7 +682,7 @@ const AGREE: &[&str] = &[
 
 /// Filters that read only headers both sides parse, so they must agree on the [`SKIP`] frames
 /// too.
-const OUTER: &[&str] = &[
+pub(super) const OUTER: &[&str] = &[
     "icmp",
     "icmp.type == 3 and icmp.code == 3",
     "icmp.ident",
@@ -697,7 +697,7 @@ const OUTER: &[&str] = &[
 
 /// Where Avulse knowingly differs from Wireshark: `(filter, frames only tshark selects, frames
 /// only Avulse selects)`.
-const DIVERGENCES: &[(&str, &[&str], &[&str])] = &[
+pub(super) const DIVERGENCES: &[(&str, &[&str], &[&str])] = &[
     // The IPv4/UDP datagram quoted by an ICMP error: Wireshark dissects it, Avulse does not.
     ("udp.port == 2", &["unreachable"], &[]),
     ("udp and icmp", &["unreachable"], &[]),
@@ -785,7 +785,7 @@ const PCRE_ONLY: &[&str] = &[
 ];
 
 /// Avulse extensions that tshark rejects. They never change what a valid Wireshark filter means.
-const EXTENSIONS: &[&str] = &[
+pub(super) const EXTENSIONS: &[&str] = &[
     "tcp.port in {80 443}",
     "ip.addr ~= 10.0.0.1",
     "tcp // comment",
@@ -1046,7 +1046,7 @@ fn tshark_labels() -> BTreeSet<(String, String)> {
 }
 
 /// A bare presence test for every Wireshark field, so that new fields are covered too.
-fn presence_filters() -> Vec<&'static str> {
+pub(super) fn presence_filters() -> Vec<&'static str> {
     FIELDS
         .iter()
         .filter(|d| d.origin == Origin::Wireshark && d.name != "frame.interface_name")

@@ -60,6 +60,7 @@
 extern crate alloc;
 
 pub mod ast;
+pub mod bytecode;
 mod check;
 /// Diagnostics and source spans.
 pub mod error;
@@ -130,6 +131,17 @@ impl Filter {
     /// Whether the filter needs user space: `matches` cannot run in the kernel backends.
     pub fn user_space_only(&self) -> bool {
         self.ir.user_space_only()
+    }
+
+    /// The filter compiled to bytecode, for the kernel backends. Its results are the same as
+    /// [`matches`](Self::matches)'s.
+    ///
+    /// # Errors
+    ///
+    /// [`bytecode::EncodeError`]: the filter uses `matches` (which runs in user space only), or is
+    /// too deep or too large for the bytecode.
+    pub fn program(&self) -> Result<bytecode::Program, bytecode::EncodeError> {
+        bytecode::Program::compile(&self.ir)
     }
 
     /// The compiled, simplified test. Its `Display` is what `avulse filter explain` prints.

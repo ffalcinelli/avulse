@@ -83,6 +83,7 @@ pub enum Origin {
 pub type Consts = &'static [(&'static str, u64)];
 
 /// The registry entry of a [`Field`].
+#[derive(Debug)]
 pub struct FieldDef {
     /// The name used in filters, such as `tcp.dstport`.
     pub name: &'static str,
