@@ -436,6 +436,8 @@ const AGREE: &[&str] = &[
     "@tcp.flags == 50:02",
     "@tcp.flags.syn == 02:",
     "@tcp.flags & 00:02",
+    "any @tcp.port == 00:50",
+    "all @tcp.port == 00:50",
     "@ip.flags == 40:",
     "@ip.src == 0a:00:00:01",
     "len(@tcp.flags) == 2",

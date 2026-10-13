@@ -713,6 +713,10 @@ fn raw_field_bytes() {
         &f
     ));
     assert!(check("len(@frame.len) == 0 and @tcp.flags[1] & 02:", &f));
+    assert!(check(
+        "any @tcp.port == 01:bb and not all @tcp.port == 01:bb",
+        &f
+    ));
     let tagged = eth_tpids(
         ethertype::IPV4,
         &[(ethertype::VLAN, 3), (ethertype::VLAN, 4)],

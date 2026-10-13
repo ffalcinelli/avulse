@@ -247,9 +247,13 @@ impl Parser {
         };
         let operand_follows = match self.peek_at(1) {
             Tok::Word(w) => !is_keyword(w),
-            Tok::Str(_) | Tok::Char(_) | Tok::Macro(_) | Tok::LParen | Tok::LBrace | Tok::Minus => {
-                true
-            }
+            Tok::Str(_)
+            | Tok::Char(_)
+            | Tok::Macro(_)
+            | Tok::LParen
+            | Tok::LBrace
+            | Tok::Minus
+            | Tok::At => true,
             _ => false,
         };
         if !operand_follows {
