@@ -29,6 +29,7 @@ outbound and ip.dst not in $lan and $web
 - Wireshark 4.6+ semantics, including multi-value fields: `ip.addr == x` matches either address,
   and `ip.addr != x` means neither is `x`. `!==` means "some differs". `ip.dst not in {…}` needs an
   IPv4 header, like any comparison: one with an absent field is false.
+- Quantifiers: `all tcp.port > 1024`, `any ip.addr !== 10.0.0.1`, `all ip.addr in {10.0.0.0/8}`.
 - Sets, ranges and CIDR: `tcp.dstport in {80, 443, 8000..8100}`, `ip.src == 10.0.0.0/8`.
 - Slices and payloads: `eth.src[0:3] == 00:11:22`, `tcp.payload contains "GET"`, `len(udp.payload) > 512`.
   An integer compared with bytes is one byte, as in Wireshark 4.6: `tcp[13] == 18` is 0x12, and

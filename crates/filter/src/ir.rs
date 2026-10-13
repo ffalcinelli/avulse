@@ -5,7 +5,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt;
 
-pub use crate::ast::{Slice, SliceEnd};
+pub use crate::ast::{Quant, Slice, SliceEnd};
 use crate::fields::{Field, def};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15,20 +15,27 @@ pub enum Test {
     Exists(Value),
     /// Some occurrence is true or non-zero.
     Truthy(Value),
+    /// `quant` pair of occurrences satisfies `op`.
     Cmp {
         lhs: Value,
         op: CmpOp,
+        quant: Quant,
         rhs: Value,
     },
-    /// Some occurrence is in the set.
-    In {
+    /// Set membership. Without `negate`, `quant` occurrence is in the set (`in`, `all … in`). With
+    /// it, the value is present and that is not the case (`not in`, `all … not in`), as in
+    /// Wireshark.
+    Member {
         lhs: Value,
         set: Vec<SetItem>,
+        quant: Quant,
+        negate: bool,
     },
-    /// Some occurrence contains some occurrence of `rhs` as a byte substring.
+    /// `quant` occurrence of `lhs` contains an occurrence of `rhs` as a byte substring.
     Contains {
         lhs: Value,
         rhs: Value,
+        quant: Quant,
     },
     Not(Box<Test>),
     And(Vec<Test>),
@@ -36,21 +43,18 @@ pub enum Test {
     Xor(Box<Test>, Box<Test>),
 }
 
-/// Comparison with Wireshark's quantifiers over multi-occurrence fields (`ip.addr`, `tcp.port`,
-/// `vlan.id`). Every comparison is false when either side has no occurrence. These semantics are
-/// checked against tshark 4.6 and 4.7 by `tests/tshark.rs`; `not in` lowers to "exists and not
-/// in". Known differences: Avulse matches only the outermost headers (not the datagram an ICMP
-/// error quotes) and drops a header that is cut short, where Wireshark keeps the fields that fit.
+/// A comparison, applied to pairs of occurrences of multi-occurrence fields (`ip.addr`,
+/// `tcp.port`, `vlan.id`) under a [`Quant`]. Wireshark's operators are an operator and a
+/// quantifier: `==` is any `Eq`, `!=` all `Ne` (since Wireshark 3.6), `===` all `Eq`, `!==` any
+/// `Ne`, and the orderings any; an explicit `any`/`all` overrides it. Every comparison is false when
+/// either side has no occurrence. These semantics are checked against tshark 4.6 and 4.7 by
+/// `tests/tshark.rs`. Known differences: Avulse matches only the outermost headers (not the
+/// datagram an ICMP error quotes) and drops a header that is cut short, where Wireshark keeps the
+/// fields that fit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CmpOp {
-    /// Some pair is equal.
     Eq,
-    /// No pair is equal (`!=` is `all_ne` since Wireshark 3.6).
     Ne,
-    /// Every pair is equal.
-    AllEq,
-    /// Some pair differs.
-    AnyNe,
     Lt,
     Le,
     Gt,
@@ -141,9 +145,26 @@ impl fmt::Display for Test {
             Test::Const(b) => write!(f, "{b}"),
             Test::Exists(v) => write!(f, "(exists {v})"),
             Test::Truthy(v) => write!(f, "(true {v})"),
-            Test::Cmp { lhs, op, rhs } => write!(f, "({op} {lhs} {rhs})"),
-            Test::In { lhs, set } => {
-                write!(f, "(in {lhs}")?;
+            Test::Cmp {
+                lhs,
+                op,
+                quant,
+                rhs,
+            } => match (quant, op) {
+                (Quant::Any, CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge) => {
+                    write!(f, "({op} {lhs} {rhs})")
+                }
+                _ => write!(f, "({quant}_{op} {lhs} {rhs})"),
+            },
+            Test::Member {
+                lhs,
+                set,
+                quant,
+                negate,
+            } => {
+                let all = if *quant == Quant::All { "all_" } else { "" };
+                let not = if *negate { "not_" } else { "" };
+                write!(f, "({all}{not}in {lhs}")?;
                 for item in set {
                     match item {
                         SetItem::One(l) => write!(f, " {l}")?,
@@ -152,7 +173,10 @@ impl fmt::Display for Test {
                 }
                 write!(f, ")")
             }
-            Test::Contains { lhs, rhs } => write!(f, "(contains {lhs} {rhs})"),
+            Test::Contains { lhs, rhs, quant } => match quant {
+                Quant::Any => write!(f, "(contains {lhs} {rhs})"),
+                Quant::All => write!(f, "(all_contains {lhs} {rhs})"),
+            },
             Test::Not(t) => write!(f, "(not {t})"),
             Test::And(v) => list(f, "and", v),
             Test::Or(v) => list(f, "or", v),
@@ -172,10 +196,8 @@ fn list(f: &mut fmt::Formatter<'_>, name: &str, v: &[Test]) -> fmt::Result {
 impl fmt::Display for CmpOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            CmpOp::Eq => "any_eq",
-            CmpOp::Ne => "all_ne",
-            CmpOp::AllEq => "all_eq",
-            CmpOp::AnyNe => "any_ne",
+            CmpOp::Eq => "eq",
+            CmpOp::Ne => "ne",
             CmpOp::Lt => "lt",
             CmpOp::Le => "le",
             CmpOp::Gt => "gt",

@@ -34,6 +34,8 @@ pub enum Expr {
     And(Vec<Expr>),
     Not(Box<Expr>, Span),
     Rel {
+        /// `any` or `all` before the relation; `None` keeps the operator's default.
+        quant: Option<Quant>,
         lhs: Operand,
         op: RelOp,
         rhs: Rhs,
@@ -41,6 +43,15 @@ pub enum Expr {
     },
     /// A bare operand: a field or protocol (presence), a flag, a bitwise `&` (non-zero), a macro.
     Test(Operand),
+}
+
+/// How a relation combines the occurrences of multi-valued operands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quant {
+    /// Some pair (or value) satisfies the relation.
+    Any,
+    /// Every pair (or value) satisfies the relation.
+    All,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,7 +161,16 @@ impl Expr {
                 write!(f, "not ")?;
                 e.fmt_prec(f, p)?;
             }
-            Expr::Rel { lhs, op, rhs, .. } => {
+            Expr::Rel {
+                quant,
+                lhs,
+                op,
+                rhs,
+                ..
+            } => {
+                if let Some(q) = quant {
+                    write!(f, "{q} ")?;
+                }
                 write!(f, "{lhs} {op} ")?;
                 match rhs {
                     Rhs::Operand(o) => write!(f, "{o}")?,
@@ -209,6 +229,15 @@ impl fmt::Display for RelOp {
             RelOp::Matches => "matches",
             RelOp::In => "in",
             RelOp::NotIn => "not in",
+        })
+    }
+}
+
+impl fmt::Display for Quant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Quant::Any => "any",
+            Quant::All => "all",
         })
     }
 }

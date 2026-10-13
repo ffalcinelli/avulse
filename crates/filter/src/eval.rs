@@ -6,7 +6,7 @@ use core::net::IpAddr;
 use avulse_proto::{Network, Packet, VlanTag, ethertype};
 
 use crate::fields::Field;
-use crate::ir::{CmpOp, Lit, SetItem, SliceEnd, Test, Value};
+use crate::ir::{CmpOp, Lit, Quant, SetItem, SliceEnd, Test, Value};
 use crate::meta::Meta;
 
 /// Most occurrences a value can have (two VLAN tags, source and destination).
@@ -96,49 +96,88 @@ fn test<'a>(t: &'a Test, cx: &Cx<'a>) -> bool {
         Test::Const(b) => *b,
         Test::Exists(v) => value(v, cx).n > 0,
         Test::Truthy(v) => value(v, cx).as_slice().iter().any(V::truthy),
-        Test::Cmp { lhs, op, rhs } => {
+        Test::Cmp {
+            lhs,
+            op,
+            quant,
+            rhs,
+        } => {
             let (l, r) = (value(lhs, cx), value(rhs, cx));
-            let (l, r) = (l.as_slice(), r.as_slice());
-            if l.is_empty() || r.is_empty() {
-                return false;
-            }
-            let pairs = || l.iter().flat_map(|a| r.iter().map(move |b| (a, b)));
-            match op {
-                CmpOp::Eq => pairs().any(|(a, b)| eq(a, b)),
-                CmpOp::Ne => pairs().all(|(a, b)| !eq(a, b)),
-                CmpOp::AllEq => pairs().all(|(a, b)| eq(a, b)),
-                CmpOp::AnyNe => pairs().any(|(a, b)| !eq(a, b)),
-                CmpOp::Lt => pairs().any(|(a, b)| ord(a, b) == Some(Ordering::Less)),
-                CmpOp::Le => pairs()
-                    .any(|(a, b)| matches!(ord(a, b), Some(Ordering::Less | Ordering::Equal))),
-                CmpOp::Gt => pairs().any(|(a, b)| ord(a, b) == Some(Ordering::Greater)),
-                CmpOp::Ge => pairs()
-                    .any(|(a, b)| matches!(ord(a, b), Some(Ordering::Greater | Ordering::Equal))),
-            }
+            pairs(*quant, l.as_slice(), r.as_slice(), |a, b| {
+                compare(*op, a, b)
+            })
         }
-        Test::In { lhs, set } => value(lhs, cx).as_slice().iter().any(|v| {
-            set.iter().any(|item| match item {
-                SetItem::One(l) => eq(v, &lit(l)),
-                SetItem::Range(lo, hi) => {
-                    matches!(ord(v, &lit(lo)), Some(Ordering::Greater | Ordering::Equal))
-                        && matches!(ord(v, &lit(hi)), Some(Ordering::Less | Ordering::Equal))
-                }
-            })
-        }),
-        Test::Contains { lhs, rhs } => {
+        Test::Member {
+            lhs,
+            set,
+            quant,
+            negate,
+        } => {
+            let l = value(lhs, cx);
+            let l = l.as_slice();
+            !l.is_empty() && quantify(*quant, l.iter().map(|v| member(v, set))) != *negate
+        }
+        Test::Contains { lhs, rhs, quant } => {
             let (l, r) = (value(lhs, cx), value(rhs, cx));
-            l.as_slice().iter().filter_map(V::bytes).any(|h| {
-                r.as_slice()
-                    .iter()
-                    .filter_map(V::bytes)
-                    .any(|n| contains(h, n))
-            })
+            let bytes_only = |v: &&V<'_>| v.bytes().is_some();
+            let has = |vals: &Vals<'_>| vals.as_slice().iter().any(|v| v.bytes().is_some());
+            has(&l)
+                && has(&r)
+                && quantify(
+                    *quant,
+                    l.as_slice().iter().filter(bytes_only).flat_map(|a| {
+                        r.as_slice()
+                            .iter()
+                            .filter(bytes_only)
+                            .map(move |b| matches!((a.bytes(), b.bytes()), (Some(h), Some(n)) if contains(h, n)))
+                    }),
+                )
         }
         Test::Not(t) => !test(t, cx),
         Test::And(v) => v.iter().all(|t| test(t, cx)),
         Test::Or(v) => v.iter().any(|t| test(t, cx)),
         Test::Xor(a, b) => test(a, cx) != test(b, cx),
     }
+}
+
+fn quantify(q: Quant, mut it: impl Iterator<Item = bool>) -> bool {
+    match q {
+        Quant::Any => it.any(|b| b),
+        Quant::All => it.all(|b| b),
+    }
+}
+
+/// `pred` over every pair of occurrences, under `q`; false when either side is empty.
+fn pairs<'a>(q: Quant, l: &[V<'a>], r: &[V<'a>], pred: impl Fn(&V<'a>, &V<'a>) -> bool) -> bool {
+    !l.is_empty()
+        && !r.is_empty()
+        && quantify(
+            q,
+            l.iter()
+                .flat_map(|a| r.iter().map(move |b| (a, b)))
+                .map(|(a, b)| pred(a, b)),
+        )
+}
+
+fn compare(op: CmpOp, a: &V<'_>, b: &V<'_>) -> bool {
+    match op {
+        CmpOp::Eq => eq(a, b),
+        CmpOp::Ne => !eq(a, b),
+        CmpOp::Lt => ord(a, b) == Some(Ordering::Less),
+        CmpOp::Le => matches!(ord(a, b), Some(Ordering::Less | Ordering::Equal)),
+        CmpOp::Gt => ord(a, b) == Some(Ordering::Greater),
+        CmpOp::Ge => matches!(ord(a, b), Some(Ordering::Greater | Ordering::Equal)),
+    }
+}
+
+fn member(v: &V<'_>, set: &[SetItem]) -> bool {
+    set.iter().any(|item| match item {
+        SetItem::One(l) => eq(v, &lit(l)),
+        SetItem::Range(lo, hi) => {
+            matches!(ord(v, &lit(lo)), Some(Ordering::Greater | Ordering::Equal))
+                && matches!(ord(v, &lit(hi)), Some(Ordering::Less | Ordering::Equal))
+        }
+    })
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {

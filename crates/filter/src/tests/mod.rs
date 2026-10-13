@@ -339,6 +339,39 @@ fn wireshark_conformance() {
 }
 
 #[test]
+fn quantifiers_and_leading_dots() {
+    let f = https_syn();
+    assert!(check("all tcp.port > 400 and not all tcp.port > 500", &f));
+    assert!(check("any tcp.port === 443 and all tcp.port !== 80", &f));
+    assert!(!check("all tcp.port !== 443", &f));
+    assert!(check(
+        "all tcp.port in {443, 51000} and not all tcp.port in {443}",
+        &f
+    ));
+    // `not in` negates the quantified membership, and needs the field.
+    assert!(!check("any tcp.port not in {443}", &f));
+    assert!(check("all tcp.port not in {443}", &f));
+    assert!(!check("all udp.port not in {443}", &f));
+    assert!(!check("all tcp.port == tcp.port", &f));
+    assert!(!check("all udp.port > 0", &f));
+    assert!(check(
+        ".ip.src == 10.0.0.1 and ip.src == .ip.src and .tcp",
+        &f
+    ));
+    assert_eq!(
+        compile("all tcp.port in {80}").ir().to_string_lossy(),
+        "(all_in tcp.port 80)"
+    );
+    assert_eq!(
+        compile("any tcp.port != 80").ir().to_string_lossy(),
+        "(any_ne tcp.port 80)"
+    );
+    assert!(error("all tcp").message.contains("needs a relation"));
+    assert!(error(".tcp.prot == 1").message.contains("unknown field"));
+    assert!(error("tcp.port == .80").message.contains("unknown field"));
+}
+
+#[test]
 fn errors_explain_themselves() {
     let e = error("tcp.prot == 80");
     assert!(e.message.contains("unknown field `tcp.prot`"));

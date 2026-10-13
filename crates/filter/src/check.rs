@@ -5,7 +5,7 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::ast::{self, Expr, MacroBody, Operand, RelOp, Rhs};
+use crate::ast::{self, Expr, MacroBody, Operand, Quant, RelOp, Rhs};
 use crate::error::{Diagnostic, Result, Span};
 use crate::fields::{self, Consts, Origin, Ty};
 use crate::ir::{CmpOp, Lit, SetItem, Test, Value};
@@ -115,7 +115,13 @@ impl<'a> Checker<'a> {
             Expr::And(v) => Test::And(v.iter().map(|e| self.test(e)).collect::<Result<_>>()?),
             Expr::Xor(a, b) => Test::Xor(Box::new(self.test(a)?), Box::new(self.test(b)?)),
             Expr::Not(e, _) => Test::Not(Box::new(self.test(e)?)),
-            Expr::Rel { lhs, op, rhs, span } => self.relation(lhs, *op, rhs, *span)?,
+            Expr::Rel {
+                quant,
+                lhs,
+                op,
+                rhs,
+                span,
+            } => self.relation(*quant, lhs, *op, rhs, *span)?,
             Expr::Test(o) => self.bare(o)?,
         })
     }
@@ -124,7 +130,8 @@ impl<'a> Checker<'a> {
     fn bare(&mut self, o: &'a Operand) -> Result<Test> {
         match o {
             Operand::Word(w, span) => {
-                if let Some(d) = fields::lookup(w) {
+                let (name, forced) = field_name(w);
+                if let Some(d) = fields::lookup(name) {
                     if d.origin == Origin::Flag {
                         return Ok(Test::Truthy(Value::Field(d.field)));
                     }
@@ -142,6 +149,7 @@ impl<'a> Checker<'a> {
                     return Ok(Test::Exists(Value::Field(d.field)));
                 }
                 match lit::parse_bool(w) {
+                    _ if forced => Err(unknown_field(name, *span)),
                     Some(b) if !w.starts_with(['0', '1']) => Ok(Test::Const(b)),
                     _ if lit::looks_like_literal(w) => Err(not_a_test(o)),
                     _ => Err(unknown_field(w, *span)),
@@ -175,14 +183,19 @@ impl<'a> Checker<'a> {
         let typed = |value, ty, consts| Ok(Resolved::Typed(Typed { value, ty, consts }));
         match o {
             Operand::Word(w, span) => {
-                if let Some(ctx) = ctx
+                let (name, forced) = field_name(w);
+                if !forced
+                    && let Some(ctx) = ctx
                     && matches!(ctx.ty, Ty::Uint(_))
                     && let Some(v) = fields::constant(ctx.consts, w)
                 {
                     return typed(Value::Lit(Lit::Uint(v)), ctx.ty, &[]);
                 }
-                if let Some(d) = fields::lookup(w) {
+                if let Some(d) = fields::lookup(name) {
                     return typed(Value::Field(d.field), d.ty, d.consts);
+                }
+                if forced {
+                    return Err(unknown_field(name, *span));
                 }
                 match ctx {
                     Some(ctx) => {
@@ -392,7 +405,14 @@ impl<'a> Checker<'a> {
         Ok(lit)
     }
 
-    fn relation(&mut self, lhs: &'a Operand, op: RelOp, rhs: &'a Rhs, span: Span) -> Result<Test> {
+    fn relation(
+        &mut self,
+        quant: Option<Quant>,
+        lhs: &'a Operand,
+        op: RelOp,
+        rhs: &'a Rhs,
+        span: Span,
+    ) -> Result<Test> {
         match (op, rhs) {
             (RelOp::Matches, _) => Err(Diagnostic::error(
                 span,
@@ -405,14 +425,11 @@ impl<'a> Checker<'a> {
                     return Err(proto_compare(lhs));
                 }
                 let set = self.set(set, &l)?;
-                Ok(if op == RelOp::NotIn {
-                    // Wireshark: the field is present and none of its values is in the set.
-                    Test::And(vec![
-                        Test::Exists(l.value.clone()),
-                        Test::Not(Box::new(Test::In { lhs: l.value, set })),
-                    ])
-                } else {
-                    Test::In { lhs: l.value, set }
+                Ok(Test::Member {
+                    lhs: l.value,
+                    set,
+                    quant: quant.unwrap_or(Quant::Any),
+                    negate: op == RelOp::NotIn,
                 })
             }
             (_, Rhs::Operand(r)) => {
@@ -453,9 +470,10 @@ impl<'a> Checker<'a> {
                     return Ok(Test::Contains {
                         lhs: l.value,
                         rhs: r.value,
+                        quant: quant.unwrap_or(Quant::Any),
                     });
                 }
-                self.comparison(lhs, l, op, r, span)
+                self.comparison(lhs, l, op, quant, r, span)
             }
             (_, Rhs::Set(_)) => Err(Diagnostic::error(span, format!("`{op}` cannot take a set"))),
         }
@@ -466,6 +484,7 @@ impl<'a> Checker<'a> {
         lhs: &Operand,
         l: Typed,
         op: RelOp,
+        quant: Option<Quant>,
         r: Typed,
         span: Span,
     ) -> Result<Test> {
@@ -478,15 +497,16 @@ impl<'a> Checker<'a> {
                 format!("cannot compare {} with {}", l.ty, r.ty),
             ));
         }
-        let op = match op {
-            RelOp::Eq => CmpOp::Eq,
-            RelOp::Ne => CmpOp::Ne,
-            RelOp::AllEq => CmpOp::AllEq,
-            RelOp::AnyNe => CmpOp::AnyNe,
-            RelOp::Lt => CmpOp::Lt,
-            RelOp::Le => CmpOp::Le,
-            RelOp::Gt => CmpOp::Gt,
-            RelOp::Ge => CmpOp::Ge,
+        // Each Wireshark operator is a comparison and a default quantifier.
+        let (op, default) = match op {
+            RelOp::Eq => (CmpOp::Eq, Quant::Any),
+            RelOp::Ne => (CmpOp::Ne, Quant::All),
+            RelOp::AllEq => (CmpOp::Eq, Quant::All),
+            RelOp::AnyNe => (CmpOp::Ne, Quant::Any),
+            RelOp::Lt => (CmpOp::Lt, Quant::Any),
+            RelOp::Le => (CmpOp::Le, Quant::Any),
+            RelOp::Gt => (CmpOp::Gt, Quant::Any),
+            RelOp::Ge => (CmpOp::Ge, Quant::Any),
             _ => return Err(Diagnostic::error(span, format!("unexpected `{op}`"))),
         };
         let ordering = matches!(op, CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge);
@@ -506,6 +526,7 @@ impl<'a> Checker<'a> {
         Ok(Test::Cmp {
             lhs: l.value,
             op,
+            quant: quant.unwrap_or(default),
             rhs: r.value,
         })
     }
@@ -614,6 +635,15 @@ fn fits(v: u64, bits: u8, span: Span) -> Result<u64> {
             span,
             format!("{v} does not fit in {bits} bits"),
         ))
+    }
+}
+
+/// The field name a word refers to, and whether a leading `.` forces it to be a field (as in
+/// Wireshark, where `.ip.src` is never read as a literal).
+fn field_name(w: &str) -> (&str, bool) {
+    match w.strip_prefix('.') {
+        Some(name) => (name, true),
+        None => (w, false),
     }
 }
 

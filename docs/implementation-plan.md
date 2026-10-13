@@ -142,6 +142,28 @@ anything else is built on the IR.
 **Acceptance:** every behaviour above is either confirmed or fixed, the tshark test passes locally, and
 any intentional divergence is documented in the README and in the comment on `ir::CmpOp`.
 
+### Step 1b: Wireshark syntax coverage
+
+**Why.** Step 1 made the meaning of supported filters match tshark, but a lot of Wireshark 4.6 syntax
+was still rejected. Each item lands as its own commit, with tshark rows in `src/tests/tshark.rs`
+and unit tests, before the bytecode freezes the IR. Out of scope: `string()`, `dec()`, `hex()`,
+`float()` and `vals()` (they need formatting and allocation), and `${field}` references (they
+refer to the packet selected in the Wireshark GUI).
+
+1. [x] `any`/`all` quantifiers and leading-dot field names (`.ip.src`). The IR is now `CmpOp` plus
+   `Quant` (`Test::Cmp`, `Test::Member`, `Test::Contains`). tshark confirmed that `any`/`all`
+   override the operator's default quantifier, pairs are cartesian, and `[all] … not in` is
+   "present and not ([all] … in)".
+2. [ ] Arithmetic (`+ - * / %`, unary `-`, `{…}` grouping, in sets too), `max`/`min`/`abs`: signed
+   results, pairwise over occurrences, division by zero gives no value.
+3. [ ] Layer operator `#n` / `#[a-b]`: VLAN tags are layers, every other field is layer 1.
+4. [ ] Value-string labels (`ip.proto == "TCP"`), generated from `tshark -G values` by
+   `scripts/gen_labels.py`.
+5. [ ] `&` on bytes, `upper()`/`lower()` on string fields.
+6. [ ] Multi-range slices (`frame[0:2,4]`), capped at 32 bytes.
+7. [ ] `matches` / `~` behind the `regex` feature (`regex-automata`, user space only).
+8. [ ] `@field` raw bytes, checked against the field positions in `tshark -T pdml`.
+
 ### Step 2: Bytecode, verifier and `no_std` interpreter
 
 **Why.** The Windows driver and the macOS system extension must not walk a heap IR built by user
@@ -280,6 +302,7 @@ starting each phase, expand it into steps in this file, in the same format as ab
 - [x] Phase 1: `avulse-proto`
 - [x] Phase 1: filter front half (parser, checker, IR, evaluator, CLI)
 - [x] Step 1: tshark validation
+- [ ] Step 1b: Wireshark syntax coverage (quantifiers done)
 - [ ] Step 2: bytecode + verifier + interpreter
 - [ ] Step 3: WinDivert front-end + 241 vectors + `filter convert`
 - [ ] Step 4: `matches`, bitwise on bytes, TCP options, fuzz targets

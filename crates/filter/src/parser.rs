@@ -207,8 +207,16 @@ impl Parser {
 
     fn relation(&mut self) -> Result<Expr> {
         let start = self.span();
+        let quant = self.quantifier();
         let lhs = self.value()?;
         let Some(op) = self.relop() else {
+            if let Some(q) = quant {
+                return Err(Diagnostic::error(
+                    start.to(self.prev_span()),
+                    format!("`{q}` needs a relation after it"),
+                )
+                .help(format!("e.g. `{q} tcp.port > 1024`")));
+            }
             return Ok(lhs);
         };
         let lhs = into_operand(lhs, start, &format!("before `{op}`"))?;
@@ -220,7 +228,32 @@ impl Parser {
             }
         };
         let span = start.to(self.prev_span());
-        Ok(Expr::Rel { lhs, op, rhs, span })
+        Ok(Expr::Rel {
+            quant,
+            lhs,
+            op,
+            rhs,
+            span,
+        })
+    }
+
+    /// `any` or `all` in front of a relation (a word that is followed by an operand).
+    fn quantifier(&mut self) -> Option<Quant> {
+        let q = match self.peek() {
+            Tok::Word(w) if w == "any" => Quant::Any,
+            Tok::Word(w) if w == "all" => Quant::All,
+            _ => return None,
+        };
+        let operand_follows = match self.peek_at(1) {
+            Tok::Word(w) => !is_keyword(w),
+            Tok::Str(_) | Tok::Char(_) | Tok::Macro(_) | Tok::LParen => true,
+            _ => false,
+        };
+        if !operand_follows {
+            return None;
+        }
+        self.bump();
+        Some(q)
     }
 
     /// A primary, optionally followed by `& primary` chains.
@@ -362,6 +395,8 @@ fn is_keyword(w: &str) -> bool {
             | "lt"
             | "le"
             | "let"
+            | "any"
+            | "all"
             | "AND"
             | "OR"
             | "XOR"
@@ -450,6 +485,12 @@ mod tests {
             "tcp.payload contains \"GET\""
         );
         assert_eq!(fmt("http.host ~ \"x\""), "http.host matches \"x\"");
+        assert_eq!(
+            fmt("all tcp.port > 1 or any ip.addr not in {1.2.3.4}"),
+            "all tcp.port > 1 or any ip.addr not in {1.2.3.4}"
+        );
+        // `any`/`all` are quantifiers only in front of an operand.
+        assert_eq!(fmt("not all .tcp.port<1"), "not all .tcp.port < 1");
     }
 
     #[test]
