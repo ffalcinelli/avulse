@@ -9,6 +9,7 @@ members = [
     "crates/capi",
     "crates/windivert-compat",
     "crates/cli",
+    "crates/wasm",
 ]
 
 [workspace.package]

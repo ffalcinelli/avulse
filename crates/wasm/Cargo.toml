@@ -1,0 +1,25 @@
+[package]
+name = "avulse-wasm"
+description = "WebAssembly build of the filter engine for the playground on the Avulse website."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+avulse-filter = { workspace = true, features = ["regex"] }
+avulse-proto.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+
+# The bindings only exist on wasm32, so native builds and tests stay light.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+serde-wasm-bindgen = "0.6.5"
+wasm-bindgen = "0.2.129"
+
+[lints]
+workspace = true
