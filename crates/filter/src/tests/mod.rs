@@ -520,6 +520,64 @@ fn wireshark_labels() {
 }
 
 #[test]
+fn bytes_and_case() {
+    let f = dns_query();
+    // `&` on bytes: as long as the shorter side; a bare one tests for a set bit.
+    assert!(check(
+        "udp.payload[2:2] & 80:00 == 00:00 and udp.payload[2:2] & 01:00",
+        &f
+    ));
+    assert!(check(
+        "udp.payload & ff:ff == 12:34 and len(udp.payload & ff:ff:ff:ff:ff) == 4",
+        &f
+    ));
+    assert!(check(
+        "udp.payload[0] & 0x10 == 0x10 and not udp.payload[0] & 0x10 == 10",
+        &f
+    ));
+    assert!(check(
+        "1 & udp.payload[1] == 00 and eth.src & 00:00:00:00:00:ff == 00:00:00:00:00:55",
+        &f
+    ));
+    assert!(check(
+        "ip.src & 255.0.0.0 == 10.0.0.0 and ip.dst & 255.255.0.0 == 192.168.0.0/16",
+        &f
+    ));
+    assert!(!check("udp.payload[0:2] & udp.payload[2:2]", &f));
+    // `upper`/`lower` fold ASCII case without copying.
+    let meta = Meta {
+        iface: Some("Eth0"),
+        process_name: Some("Curl.EXE"),
+        ..Meta::default()
+    };
+    assert!(check_with(
+        "upper(iface) == \"ETH0\" and lower(iface) == \"eth0\"",
+        &f,
+        &meta
+    ));
+    assert!(check_with(
+        "lower(process.name) contains \"curl.e\"",
+        &f,
+        &meta
+    ));
+    assert!(check_with(
+        "upper(iface)[0:2] == \"ET\" and len(lower(iface)) == 4",
+        &f,
+        &meta
+    ));
+    assert!(check_with(
+        "upper(iface) > \"EAAA\" and not iface == \"eth0\"",
+        &f,
+        &meta
+    ));
+    assert!(
+        error("upper(tcp.payload) == \"X\"")
+            .message
+            .contains("string field")
+    );
+}
+
+#[test]
 fn errors_explain_themselves() {
     let e = error("tcp.prot == 80");
     assert!(e.message.contains("unknown field `tcp.prot`"));
@@ -553,7 +611,8 @@ fn errors_explain_themselves() {
     );
     assert!(error("80 == 80").message.contains("two values"));
     assert!(error("tcp == 1").message.contains("protocol"));
-    assert!(error("tcp[13] & 0x18").help.unwrap().contains("tcp.flags"));
+    assert!(error("tcp & 0x18").message.contains("protocol"));
+    assert!(error("iface & 1").message.contains("integers or bytes"));
     assert!(error("80").message.contains("not a test"));
     assert!(error("len(tcp.payload)").help.unwrap().contains("> 0"));
     assert!(
@@ -584,7 +643,7 @@ fn errors_explain_themselves() {
             .contains("cannot compare")
     );
     assert!(
-        error("upper(tcp.payload) == \"x\"")
+        error("string(tcp.port) == \"80\"")
             .message
             .contains("not supported")
     );

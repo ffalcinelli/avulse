@@ -12,6 +12,10 @@ use crate::meta::Meta;
 /// Most occurrences a value can have (two VLAN tags, source and destination).
 const MAX: usize = 4;
 
+/// Longest byte string computed during evaluation (slices of addresses, `&` on bytes). Longer
+/// results give no value.
+const OWNED: usize = 32;
+
 #[derive(Clone, Copy, Debug)]
 enum V<'a> {
     Bool(bool),
@@ -21,19 +25,33 @@ enum V<'a> {
     Ipv6([u8; 16], u8),
     Ether([u8; 6]),
     Bytes(&'a [u8]),
-    /// Bytes copied out of an address by a slice.
-    Owned([u8; 16], u8),
+    /// A computed byte string: a slice of an address, or the result of `&`.
+    Owned([u8; OWNED], u8),
+    /// A string seen through `upper()` (`true`) or `lower()`, folded as it is compared.
+    Folded(&'a [u8], bool),
 }
 
-impl V<'_> {
+impl<'a> V<'a> {
+    /// The bytes of the value, as stored (before any case folding).
     fn bytes(&self) -> Option<&[u8]> {
         match self {
             V::Ipv4(a, _) => Some(a),
             V::Ipv6(a, _) => Some(a),
             V::Ether(m) => Some(m),
-            V::Bytes(b) => Some(b),
-            V::Owned(a, n) => Some(&a[..*n as usize]),
+            V::Bytes(b) | V::Folded(b, _) => Some(b),
+            V::Owned(a, n) => a.get(..*n as usize),
             V::Bool(_) | V::Uint(_) | V::Int(_) => None,
+        }
+    }
+
+    /// The bytes of the value as comparisons see them.
+    fn seq(&self) -> Option<Seq<'_>> {
+        match self {
+            V::Folded(b, upper) => Some(Seq {
+                b,
+                fold: Some(*upper),
+            }),
+            v => v.bytes().map(|b| Seq { b, fold: None }),
         }
     }
 
@@ -60,8 +78,35 @@ impl V<'_> {
             V::Bool(b) => *b,
             V::Uint(v) => *v != 0,
             V::Int(v) => *v != 0,
-            v => v.bytes().is_some_and(|b| !b.is_empty()),
+            // Wireshark's NOT_ALL_ZERO: some byte is set.
+            v => v.bytes().is_some_and(|b| b.iter().any(|&c| c != 0)),
         }
+    }
+}
+
+/// A byte string, possibly folded to upper or lower case on the fly, so that `upper()` and
+/// `lower()` need no copy.
+#[derive(Clone, Copy)]
+struct Seq<'a> {
+    b: &'a [u8],
+    fold: Option<bool>,
+}
+
+impl<'a> Seq<'a> {
+    fn len(&self) -> usize {
+        self.b.len()
+    }
+
+    fn iter(self) -> impl Iterator<Item = u8> + 'a {
+        self.b.iter().map(move |&c| match self.fold {
+            Some(true) => c.to_ascii_uppercase(),
+            Some(false) => c.to_ascii_lowercase(),
+            None => c,
+        })
+    }
+
+    fn eq(self, other: Seq<'_>) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
     }
 }
 
@@ -139,17 +184,16 @@ fn test<'a>(t: &'a Test, cx: &Cx<'a>) -> bool {
         }
         Test::Contains { lhs, rhs, quant } => {
             let (l, r) = (value(lhs, cx), value(rhs, cx));
-            let bytes_only = |v: &&V<'_>| v.bytes().is_some();
-            let has = |vals: &Vals<'_>| vals.as_slice().iter().any(|v| v.bytes().is_some());
+            let bytes_only = |v: &&V<'_>| v.seq().is_some();
+            let has = |vals: &Vals<'_>| vals.as_slice().iter().any(|v| v.seq().is_some());
             has(&l)
                 && has(&r)
                 && quantify(
                     *quant,
                     l.as_slice().iter().filter(bytes_only).flat_map(|a| {
-                        r.as_slice()
-                            .iter()
-                            .filter(bytes_only)
-                            .map(move |b| matches!((a.bytes(), b.bytes()), (Some(h), Some(n)) if contains(h, n)))
+                        r.as_slice().iter().filter(bytes_only).map(
+                            move |b| matches!((a.seq(), b.seq()), (Some(h), Some(n)) if contains(h, n)),
+                        )
                     }),
                 )
         }
@@ -200,8 +244,40 @@ fn member(v: &V<'_>, set: &[SetItem]) -> bool {
     })
 }
 
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.is_empty() || haystack.windows(needle.len()).any(|w| w == needle)
+fn contains(haystack: Seq<'_>, needle: Seq<'_>) -> bool {
+    needle.len() == 0
+        || haystack.b.windows(needle.len()).any(|w| {
+            Seq {
+                b: w,
+                fold: haystack.fold,
+            }
+            .eq(needle)
+        })
+}
+
+/// Byte-wise AND, as long as the shorter operand. Addresses keep their type, so that
+/// `ip.src & 255.0.0.0 == 10.0.0.0` compares addresses.
+fn and_bytes<'a>(a: &V<'a>, b: &V<'a>) -> Option<V<'a>> {
+    fn and<const N: usize>(x: &[u8; N], y: &[u8; N]) -> [u8; N] {
+        core::array::from_fn(|i| x[i] & y[i])
+    }
+    Some(match (a, b) {
+        (V::Ipv4(x, _), V::Ipv4(y, _)) => V::Ipv4(and(x, y), 32),
+        (V::Ipv6(x, _), V::Ipv6(y, _)) => V::Ipv6(and(x, y), 128),
+        (V::Ether(x), V::Ether(y)) => V::Ether(and(x, y)),
+        _ => {
+            let (x, y) = (a.bytes()?, b.bytes()?);
+            let n = x.len().min(y.len());
+            if n > OWNED {
+                return None;
+            }
+            let mut out = [0; OWNED];
+            for (o, (p, q)) in out.iter_mut().zip(x.iter().zip(y)) {
+                *o = p & q;
+            }
+            V::Owned(out, n as u8)
+        }
+    })
 }
 
 fn prefix_eq(a: &[u8], b: &[u8], bits: u8) -> bool {
@@ -224,7 +300,7 @@ fn eq(a: &V<'_>, b: &V<'_>) -> bool {
         (V::Ipv4(x, p), V::Ipv4(y, q)) => prefix_eq(x, y, *p.min(q)),
         (V::Ipv6(x, p), V::Ipv6(y, q)) => prefix_eq(x, y, *p.min(q)),
         (V::Ipv4(..), V::Ipv6(..)) | (V::Ipv6(..), V::Ipv4(..)) => false,
-        _ => matches!((a.bytes(), b.bytes()), (Some(x), Some(y)) if x == y),
+        _ => matches!((a.seq(), b.seq()), (Some(x), Some(y)) if x.eq(y)),
     }
 }
 
@@ -238,7 +314,7 @@ fn ord(a: &V<'_>, b: &V<'_>) -> Option<Ordering> {
         | (_, V::Bool(_))
         | (V::Uint(_) | V::Int(_), _)
         | (_, V::Uint(_) | V::Int(_)) => None,
-        _ => Some(a.bytes()?.cmp(b.bytes()?)),
+        _ => Some(a.seq()?.iter().cmp(b.seq()?.iter())),
     }
 }
 
@@ -273,7 +349,10 @@ fn value<'a>(v: &'a Value, cx: &Cx<'a>) -> Vals<'a> {
                 for y in b.as_slice() {
                     match (x, y) {
                         (V::Uint(x), V::Uint(y)) => out.push(V::Uint(x & y)),
-                        _ => out.opt(x.int().zip(y.int()).map(|(x, y)| V::Int(x & y))),
+                        _ => match x.int().zip(y.int()) {
+                            Some((x, y)) => out.push(V::Int(x & y)),
+                            None => out.opt(and_bytes(x, y)),
+                        },
                     }
                 }
             }
@@ -325,6 +404,16 @@ fn value<'a>(v: &'a Value, cx: &Cx<'a>) -> Vals<'a> {
             out
         }
         Value::Count(base) => Vals::one(V::Uint(value(base, cx).n as u64)),
+        Value::Case { upper, value: base } => {
+            let mut out = Vals::new();
+            for x in value(base, cx).as_slice() {
+                // Strings are borrowed from the metadata, so they keep their lifetime.
+                if let V::Bytes(b) | V::Folded(b, _) = *x {
+                    out.push(V::Folded(b, *upper));
+                }
+            }
+            out
+        }
     }
 }
 
@@ -342,12 +431,13 @@ fn slice<'a>(v: V<'a>, start: i64, end: SliceEnd) -> Option<V<'a>> {
     }
     let (s, e) = (s as usize, e as usize);
     Some(match v {
-        V::Bytes(b) => V::Bytes(&b[s..e]),
+        V::Bytes(b) => V::Bytes(b.get(s..e)?),
+        V::Folded(b, upper) => V::Folded(b.get(s..e)?, upper),
         other => {
-            let src = other.bytes()?;
-            let mut a = [0; 16];
-            a[..e - s].copy_from_slice(&src[s..e]);
-            V::Owned(a, (e - s) as u8)
+            let src = other.bytes()?.get(s..e)?;
+            let mut a = [0; OWNED];
+            a.get_mut(..src.len())?.copy_from_slice(src);
+            V::Owned(a, src.len() as u8)
         }
     })
 }

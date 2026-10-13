@@ -288,23 +288,49 @@ impl<'a> Checker<'a> {
                 typed(Value::Neg(Box::new(a)), Ty::Int, &[])
             }
             Operand::BitAnd(a, b, _) => {
+                // `&` commutes, so a literal on the left takes the type of the right side.
+                let (a, b) = match self.resolve(a, None)? {
+                    Resolved::Literal(_) => (b, a),
+                    Resolved::Typed(_) => (a, b),
+                };
                 let a_t = self.typed(a)?;
-                if !matches!(a_t.ty, Ty::Uint(_) | Ty::Int) {
-                    return Err(Diagnostic::error(a.span(), format!("`&` needs an integer, but `{a}` is {}", a_t.ty))
-                        .help("slices are bytes: compare them with bytes, or use an integer field such as `tcp.flags`"));
-                }
+                let bytes = |ty| matches!(ty, Ty::Bytes | Ty::Ether | Ty::Ipv4 | Ty::Ipv6);
+                let ty = match a_t.ty {
+                    Ty::Uint(_) | Ty::Int => None,
+                    ty if bytes(ty) => Some(ty),
+                    Ty::Proto => {
+                        return Err(Diagnostic::error(
+                            a.span(),
+                            format!("`{a}` is a protocol, which `&` cannot take"),
+                        )
+                        .help(format!("slice it first, e.g. `{a}[0:2] & 00:ff`")));
+                    }
+                    ty => {
+                        return Err(Diagnostic::error(
+                            a.span(),
+                            format!("`&` needs integers or bytes, but `{a}` is {ty}"),
+                        ));
+                    }
+                };
                 let b_t = expect_typed(self.resolve(b, Some(a_t.ctx()))?)?;
-                if !matches!(b_t.ty, Ty::Uint(_) | Ty::Int) {
+                let fits = match ty {
+                    None => matches!(b_t.ty, Ty::Uint(_) | Ty::Int),
+                    Some(_) => bytes(b_t.ty),
+                };
+                if !fits {
                     return Err(Diagnostic::error(
                         b.span(),
-                        format!("`&` needs an integer, but `{b}` is {}", b_t.ty),
+                        format!("cannot combine {} and {} with `&`", a_t.ty, b_t.ty),
                     ));
                 }
-                typed(
-                    Value::BitAnd(Box::new(a_t.value), Box::new(b_t.value)),
-                    a_t.ty,
-                    a_t.consts,
-                )
+                let value = Value::BitAnd(Box::new(a_t.value), Box::new(b_t.value));
+                match ty {
+                    // Integers keep their constants: `tcp.flags & syn == syn`.
+                    None => typed(value, a_t.ty, a_t.consts),
+                    // Bytes keep the type only when both sides share it: `ip.src & 255.0.0.0`.
+                    Some(ty) if ty == b_t.ty => typed(value, ty, &[]),
+                    Some(_) => typed(value, Ty::Bytes, &[]),
+                }
             }
             Operand::Call(name, args, span) => {
                 if let "max" | "min" = name.as_str() {
@@ -328,6 +354,25 @@ impl<'a> Checker<'a> {
                     ));
                 };
                 match name.as_str() {
+                    "upper" | "lower" => {
+                        let t = self.typed(arg)?;
+                        if t.ty != Ty::Str {
+                            return Err(Diagnostic::error(
+                                arg.span(),
+                                format!("`{name}` takes a string field, but `{arg}` is {}", t.ty),
+                            )
+                            .help("the string fields are `iface`, `frame.interface_name` and `process.name`"));
+                        }
+                        let upper = name == "upper";
+                        typed(
+                            Value::Case {
+                                upper,
+                                value: Box::new(t.value),
+                            },
+                            Ty::Str,
+                            &[],
+                        )
+                    }
                     "abs" => {
                         let v = self.numeric(arg, "`abs`")?;
                         typed(Value::Abs(Box::new(v)), Ty::Int, &[])
@@ -356,7 +401,9 @@ impl<'a> Checker<'a> {
                         *span,
                         format!("the function `{name}` is not supported"),
                     )
-                    .help("supported functions: `len`, `count`, `max`, `min`, `abs`")),
+                    .help(
+                        "supported functions: `len`, `count`, `max`, `min`, `abs`, `upper`, `lower`",
+                    )),
                 }
             }
         }

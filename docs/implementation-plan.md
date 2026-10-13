@@ -159,7 +159,7 @@ refer to the packet selected in the Wireshark GUI).
 3. [x] Layer operator `#n` / `#[a-b]`: VLAN tags are layers, every other field is layer 1.
 4. [x] Value-string labels (`ip.proto == "TCP"`), generated from `tshark -G values` by
    `scripts/gen_labels.py`.
-5. [ ] `&` on bytes, `upper()`/`lower()` on string fields.
+5. [x] `&` on bytes, `upper()`/`lower()` on string fields.
 6. [ ] Multi-range slices (`frame[0:2,4]`), capped at 32 bytes.
 7. [ ] `matches` / `~` behind the `regex` feature (`regex-automata`, user space only).
 8. [ ] `@field` raw bytes, checked against the field positions in `tshark -T pdml`.
@@ -302,7 +302,7 @@ starting each phase, expand it into steps in this file, in the same format as ab
 - [x] Phase 1: `avulse-proto`
 - [x] Phase 1: filter front half (parser, checker, IR, evaluator, CLI)
 - [x] Step 1: tshark validation
-- [ ] Step 1b: Wireshark syntax coverage (quantifiers, arithmetic, layers, labels done)
+- [ ] Step 1b: Wireshark syntax coverage (quantifiers, arithmetic, layers, labels, `&` on bytes done)
 - [ ] Step 2: bytecode + verifier + interpreter
 - [ ] Step 3: WinDivert front-end + 241 vectors + `filter convert`
 - [ ] Step 4: `matches`, bitwise on bytes, TCP options, fuzz targets

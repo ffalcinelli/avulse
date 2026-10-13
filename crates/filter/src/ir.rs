@@ -72,6 +72,11 @@ pub enum Value {
     Len(Box<Value>),
     /// Number of occurrences.
     Count(Box<Value>),
+    /// A string field read through `upper()` or `lower()` (ASCII case folding).
+    Case {
+        upper: bool,
+        value: Box<Value>,
+    },
     /// Signed arithmetic on every pair of occurrences. Overflow and division by zero give no
     /// value.
     Arith(ArithOp, Box<Value>, Box<Value>),
@@ -248,6 +253,9 @@ impl fmt::Display for Value {
             Value::BitAnd(a, b) => write!(f, "(& {a} {b})"),
             Value::Len(v) => write!(f, "(len {v})"),
             Value::Count(v) => write!(f, "(count {v})"),
+            Value::Case { upper, value } => {
+                write!(f, "({} {value})", if *upper { "upper" } else { "lower" })
+            }
             Value::Arith(op, a, b) => write!(f, "({op} {a} {b})"),
             Value::Neg(v) => write!(f, "(neg {v})"),
             Value::Abs(v) => write!(f, "(abs {v})"),
