@@ -690,6 +690,9 @@ fn regex_patterns_escape_invalid_utf8() {
         crate::regex::pattern(b"a\x81\xc3\xa9\\d"),
         "a\\x81\u{e9}\\d"
     );
+    // An escaped byte is the byte itself; an escaped backslash stays one.
+    assert_eq!(crate::regex::pattern(b"\\\xff"), "\\xff");
+    assert_eq!(crate::regex::pattern(b"\\\\\xff"), "\\\\\\xff");
 }
 
 #[test]

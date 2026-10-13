@@ -18,6 +18,11 @@ pub(crate) fn pattern(bytes: &[u8]) -> String {
     for chunk in bytes.utf8_chunks() {
         out.push_str(chunk.valid());
         for b in chunk.invalid() {
+            // An escaped byte (`\` before it) is the byte itself: drop the `\`, which would
+            // otherwise escape the `\` of `\xNN`.
+            if out.bytes().rev().take_while(|&c| c == b'\\').count() % 2 == 1 {
+                out.pop();
+            }
             out.push_str(&alloc::format!("\\x{b:02x}"));
         }
     }

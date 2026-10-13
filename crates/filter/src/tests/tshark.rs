@@ -738,6 +738,9 @@ const MATCHES: &[&str] = &[
     "all tcp.payload matches \"T\"",
     "tcp.payload[0:3] matches \"get\"",
     "upper(frame.interface_name) matches \"ETH\"",
+    // An escaped byte that is not UTF-8 is that byte.
+    "frame matches \"\\\\\\xff\"",
+    "frame matches \"\\\\\\xff\\\\\\xff\\\\\\xff\"",
 ];
 
 /// Like [`DIVERGENCES`], for `matches`: PCRE2's `$` also matches before a final newline.
