@@ -88,3 +88,22 @@ jobs:
           RUSTDOCFLAGS: -D warnings
       - run: cargo clippy -p avulse-wasm --target wasm32-unknown-unknown
       - run: mdbook build book
+
+  fuzz:
+    # A short run of each fuzz target (fuzz/): the verifier and interpreter on arbitrary programs,
+    # and the whole filter pipeline, bytecode included, on arbitrary source and packets.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [bytecode, filter]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: nightly
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-fuzz
+      - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60
+        working-directory: fuzz
