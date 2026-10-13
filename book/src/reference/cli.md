@@ -63,6 +63,23 @@ $ avulse filter explain 'tcp.flags & syn and not tcp.flags & ack'
 (and (true (& tcp.flags 2)) (not (true (& tcp.flags 16))))
 ```
 
+With `--bytecode`, it also prints the program that the kernel backends verify and run (see
+[Design and roadmap](../project/design.md#compiled-programs)):
+
+```console
+$ avulse filter explain --bytecode 'tcp.dstport in {80 443} and not ip.src == 10.0.0.0/8'
+(and (in tcp.dstport 80 443) (not (any_eq ip.src 10.0.0.0/8)))
+
+bytecode, 7 instructions, 101 bytes:
+0  field    r0, tcp.dstport
+1  member   any_in r0, {80 443}
+2  jf       7
+3  field    r0, ip.src
+4  lit      r1, 10.0.0.0/8
+5  cmp      any_eq r0, r1
+6  not
+```
+
 ## `avulse filter eval`
 
 Evaluates the filter against one packet given in hex, and prints `match` or `no match`.

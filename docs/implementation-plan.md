@@ -5,18 +5,19 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-13, Steps 1 and 1b done, docs and website added)
+## Status (2026-10-13, Steps 1, 1b and 2 done, fuzz targets added)
 
 | Area | State |
 | --- | --- |
 | `crates/proto` (`avulse-proto`) | Done for Phase 1. Zero-copy `no_std` parsing: Ethernet, 2 VLAN tags, ARP, IPv4, IPv6 (8 extension headers, fragments), TCP, UDP, ICMP, ICMPv6. Checksum recalculation. 12 tests, including all truncations and random input. |
-| `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. Wireshark 4.6 syntax covered: quantifiers, arithmetic, layers, value labels, `@field`, `&` on bytes, multi-range slices, `upper`/`lower`, and `matches` (optional `regex` feature). Semantics validated against tshark 4.6/4.7 (`src/tests/tshark.rs`, including every field's byte span against PDML). 55 unit tests, 7 tshark tests (opt-in) and a doctest. No bytecode and no WinDivert front-end yet. |
-| `crates/cli` (`avulse`) | `avulse filter check \| fmt \| explain \| eval --hex … \| fields [--format markdown]`. Exit codes: 0 match, 1 no match, 2 error. |
+| `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. Wireshark 4.6 syntax covered: quantifiers, arithmetic, layers, value labels, `@field`, `&` on bytes, multi-range slices, `upper`/`lower`, and `matches` (optional `regex` feature). Semantics validated against tshark 4.6/4.7 (`src/tests/tshark.rs`, including every field's byte span against PDML). Bytecode, verifier and `no_std` interpreter (`bytecode/`), sharing the value operations in `value.rs` with the IR evaluator. 67 unit tests (including the bytecode differential tests), 8 tshark tests (opt-in) and doctests. No WinDivert front-end yet. |
+| `crates/cli` (`avulse`) | `avulse filter check \| fmt \| explain [--bytecode] \| eval --hex … \| fields [--format markdown]`. Exit codes: 0 match, 1 no match, 2 error. |
+| `fuzz/` | cargo-fuzz targets `bytecode` (verifier and interpreter on arbitrary programs) and `filter` (parser, `fmt` round trip, checker, evaluator, bytecode agreement). Outside the workspace. |
 | `crates/wasm` (`avulse-wasm`) | The filter engine for the website's playground (wasm-bindgen, `publish = false`). |
 | Docs and website | README (front page), guide (`book/`, mdBook), `site/` with the playground, rustdoc and pdoc, built by `scripts/build-site.sh` and deployed by `pages.yml` to <https://ffalcinelli.github.io/avulse/>. Every public item is documented (`missing_docs`). |
 | `crates/{ebpf,backend-linux,avulse,capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
-| CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook). `pages.yml` deploys the website. |
+| CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
 | Release (`.github/workflows/release.yml`) | Builds and publishes the Python placeholder on `v*` tags. **No crates.io job yet.** |
 
 ### Accounts and registries (already set up)
@@ -55,6 +56,11 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
   - `gh` is authenticated for API calls (runs, PRs, environments).
 - **Privileged tests run only in Vagrant VMs.** Run one VM at a time and `vagrant destroy -f` it right
   after, even on failure. Never download big files into `/tmp` (a small tmpfs); use `~/.cache`.
+- **Fuzzing:** `cargo-fuzz` is installed in `~/.cargo/bin`. Without a nightly toolchain, run it
+  with `RUSTC_BOOTSTRAP=1` (Arch's rustc ships the ASan runtime):
+  `cd fuzz && RUSTC_BOOTSTRAP=1 cargo fuzz run filter -- -max_total_time=600`. Seed the `filter`
+  corpus from the guide's filter blocks (source, a NUL byte, a flags byte, the packet) to get
+  coverage faster; `fuzz/corpus` is gitignored.
 - **Formatting:** rustfmt defaults (100 columns). Run `cargo fmt` twice if `--check` still complains;
   some long chains need a second pass.
 
@@ -171,7 +177,40 @@ refer to the packet selected in the Wireshark GUI).
 7. [x] `matches` / `~` behind the `regex` feature (`regex-automata`, user space only).
 8. [x] `@field` raw bytes, checked against the field positions in `tshark -T pdml`.
 
-### Step 2: Bytecode, verifier and `no_std` interpreter
+### Step 2: Bytecode, verifier and `no_std` interpreter (done)
+
+**Outcome.** `crates/filter/src/bytecode/` (`mod.rs` documents the format), public through
+`Filter::program()`, `Program::{compile, to_bytes, from_bytes}`, `bytecode::verify` and
+`VerifiedProgram::matches`.
+
+- **Format.** A 16-byte header (magic `AVBC`, version, flags, instruction count, pool length),
+  8-byte instructions (`op, a, b, c, imm: u32`) over 16 value registers, 8 boolean registers for
+  `xor` and an accumulator, then a tagged constant pool (literals, ranges, sets) referenced by
+  offset. Programs are at most 64 KiB. `and`/`or` short-circuit with forward `jf`/`jt`. Field ids
+  are indexes in `FIELDS`, so `VERSION` must change with the field table.
+- **Verifier.** It checks the header, opcodes, that unused operands are zero, register, boolean
+  register and field indexes, small operands, forward jumps, and that each referenced constant is
+  in bounds, of the right kind and well formed (including address prefixes). It does not type
+  registers: execution is total over every value combination, as in `eval`, and registers start
+  empty. `verify.rs`, `exec.rs` and `value.rs` use no `alloc`.
+- **One implementation of the semantics.** Field loads, comparisons, membership, `contains`,
+  slices and value operations moved from `eval.rs` to `value.rs`; both interpreters call them.
+- **Tests** (`src/tests/bytecode.rs`): a rejection per verifier rule, round trips, the
+  disassembly, the encoder's errors (`matches`, nesting depth, size); every tshark table filter
+  over the tshark corpus with three metadata variants (IR vs. bytecode); and a proptest of
+  type-aware random filters (about two thirds compile) over random packets. 100 000 cases ran
+  clean; planted bugs in the interpreter are caught.
+- **Fuzzing** (`fuzz/`): `bytecode` ran 10 minutes (72 million programs) clean. `filter` found
+  one panic in its first 10 minutes, outside the bytecode: an unknown escape before a multi-byte
+  character gave a span inside the character and `Diagnostic::render` panicked (fixed, regression
+  test `render_never_splits_a_character`). A second 10-minute run was clean.
+- **Limits decision.** `OWNED` (32 computed bytes) and `MAX` (4 occurrences) stay; the bytecode
+  has the same limits because it shares `value.rs`, and the `LIMITS` rows stay. Reading joined
+  ranges in place, without a copy, remains possible later work.
+- `avulse filter explain --bytecode` prints the disassembly.
+
+The original plan of the step follows.
+
 
 **Note from Step 1b.** The IR the bytecode must encode now has, besides fields, slices, `&`,
 `len` and `count`: quantified comparisons, membership and `contains` (`CmpOp` plus `Quant`); signed
@@ -230,6 +269,11 @@ passes, and `exec` uses no `alloc`.
 
 ### Step 3: WinDivert front-end and conformance vectors
 
+**Note from Step 2.** The IR extensions below must reach the bytecode too: put their semantics in
+`value.rs`, add an opcode (or a field id) with its verifier rule, disassembly and rejection test,
+bump `bytecode::VERSION`, and extend the proptest generator in `src/tests/bytecode.rs` so the
+differential test covers them. Run the WinDivert vectors through both interpreters.
+
 **Why.** The compat shim (Phase 4) must accept WinDivert filter strings exactly, and
 `avulse filter convert` gives users a migration path.
 
@@ -285,8 +329,8 @@ equivalent on the vector packets.
 
 - **TCP options:** `tcp.options.mss_val`, `tcp.options.wscale.shift`, `tcp.options.sack_perm`,
   `tcp.option_kind`. Parse options in `proto` (bounded loop).
-- `cargo-fuzz` targets for the parser/checker (arbitrary UTF-8 must never panic) and for `eval` on
-  arbitrary packets.
+- [x] `cargo-fuzz` targets for the parser/checker (arbitrary UTF-8 must never panic) and for `eval` on
+  arbitrary packets: the `filter` target in `fuzz/` (added with Step 2).
 
 ### Step 5: Phase 0 spikes (need VMs or hardware; see roadmap, Phase 0)
 
@@ -322,8 +366,8 @@ starting each phase, expand it into steps in this file, in the same format as ab
 - [x] Step 1: tshark validation
 - [x] Step 1b: Wireshark syntax coverage
 - [x] Docs: README, guide, website with playground, Rust and Python API docs
-- [ ] Step 2: bytecode + verifier + interpreter
+- [x] Step 2: bytecode + verifier + interpreter
 - [ ] Step 3: WinDivert front-end + 241 vectors + `filter convert`
-- [ ] Step 4: TCP options, fuzz targets
+- [ ] Step 4: TCP options (fuzz targets done)
 - [ ] Step 5: spikes A, B, C
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement

@@ -25,6 +25,9 @@ assert!(filter.matches(&packet, &Meta { outbound: true, ..Meta::default() }));
 - **Helpful errors.** Diagnostics carry a source span and a "did you mean" hint.
 - **Kernel-ready.** `no_std` with `alloc`, no `unsafe`. Evaluation does not allocate and never
   panics, so the same engine runs in user space and in kernel drivers.
+- **Verified bytecode.** `Filter::program` compiles a filter to a flat, versioned program for the
+  kernel backends. `bytecode::verify` checks it once, without allocating, and its interpreter gives
+  the same results as `Filter::matches`.
 
 ## Features
 

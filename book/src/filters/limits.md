@@ -30,4 +30,6 @@ answer. Wireshark has no such limits; the `LIMITS` table of the `tshark` test pi
 - **Fields with many occurrences.** A field is read with at most 4 occurrences. The fields with
   several occurrences (`ip.addr`, `tcp.port`, `vlan.id`, …) have at most two.
 
-These limits may be lifted when the bytecode interpreter lands, by reading joined ranges in place.
+The bytecode that the kernel backends run has the same limits, since it shares the evaluator's
+operations on values. Reading joined ranges in place, without a copy, could lift the first one
+later.

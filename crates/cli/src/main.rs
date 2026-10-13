@@ -34,7 +34,13 @@ enum FilterCommand {
     /// Print a filter in canonical form.
     Fmt(Source),
     /// Print the compiled filter (typed IR).
-    Explain(Source),
+    Explain {
+        #[command(flatten)]
+        source: Source,
+        /// Also print the bytecode that kernel backends run.
+        #[arg(long)]
+        bytecode: bool,
+    },
     /// Evaluate a filter against one packet given in hex. Exits 0 on a match, 1 otherwise.
     Eval {
         #[command(flatten)]
@@ -152,11 +158,26 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             out(&format!("{}\n", parse(&s).map_err(|e| render(&e, &s))?));
             Ok(ExitCode::SUCCESS)
         }
-        FilterCommand::Explain(src) => {
-            let f = compile(&src.read()?)?;
+        FilterCommand::Explain { source, bytecode } => {
+            let f = compile(&source.read()?)?;
             let mut text = format!("{}\n", f.ir());
             if f.user_space_only() {
                 text += "note: `matches` runs in user space only; kernel backends pass these packets up\n";
+            }
+            if bytecode {
+                match f.program() {
+                    Ok(p) => {
+                        let size = p.to_bytes().len();
+                        let _ = write!(
+                            text,
+                            "\nbytecode, {} instructions, {size} bytes:\n{p}",
+                            p.len()
+                        );
+                    }
+                    Err(e) => {
+                        let _ = writeln!(text, "\nno bytecode: {e}");
+                    }
+                }
             }
             out(&text);
             Ok(ExitCode::SUCCESS)
