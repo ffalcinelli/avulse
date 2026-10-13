@@ -733,6 +733,10 @@ fn evaluator_limits() {
         &http_get()
     ));
     compile("ip.src & ip.dst == 10.0.0.0 and eth.src[0:2,4:] & ff:ff:ff:ff");
+    // Wireshark rejects ranges of length 0.
+    for filter in ["tcp.payload[1:0] == 00", "frame[:0]", "vlan.id#[1:0] == 1"] {
+        error(filter);
+    }
     let e = error("tcp.payload & tcp.payload == tcp.payload");
     assert!(e.message.contains("at most 32 bytes"), "{}", e.message);
 }

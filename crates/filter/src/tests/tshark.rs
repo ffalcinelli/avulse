@@ -520,6 +520,9 @@ const AGREE: &[&str] = &[
     "tcp.flags == 0x002",
     "tcp.flags == 0x1ff",
     "tcp.flags & 0x12 == 0x12",
+    // Whitespace does not separate set items before a negative number: this is `{79}`.
+    "tcp.port in {80 -1}",
+    "tcp.port in {443 -363}",
     "tcp.flags & 0x02",
     "tcp.flags.res == 1",
     "tcp.flags.res",

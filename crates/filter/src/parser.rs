@@ -567,7 +567,7 @@ fn parse_slice(text: &str) -> Option<Slice> {
         let end = if b.is_empty() {
             SliceEnd::Open
         } else {
-            SliceEnd::Len(int(b).filter(|n| *n >= 0)?)
+            SliceEnd::Len(int(b).filter(|n| *n > 0)?)
         };
         return Some(Slice { start, end });
     }
