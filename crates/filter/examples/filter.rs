@@ -1,7 +1,7 @@
 //! Compiles a filter and runs it over a few sample packets.
 //!
 //! ```text
-//! cargo run -p avulse-filter --example filter -- 'tcp.dstport == 443 or dns'
+//! cargo run -p avulse-filter --example filter -- 'tcp.dstport == 443 or udp.port == 53'
 //! ```
 
 use avulse_filter::{Filter, Meta};
