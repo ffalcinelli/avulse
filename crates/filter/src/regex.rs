@@ -4,7 +4,9 @@
 
 use alloc::string::String;
 
+/// A compiled regular expression.
 #[cfg(feature = "regex")]
+#[cfg_attr(docsrs, doc(cfg(feature = "regex")))]
 pub type Regex = regex_automata::meta::Regex;
 
 /// No regular expressions without the `regex` feature.

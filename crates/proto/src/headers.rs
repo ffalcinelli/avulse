@@ -25,15 +25,25 @@ fn array<const N: usize>(b: &[u8], o: usize) -> [u8; N] {
 
 /// EtherType values.
 pub mod ethertype {
+    /// IPv4.
     pub const IPV4: u16 = 0x0800;
+    /// ARP.
     pub const ARP: u16 = 0x0806;
+    /// 802.1Q VLAN tag (C-tag).
     pub const VLAN: u16 = 0x8100;
+    /// IPv6.
     pub const IPV6: u16 = 0x86dd;
+    /// MPLS unicast.
     pub const MPLS: u16 = 0x8847;
+    /// PPPoE discovery stage.
     pub const PPPOE_DISCOVERY: u16 = 0x8863;
+    /// PPPoE session stage.
     pub const PPPOE_SESSION: u16 = 0x8864;
+    /// EAP over LAN (802.1X).
     pub const EAPOL: u16 = 0x888e;
+    /// 802.1ad service tag (S-tag, QinQ outer tag).
     pub const QINQ: u16 = 0x88a8;
+    /// Link Layer Discovery Protocol.
     pub const LLDP: u16 = 0x88cc;
     /// Pre-standard QinQ outer tag.
     pub const VLAN_9100: u16 = 0x9100;
@@ -46,19 +56,33 @@ pub mod ethertype {
 
 /// IP protocol numbers (IPv4 protocol, IPv6 next header).
 pub mod ip_proto {
+    /// IPv6 hop-by-hop options.
     pub const HOPOPT: u8 = 0;
+    /// ICMP.
     pub const ICMP: u8 = 1;
+    /// IGMP.
     pub const IGMP: u8 = 2;
+    /// TCP.
     pub const TCP: u8 = 6;
+    /// UDP.
     pub const UDP: u8 = 17;
+    /// IPv6 routing header.
     pub const IPV6_ROUTE: u8 = 43;
+    /// IPv6 fragment header.
     pub const IPV6_FRAG: u8 = 44;
+    /// Generic Routing Encapsulation.
     pub const GRE: u8 = 47;
+    /// IPsec Encapsulating Security Payload.
     pub const ESP: u8 = 50;
+    /// IPsec Authentication Header.
     pub const AH: u8 = 51;
+    /// ICMPv6.
     pub const ICMPV6: u8 = 58;
+    /// IPv6 "no next header".
     pub const IPV6_NONXT: u8 = 59;
+    /// IPv6 destination options.
     pub const IPV6_OPTS: u8 = 60;
+    /// SCTP.
     pub const SCTP: u8 = 132;
 }
 
@@ -88,14 +112,19 @@ impl fmt::Debug for MacAddr {
 pub struct Ethernet<'a>(&'a [u8]);
 
 impl<'a> Ethernet<'a> {
+    /// Header length in bytes.
     pub const LEN: usize = 14;
 
+    /// Wraps the header at the start of `b`, or returns `None` if `b` is too short or not this
+    /// header.
     pub fn new(b: &'a [u8]) -> Option<Self> {
         b.get(..Self::LEN).map(Self)
     }
+    /// Destination MAC address.
     pub fn dst(&self) -> MacAddr {
         MacAddr(array(self.0, 0))
     }
+    /// Source MAC address.
     pub fn src(&self) -> MacAddr {
         MacAddr(array(self.0, 6))
     }
@@ -103,6 +132,7 @@ impl<'a> Ethernet<'a> {
     pub fn ethertype(&self) -> u16 {
         be16(self.0, 12)
     }
+    /// The 14 header bytes.
     pub fn bytes(&self) -> &'a [u8] {
         self.0
     }
@@ -120,14 +150,18 @@ pub struct VlanTag {
 }
 
 impl VlanTag {
+    /// Header length in bytes.
     pub const LEN: usize = 4;
 
+    /// Priority code point (3 bits).
     pub fn priority(&self) -> u8 {
         (self.tci >> 13) as u8
     }
+    /// Drop eligible indicator.
     pub fn dei(&self) -> bool {
         self.tci & 0x1000 != 0
     }
+    /// VLAN identifier (12 bits).
     pub fn id(&self) -> u16 {
         self.tci & 0x0fff
     }
@@ -138,22 +172,29 @@ impl VlanTag {
 pub struct Arp<'a>(&'a [u8]);
 
 impl<'a> Arp<'a> {
+    /// Wraps the ARP packet at the start of `b`, or returns `None` if `b` is shorter than its
+    /// address sizes say.
     pub fn new(b: &'a [u8]) -> Option<Self> {
         let (h, p) = (*b.get(4)? as usize, *b.get(5)? as usize);
         b.get(..8 + 2 * (h + p)).map(Self)
     }
+    /// Hardware type (1 for Ethernet).
     pub fn hw_type(&self) -> u16 {
         be16(self.0, 0)
     }
+    /// Protocol type (an EtherType, 0x0800 for IPv4).
     pub fn proto_type(&self) -> u16 {
         be16(self.0, 2)
     }
+    /// Hardware address length in bytes.
     pub fn hw_size(&self) -> u8 {
         self.0[4]
     }
+    /// Protocol address length in bytes.
     pub fn proto_size(&self) -> u8 {
         self.0[5]
     }
+    /// Operation (1 request, 2 reply).
     pub fn opcode(&self) -> u16 {
         be16(self.0, 6)
     }
@@ -162,35 +203,44 @@ impl<'a> Arp<'a> {
         let start = 8 + (index / 2) * (h + p) + (index % 2) * h;
         &self.0[start..start + if index.is_multiple_of(2) { h } else { p }]
     }
+    /// Sender hardware address bytes.
     pub fn sender_hw(&self) -> &'a [u8] {
         self.field(0)
     }
+    /// Sender protocol address bytes.
     pub fn sender_proto(&self) -> &'a [u8] {
         self.field(1)
     }
+    /// Target hardware address bytes.
     pub fn target_hw(&self) -> &'a [u8] {
         self.field(2)
     }
+    /// Target protocol address bytes.
     pub fn target_proto(&self) -> &'a [u8] {
         self.field(3)
     }
+    /// Sender MAC address, if the hardware address is 6 bytes long.
     pub fn sender_mac(&self) -> Option<MacAddr> {
         (self.hw_size() == 6).then(|| MacAddr(array(self.sender_hw(), 0)))
     }
+    /// Target MAC address, if the hardware address is 6 bytes long.
     pub fn target_mac(&self) -> Option<MacAddr> {
         (self.hw_size() == 6).then(|| MacAddr(array(self.target_hw(), 0)))
     }
     fn is_ipv4(&self) -> bool {
         self.proto_type() == ethertype::IPV4 && self.proto_size() == 4
     }
+    /// Sender IPv4 address, if the protocol is IPv4.
     pub fn sender_ipv4(&self) -> Option<Ipv4Addr> {
         self.is_ipv4()
             .then(|| Ipv4Addr::from(array::<4>(self.sender_proto(), 0)))
     }
+    /// Target IPv4 address, if the protocol is IPv4.
     pub fn target_ipv4(&self) -> Option<Ipv4Addr> {
         self.is_ipv4()
             .then(|| Ipv4Addr::from(array::<4>(self.target_proto(), 0)))
     }
+    /// The whole ARP packet.
     pub fn bytes(&self) -> &'a [u8] {
         self.0
     }
@@ -201,8 +251,11 @@ impl<'a> Arp<'a> {
 pub struct Ipv4<'a>(&'a [u8]);
 
 impl<'a> Ipv4<'a> {
+    /// Minimum header length in bytes (no options).
     pub const MIN_LEN: usize = 20;
 
+    /// Wraps the IPv4 header at the start of `b`, or returns `None` if the version is not 4, the
+    /// header length is below 20, or `b` is shorter than the header.
     pub fn new(b: &'a [u8]) -> Option<Self> {
         let v = *b.first()?;
         let hl = (v & 0x0f) as usize * 4;
@@ -211,6 +264,7 @@ impl<'a> Ipv4<'a> {
         }
         b.get(..hl).map(Self)
     }
+    /// Version field (always 4).
     pub fn version(&self) -> u8 {
         self.0[0] >> 4
     }
@@ -222,15 +276,19 @@ impl<'a> Ipv4<'a> {
     pub fn dsfield(&self) -> u8 {
         self.0[1]
     }
+    /// Differentiated Services Code Point (6 bits).
     pub fn dscp(&self) -> u8 {
         self.0[1] >> 2
     }
+    /// Explicit Congestion Notification (2 bits).
     pub fn ecn(&self) -> u8 {
         self.0[1] & 3
     }
+    /// Total length field (header and payload) in bytes.
     pub fn total_len(&self) -> u16 {
         be16(self.0, 2)
     }
+    /// Identification field.
     pub fn id(&self) -> u16 {
         be16(self.0, 4)
     }
@@ -238,12 +296,15 @@ impl<'a> Ipv4<'a> {
     pub fn flags(&self) -> u8 {
         self.0[6] >> 5
     }
+    /// The reserved (evil) flag bit.
     pub fn reserved_flag(&self) -> bool {
         self.0[6] & 0x80 != 0
     }
+    /// The Don't Fragment flag.
     pub fn dont_fragment(&self) -> bool {
         self.0[6] & 0x40 != 0
     }
+    /// The More Fragments flag.
     pub fn more_fragments(&self) -> bool {
         self.0[6] & 0x20 != 0
     }
@@ -251,27 +312,35 @@ impl<'a> Ipv4<'a> {
     pub fn frag_offset(&self) -> u16 {
         be16(self.0, 6) & 0x1fff
     }
+    /// Whether this is a fragment: MF set or a non-zero offset.
     pub fn is_fragment(&self) -> bool {
         self.more_fragments() || self.frag_offset() != 0
     }
+    /// Time to live.
     pub fn ttl(&self) -> u8 {
         self.0[8]
     }
+    /// Protocol of the payload (see [`ip_proto`]).
     pub fn protocol(&self) -> u8 {
         self.0[9]
     }
+    /// Checksum field, as on the wire.
     pub fn checksum(&self) -> u16 {
         be16(self.0, 10)
     }
+    /// Source address.
     pub fn src(&self) -> Ipv4Addr {
         Ipv4Addr::from(array::<4>(self.0, 12))
     }
+    /// Destination address.
     pub fn dst(&self) -> Ipv4Addr {
         Ipv4Addr::from(array::<4>(self.0, 16))
     }
+    /// The option bytes after the fixed header (may be empty).
     pub fn options(&self) -> &'a [u8] {
         &self.0[20..]
     }
+    /// The header bytes, options included.
     pub fn bytes(&self) -> &'a [u8] {
         self.0
     }
@@ -282,44 +351,58 @@ impl<'a> Ipv4<'a> {
 pub struct Ipv6<'a>(&'a [u8]);
 
 impl<'a> Ipv6<'a> {
+    /// Header length in bytes.
     pub const LEN: usize = 40;
 
+    /// Wraps the IPv6 fixed header at the start of `b`, or returns `None` if the version is not 6
+    /// or `b` is shorter than 40 bytes.
     pub fn new(b: &'a [u8]) -> Option<Self> {
         if b.first()? >> 4 != 6 {
             return None;
         }
         b.get(..Self::LEN).map(Self)
     }
+    /// Version field (always 6).
     pub fn version(&self) -> u8 {
         self.0[0] >> 4
     }
+    /// Traffic class (DSCP and ECN).
     pub fn traffic_class(&self) -> u8 {
         (be32(self.0, 0) >> 20) as u8
     }
+    /// Differentiated Services Code Point (6 bits).
     pub fn dscp(&self) -> u8 {
         self.traffic_class() >> 2
     }
+    /// Explicit Congestion Notification (2 bits).
     pub fn ecn(&self) -> u8 {
         self.traffic_class() & 3
     }
+    /// Flow label (20 bits).
     pub fn flow_label(&self) -> u32 {
         be32(self.0, 0) & 0x000f_ffff
     }
+    /// Payload length field: everything after the fixed header, extension headers included.
     pub fn payload_len(&self) -> u16 {
         be16(self.0, 4)
     }
+    /// Next header field of the fixed header (see [`ip_proto`]).
     pub fn next_header(&self) -> u8 {
         self.0[6]
     }
+    /// Hop limit.
     pub fn hop_limit(&self) -> u8 {
         self.0[7]
     }
+    /// Source address.
     pub fn src(&self) -> Ipv6Addr {
         Ipv6Addr::from(array::<16>(self.0, 8))
     }
+    /// Destination address.
     pub fn dst(&self) -> Ipv6Addr {
         Ipv6Addr::from(array::<16>(self.0, 24))
     }
+    /// The 40 bytes of the fixed header.
     pub fn bytes(&self) -> &'a [u8] {
         self.0
     }
@@ -330,7 +413,9 @@ impl<'a> Ipv6<'a> {
 pub struct Fragment {
     /// Offset in 8-byte units.
     pub offset: u16,
+    /// More Fragments: another fragment follows.
     pub more: bool,
+    /// Identification: 16 bits for IPv4, 32 for IPv6.
     pub id: u32,
 }
 
@@ -339,19 +424,30 @@ pub struct Fragment {
 pub struct Tcp<'a>(&'a [u8]);
 
 impl<'a> Tcp<'a> {
+    /// Minimum header length in bytes (no options).
     pub const MIN_LEN: usize = 20;
 
+    /// FIN flag.
     pub const FIN: u16 = 0x001;
+    /// SYN flag.
     pub const SYN: u16 = 0x002;
+    /// RST flag.
     pub const RST: u16 = 0x004;
+    /// PSH flag.
     pub const PSH: u16 = 0x008;
+    /// ACK flag.
     pub const ACK: u16 = 0x010;
+    /// URG flag.
     pub const URG: u16 = 0x020;
+    /// ECN-Echo flag.
     pub const ECE: u16 = 0x040;
+    /// Congestion Window Reduced flag.
     pub const CWR: u16 = 0x080;
     /// Accurate ECN (formerly NS).
     pub const AE: u16 = 0x100;
 
+    /// Wraps the TCP header at the start of `b`, or returns `None` if the data offset is below 5
+    /// words or `b` is shorter than the header.
     pub fn new(b: &'a [u8]) -> Option<Self> {
         let hl = (*b.get(12)? >> 4) as usize * 4;
         if hl < Self::MIN_LEN {
@@ -359,15 +455,19 @@ impl<'a> Tcp<'a> {
         }
         b.get(..hl).map(Self)
     }
+    /// Source port.
     pub fn src_port(&self) -> u16 {
         be16(self.0, 0)
     }
+    /// Destination port.
     pub fn dst_port(&self) -> u16 {
         be16(self.0, 2)
     }
+    /// Sequence number.
     pub fn seq(&self) -> u32 {
         be32(self.0, 4)
     }
+    /// Acknowledgment number.
     pub fn ack(&self) -> u32 {
         be32(self.0, 8)
     }
@@ -379,6 +479,7 @@ impl<'a> Tcp<'a> {
     pub fn flags(&self) -> u16 {
         be16(self.0, 12) & 0x0fff
     }
+    /// Whether any of the bits in `flag` is set, e.g. `tcp.has(Tcp::SYN)`.
     pub fn has(&self, flag: u16) -> bool {
         self.flags() & flag != 0
     }
@@ -386,18 +487,23 @@ impl<'a> Tcp<'a> {
     pub fn reserved(&self) -> u8 {
         (self.0[12] >> 1) & 7
     }
+    /// Window size, unscaled.
     pub fn window(&self) -> u16 {
         be16(self.0, 14)
     }
+    /// Checksum field, as on the wire.
     pub fn checksum(&self) -> u16 {
         be16(self.0, 16)
     }
+    /// Urgent pointer.
     pub fn urgent_ptr(&self) -> u16 {
         be16(self.0, 18)
     }
+    /// The option bytes after the fixed header (may be empty).
     pub fn options(&self) -> &'a [u8] {
         &self.0[20..]
     }
+    /// The header bytes, options included.
     pub fn bytes(&self) -> &'a [u8] {
         self.0
     }
@@ -408,23 +514,30 @@ impl<'a> Tcp<'a> {
 pub struct Udp<'a>(&'a [u8]);
 
 impl<'a> Udp<'a> {
+    /// Header length in bytes.
     pub const LEN: usize = 8;
 
+    /// Wraps the UDP header at the start of `b`, or returns `None` if `b` is shorter than 8 bytes.
     pub fn new(b: &'a [u8]) -> Option<Self> {
         b.get(..Self::LEN).map(Self)
     }
+    /// Source port.
     pub fn src_port(&self) -> u16 {
         be16(self.0, 0)
     }
+    /// Destination port.
     pub fn dst_port(&self) -> u16 {
         be16(self.0, 2)
     }
+    /// Length field: header and payload, in bytes.
     pub fn length(&self) -> u16 {
         be16(self.0, 4)
     }
+    /// Checksum field, as on the wire.
     pub fn checksum(&self) -> u16 {
         be16(self.0, 6)
     }
+    /// The 8 header bytes.
     pub fn bytes(&self) -> &'a [u8] {
         self.0
     }
@@ -435,17 +548,22 @@ impl<'a> Udp<'a> {
 pub struct Icmp<'a>(&'a [u8]);
 
 impl<'a> Icmp<'a> {
+    /// Length of the fixed header in bytes.
     pub const HEADER_LEN: usize = 8;
 
+    /// Wraps the ICMP message in `b`, or returns `None` if `b` is shorter than 8 bytes.
     pub fn new(b: &'a [u8]) -> Option<Self> {
         (b.len() >= Self::HEADER_LEN).then_some(Self(b))
     }
+    /// Message type.
     pub fn icmp_type(&self) -> u8 {
         self.0[0]
     }
+    /// Message code.
     pub fn code(&self) -> u8 {
         self.0[1]
     }
+    /// Checksum field, as on the wire.
     pub fn checksum(&self) -> u16 {
         be16(self.0, 2)
     }
@@ -472,26 +590,33 @@ impl<'a> Icmp<'a> {
 pub struct Icmpv6<'a>(&'a [u8]);
 
 impl<'a> Icmpv6<'a> {
+    /// Length of the fixed header in bytes.
     pub const HEADER_LEN: usize = 4;
 
+    /// Wraps the ICMPv6 message in `b`, or returns `None` if `b` is shorter than 4 bytes.
     pub fn new(b: &'a [u8]) -> Option<Self> {
         (b.len() >= Self::HEADER_LEN).then_some(Self(b))
     }
+    /// Message type.
     pub fn icmp_type(&self) -> u8 {
         self.0[0]
     }
+    /// Message code.
     pub fn code(&self) -> u8 {
         self.0[1]
     }
+    /// Checksum field, as on the wire.
     pub fn checksum(&self) -> u16 {
         be16(self.0, 2)
     }
     fn is_echo(&self) -> bool {
         matches!(self.icmp_type(), 128 | 129) && self.0.len() >= 8
     }
+    /// Identifier of echo requests and replies.
     pub fn echo_ident(&self) -> Option<u16> {
         self.is_echo().then(|| be16(self.0, 4))
     }
+    /// Sequence number of echo requests and replies.
     pub fn echo_seq(&self) -> Option<u16> {
         self.is_echo().then(|| be16(self.0, 6))
     }

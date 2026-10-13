@@ -7,6 +7,14 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish.workspace = true
+readme = "README.md"
+homepage = "https://ffalcinelli.github.io/avulse/"
+keywords = ["packet", "parser", "ethernet", "no-std", "network"]
+categories = ["network-programming", "parser-implementations", "no-std"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]
 workspace = true

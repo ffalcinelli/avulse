@@ -6,23 +6,30 @@ use core::fmt;
 /// Static type of a field or value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ty {
+    /// `true` or `false`.
     Bool,
     /// Unsigned integer of the given width in bits.
     Uint(u8),
     /// Signed 64-bit integer: the result of arithmetic.
     Int,
+    /// An IPv4 address.
     Ipv4,
+    /// An IPv6 address.
     Ipv6,
     /// IPv4 or IPv6 (extension fields such as `local.addr`).
     Ip,
+    /// A MAC address.
     Ether,
+    /// A byte string.
     Bytes,
+    /// A text string.
     Str,
     /// A protocol: present or not, sliceable as its header bytes.
     Proto,
 }
 
 impl Ty {
+    /// The type's name with an article, for diagnostics ("an unsigned integer").
     pub fn name(self) -> &'static str {
         match self {
             Ty::Bool => "a boolean",
@@ -46,6 +53,7 @@ impl Ty {
         )
     }
 
+    /// Whether `<`, `<=`, `>` and `>=` apply to values of this type.
     pub fn is_ordered(self) -> bool {
         matches!(
             self,
@@ -60,6 +68,7 @@ impl fmt::Display for Ty {
     }
 }
 
+/// Where a field name comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origin {
     /// Same name and meaning as in Wireshark.
@@ -70,14 +79,22 @@ pub enum Origin {
     Flag,
 }
 
+/// A table of symbolic constants: name and value. Lookups ignore case.
 pub type Consts = &'static [(&'static str, u64)];
 
+/// The registry entry of a [`Field`].
 pub struct FieldDef {
+    /// The name used in filters, such as `tcp.dstport`.
     pub name: &'static str,
+    /// The field.
     pub field: Field,
+    /// Its type.
     pub ty: Ty,
+    /// Whether it is a Wireshark field or an Avulse extension.
     pub origin: Origin,
+    /// Symbolic names accepted as values, such as `syn` for `tcp.flags`.
     pub consts: Consts,
+    /// One-line description, shown by `avulse filter fields`.
     pub desc: &'static str,
 }
 
@@ -87,6 +104,7 @@ const U32: Ty = Ty::Uint(32);
 const U64: Ty = Ty::Uint(64);
 const NONE: Consts = &[];
 
+/// EtherType names, for `eth.type` and `vlan.etype`.
 pub const ETHERTYPES: Consts = &[
     ("ipv4", 0x0800),
     ("ip", 0x0800),
@@ -101,6 +119,7 @@ pub const ETHERTYPES: Consts = &[
     ("lldp", 0x88cc),
 ];
 
+/// IP protocol names, for `ip.proto` and `ipv6.nxt`.
 pub const IP_PROTOS: Consts = &[
     ("hopopt", 0),
     ("icmp", 1),
@@ -118,6 +137,7 @@ pub const IP_PROTOS: Consts = &[
     ("sctp", 132),
 ];
 
+/// ARP operation names, for `arp.opcode`.
 pub const ARP_OPCODES: Consts = &[
     ("request", 1),
     ("reply", 2),
@@ -125,6 +145,7 @@ pub const ARP_OPCODES: Consts = &[
     ("rarp-reply", 4),
 ];
 
+/// ICMP type names, for `icmp.type`.
 pub const ICMP_TYPES: Consts = &[
     ("echo-reply", 0),
     ("dest-unreachable", 3),
@@ -139,6 +160,7 @@ pub const ICMP_TYPES: Consts = &[
     ("timestamp-reply", 14),
 ];
 
+/// ICMPv6 type names, for `icmpv6.type`.
 pub const ICMPV6_TYPES: Consts = &[
     ("dest-unreachable", 1),
     ("packet-too-big", 2),
@@ -157,6 +179,7 @@ pub const ICMPV6_TYPES: Consts = &[
     ("mldv2-report", 143),
 ];
 
+/// TCP flag names, for `tcp.flags`.
 pub const TCP_FLAGS: Consts = &[
     ("fin", 0x001),
     ("syn", 0x002),
@@ -171,6 +194,7 @@ pub const TCP_FLAGS: Consts = &[
     ("ae", 0x100),
 ];
 
+/// Layer names, for `layer`.
 pub const LAYERS: Consts = &[
     ("network", 0),
     ("network-forward", 1),
@@ -180,6 +204,7 @@ pub const LAYERS: Consts = &[
     ("ethernet", 5),
 ];
 
+/// Event names, for `event`.
 pub const EVENTS: Consts = &[
     ("packet", 0),
     ("established", 1),
@@ -199,7 +224,7 @@ macro_rules! fields {
         /// A field the filter can read.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         #[non_exhaustive]
-        pub enum Field { $($v,)* }
+        pub enum Field { $(#[doc = concat!("`", $name, "`: ", $desc, ".")] $v,)* }
 
         /// Every supported field, in documentation order.
         pub static FIELDS: &[FieldDef] = &[
@@ -345,10 +370,21 @@ fields! {
     ParentEndpointId: "parent.endpoint.id", U64, Extension, NONE, "Parent endpoint ID (FLOW, SOCKET layers)";
 }
 
+/// The field named `name`, if Avulse supports it.
+///
+/// ```
+/// use avulse_filter::fields::{Origin, lookup};
+///
+/// let def = lookup("tcp.dstport").unwrap();
+/// assert_eq!(def.ty.name(), "an unsigned integer");
+/// assert_eq!(def.origin, Origin::Wireshark);
+/// assert!(lookup("tcp.stream").is_none());
+/// ```
 pub fn lookup(name: &str) -> Option<&'static FieldDef> {
     FIELDS.iter().find(|d| d.name == name)
 }
 
+/// The registry entry of `field`.
 pub fn def(field: Field) -> &'static FieldDef {
     FIELDS
         .iter()
@@ -356,6 +392,7 @@ pub fn def(field: Field) -> &'static FieldDef {
         .expect("every Field has a FieldDef")
 }
 
+/// The value of the constant `name` in `consts`, ignoring case.
 pub fn constant(consts: Consts, name: &str) -> Option<u64> {
     consts
         .iter()

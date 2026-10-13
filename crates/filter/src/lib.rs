@@ -1,26 +1,67 @@
-//! The Avulse filter language: a Wireshark display-filter subset plus extensions.
+//! The [Avulse] filter language: Wireshark display filters, restricted to what one packet
+//! determines, plus a few extensions.
 //!
 //! ```
 //! use avulse_filter::{Filter, Meta};
 //! use avulse_proto::{Link, Packet};
 //!
-//! let f = Filter::compile("let web = {80, 443}\noutbound and tcp.dstport in $web").unwrap();
-//! # let bytes = [0u8; 0];
-//! let pkt = Packet::parse(&bytes, Link::Ip);
-//! assert!(!f.matches(&pkt, &Meta { outbound: true, ..Meta::default() }));
+//! let filter = Filter::compile(
+//!     "let web = {80, 443, 8000..8100}\n\
+//!      outbound and tcp.dstport in $web and not ip.dst == 10.0.0.0/8",
+//! )
+//! .unwrap();
+//!
+//! // IPv4 + TCP SYN from 192.168.1.2:40000 to 93.184.215.14:443.
+//! let bytes = [
+//!     0x45, 0, 0, 40, 0, 1, 0x40, 0, 64, 6, 0, 0, 192, 168, 1, 2, 93, 184, 215, 14, //
+//!     0x9c, 0x40, 0x01, 0xbb, 0, 0, 0, 1, 0, 0, 0, 0, 0x50, 0x02, 0xff, 0xff, 0, 0, 0, 0,
+//! ];
+//! let packet = Packet::parse(&bytes, Link::Ip);
+//! assert!(filter.matches(&packet, &Meta { outbound: true, ..Meta::default() }));
+//! assert!(!filter.matches(&packet, &Meta::default())); // inbound
 //! ```
 //!
-//! [`parse`] builds the syntax tree, [`Filter::compile`] resolves names, checks types and lowers
-//! the tree to the [`ir`], which [`Filter::matches`] evaluates without allocating. The crate is
-//! `no_std` (with `alloc`) so that the same evaluator runs in kernel contexts.
-
+//! # Pipeline
+//!
+//! [`parse`] builds the syntax tree ([`ast`]), whose `Display` is the canonical form.
+//! [`Filter::compile`] parses, resolves names against the field registry ([`fields`]) and the
+//! `let` macros, checks types, and lowers the tree to the typed [`ir`], which
+//! [`Filter::matches`] evaluates against a [`Packet`] and its [`Meta`]. Errors and warnings are
+//! [`Diagnostic`]s with a source span and, often, a "did you mean" hint.
+//!
+//! # Semantics
+//!
+//! A filter that Wireshark 4.6+ accepts and Avulse compiles selects the same packets: a test
+//! compares the two with `tshark` on every supported field. Fields can have several occurrences
+//! (`ip.addr`, `tcp.port`, `vlan.id`): `==` means some pair is equal, `!=` that no pair is, and any
+//! comparison with an absent field is false. The [guide] describes the language and lists the
+//! intentional differences from Wireshark.
+//!
+//! # `no_std` and allocation
+//!
+//! The crate is `no_std` with `alloc`, and has no `unsafe` code. Compiling allocates; evaluating
+//! does not (except `matches`), so the same evaluator can run in kernel contexts. To keep it so,
+//! filters whose intermediate values could exceed fixed buffers are rejected at compile time.
+//!
+//! # Features
+//!
+//! - `regex`: the `matches` (`~`) operator, through `regex-automata` (still `no_std`). Without it,
+//!   filters that use `matches` fail to compile. Kernel backends run such filters in user space
+//!   ([`Filter::user_space_only`]).
+//!
+//! [Avulse]: https://ffalcinelli.github.io/avulse/
+//! [guide]: https://ffalcinelli.github.io/avulse/guide/
 #![no_std]
 #![forbid(unsafe_code)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![doc(html_logo_url = "https://ffalcinelli.github.io/avulse/favicon.svg")]
+#![doc(html_favicon_url = "https://ffalcinelli.github.io/avulse/favicon.svg")]
 
 extern crate alloc;
 
 pub mod ast;
 mod check;
+/// Diagnostics and source spans.
 pub mod error;
 mod eval;
 pub mod fields;
@@ -40,7 +81,9 @@ pub use error::{Diagnostic, Level, Span};
 pub use meta::{Event, FlowTuple, Layer, Meta};
 pub use parser::parse;
 
-/// A compiled filter.
+/// A compiled filter, ready to match packets.
+///
+/// Compile once, then call [`matches`](Self::matches) for each packet: it does not allocate.
 #[derive(Clone, Debug)]
 pub struct Filter {
     ir: ir::Test,
@@ -50,6 +93,21 @@ pub struct Filter {
 }
 
 impl Filter {
+    /// Compiles a filter.
+    ///
+    /// # Errors
+    ///
+    /// The first error: syntax, an unknown field or macro, a type mismatch, a literal out of
+    /// range, a field that needs stream state (`tcp.seq`), or a value that could exceed the
+    /// evaluator's buffers. [`Diagnostic::render`] formats it with the offending source.
+    ///
+    /// ```
+    /// use avulse_filter::Filter;
+    ///
+    /// let err = Filter::compile("tcp.prot == 80").unwrap_err();
+    /// assert_eq!(err.message, "unknown field `tcp.prot`");
+    /// assert_eq!(err.help.as_deref(), Some("did you mean `tcp.port`?"));
+    /// ```
     pub fn compile(src: &str) -> Result<Self, Diagnostic> {
         let program = parse(src)?;
         let mut checker = check::Checker::new(&program.lets);
@@ -61,6 +119,9 @@ impl Filter {
         })
     }
 
+    /// Whether `packet`, with metadata `meta`, matches the filter.
+    ///
+    /// This does not allocate unless the filter uses `matches`, and never panics.
     pub fn matches(&self, packet: &Packet<'_>, meta: &Meta<'_>) -> bool {
         eval::matches(&self.ir, packet, meta, &self.regexes)
     }
@@ -70,11 +131,19 @@ impl Filter {
         self.ir.user_space_only()
     }
 
+    /// The compiled, simplified test. Its `Display` is what `avulse filter explain` prints.
     pub fn ir(&self) -> &ir::Test {
         &self.ir
     }
 
     /// Non-fatal diagnostics, such as a bare boolean field that only tests presence.
+    ///
+    /// ```
+    /// use avulse_filter::{Filter, Level};
+    ///
+    /// let f = Filter::compile("tcp.flags.syn").unwrap();
+    /// assert_eq!(f.warnings()[0].level, Level::Warning);
+    /// ```
     pub fn warnings(&self) -> &[Diagnostic] {
         &self.warnings
     }
@@ -82,3 +151,13 @@ impl Filter {
 
 #[cfg(test)]
 mod tests;
+
+/// Runs the Rust examples of the READMEs as doctests.
+#[cfg(doctest)]
+mod readme {
+    #[doc = include_str!("../README.md")]
+    struct Crate;
+
+    #[doc = include_str!("../../../README.md")]
+    struct Workspace;
+}

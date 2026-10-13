@@ -9,8 +9,10 @@ use core::fmt;
 pub use crate::ast::{ArithOp, Quant, Slice, SliceEnd};
 use crate::fields::{Field, def};
 
+/// A typed, name-resolved test: what [`Filter::matches`](crate::Filter::matches) evaluates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Test {
+    /// Always true or always false.
     Const(bool),
     /// The value has at least one occurrence.
     Exists(Value),
@@ -18,38 +20,57 @@ pub enum Test {
     Truthy(Value),
     /// `quant` pair of occurrences satisfies `op`.
     Cmp {
+        /// The left value.
         lhs: Value,
+        /// The comparison.
         op: CmpOp,
+        /// Which pairs must satisfy it.
         quant: Quant,
+        /// The right value.
         rhs: Value,
     },
     /// Set membership. Without `negate`, `quant` occurrence is in the set (`in`, `all … in`). With
     /// it, the value is present and that is not the case (`not in`, `all … not in`), as in
     /// Wireshark.
     Member {
+        /// The value tested.
         lhs: Value,
+        /// The set.
         set: Vec<SetItem>,
+        /// Which occurrences must be in the set.
         quant: Quant,
+        /// Whether this is `not in`.
         negate: bool,
     },
     /// `quant` occurrence of `lhs` contains an occurrence of `rhs` as a byte substring.
     Contains {
+        /// The haystack.
         lhs: Value,
+        /// The needle.
         rhs: Value,
+        /// Which occurrences of `lhs` must contain it.
         quant: Quant,
     },
     /// `quant` occurrence of `lhs` matches a regular expression: byte-oriented, case-insensitive
     /// unless the pattern says `(?-i)`. `index` refers to the patterns compiled with the filter.
     /// User space only.
     Matches {
+        /// The value matched.
         lhs: Value,
+        /// The pattern, as compiled.
         pattern: String,
+        /// Index of the compiled pattern.
         index: usize,
+        /// Which occurrences must match.
         quant: Quant,
     },
+    /// Negation.
     Not(Box<Test>),
+    /// Conjunction; an empty list is true.
     And(Vec<Test>),
+    /// Disjunction; an empty list is false.
     Or(Vec<Test>),
+    /// Exclusive or.
     Xor(Box<Test>, Box<Test>),
 }
 
@@ -63,16 +84,24 @@ pub enum Test {
 /// fields that fit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CmpOp {
+    /// Equal.
     Eq,
+    /// Not equal.
     Ne,
+    /// Less than.
     Lt,
+    /// Less than or equal.
     Le,
+    /// Greater than.
     Gt,
+    /// Greater than or equal.
     Ge,
 }
 
+/// A typed value: zero or more occurrences, read from the packet, its metadata, or a literal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Value {
+    /// Every occurrence of a field.
     Field(Field),
     /// The occurrences of a field in the given protocol layers (`vlan.id#2`).
     Layer(Field, Vec<Slice>),
@@ -80,6 +109,7 @@ pub enum Value {
     Raw(Field, Option<Vec<Slice>>),
     /// The bytes in `ranges`, concatenated; ranges that do not fit are skipped, as in Wireshark.
     Slice(Box<Value>, Vec<Slice>),
+    /// Bitwise and of every pair of occurrences (integers, or byte strings cut to the shorter one).
     BitAnd(Box<Value>, Box<Value>),
     /// Byte length of each occurrence.
     Len(Box<Value>),
@@ -87,20 +117,27 @@ pub enum Value {
     Count(Box<Value>),
     /// A string field read through `upper()` or `lower()` (ASCII case folding).
     Case {
+        /// `upper()` if true, `lower()` if false.
         upper: bool,
+        /// The string value.
         value: Box<Value>,
     },
     /// Signed arithmetic on every pair of occurrences. Overflow and division by zero give no
     /// value.
     Arith(ArithOp, Box<Value>, Box<Value>),
+    /// Signed negation.
     Neg(Box<Value>),
+    /// Absolute value.
     Abs(Box<Value>),
     /// The largest (or smallest) of all occurrences of all arguments; absent arguments are
     /// skipped.
     Extreme {
+        /// `max()` if true, `min()` if false.
         max: bool,
+        /// The arguments.
         args: Vec<Value>,
     },
+    /// A constant.
     Lit(Lit),
 }
 
@@ -115,16 +152,21 @@ pub(crate) fn arith(op: ArithOp, a: i64, b: i64) -> Option<i64> {
     }
 }
 
+/// An item of a set in [`Test::Member`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SetItem {
+    /// A single value (an address may carry a prefix).
     One(Lit),
     /// Inclusive range.
     Range(Lit, Lit),
 }
 
+/// A literal value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Lit {
+    /// A boolean.
     Bool(bool),
+    /// An unsigned integer.
     Uint(u64),
     /// A signed integer, for arithmetic.
     Int(i64),
@@ -132,7 +174,9 @@ pub enum Lit {
     Ipv4([u8; 4], u8),
     /// Address and prefix length (128 for a single address).
     Ipv6([u8; 16], u8),
+    /// A MAC address.
     Ether([u8; 6]),
+    /// A byte string (also strings and protocol bytes).
     Bytes(Vec<u8>),
 }
 

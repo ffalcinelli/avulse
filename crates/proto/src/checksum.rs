@@ -1,9 +1,32 @@
 //! Internet checksums (RFC 1071).
+//!
+//! After changing a packet, call [`recalculate`] to fix every checksum it carries:
+//!
+//! ```
+//! use avulse_proto::checksum::{self, Updated};
+//! use avulse_proto::{Link, Packet};
+//!
+//! // IPv4 + UDP from 10.0.0.1:5353 to 10.0.0.2:53, both checksums zero.
+//! let mut bytes = [
+//!     0x45, 0, 0, 30, 0, 0, 0x40, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2, //
+//!     0x14, 0xe9, 0, 53, 0, 10, 0, 0, //
+//!     0xab, 0xcd,
+//! ];
+//! let updated = checksum::recalculate(&mut bytes, Link::Ip);
+//! assert_eq!(updated, Updated { ipv4: true, udp: true, ..Updated::default() });
+//!
+//! let pkt = Packet::parse(&bytes, Link::Ip);
+//! let ip = pkt.ipv4().unwrap();
+//! assert_eq!(checksum::ipv4_header(ip.bytes()), ip.checksum());
+//! ```
 
 use crate::headers::ip_proto;
 use crate::packet::{Link, Network, Packet, Transport};
 
 /// Adds `data` to a running one's-complement sum.
+///
+/// Start with `acc = 0`, chain calls for the pieces, then [`finish`]. An odd-length `data` is
+/// padded with a zero byte, so only the last piece may have an odd length.
 pub fn sum(data: &[u8], mut acc: u64) -> u64 {
     let (words, rest) = data.as_chunks::<2>();
     for w in words {
@@ -24,6 +47,10 @@ pub fn finish(mut acc: u64) -> u16 {
 }
 
 /// Checksum of an IPv4 header, ignoring the value in its checksum field.
+///
+/// # Panics
+///
+/// If `header` is shorter than 20 bytes. [`Ipv4::bytes`](crate::Ipv4::bytes) never is.
 pub fn ipv4_header(header: &[u8]) -> u16 {
     finish(sum(&header[12..], sum(&header[..10], 0)))
 }
@@ -31,10 +58,15 @@ pub fn ipv4_header(header: &[u8]) -> u16 {
 /// Which checksums [`recalculate`] updated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Updated {
+    /// The IPv4 header checksum.
     pub ipv4: bool,
+    /// The TCP checksum.
     pub tcp: bool,
+    /// The UDP checksum.
     pub udp: bool,
+    /// The ICMP checksum.
     pub icmp: bool,
+    /// The ICMPv6 checksum.
     pub icmpv6: bool,
 }
 

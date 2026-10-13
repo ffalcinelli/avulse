@@ -5,11 +5,14 @@ use core::fmt;
 /// A byte range in the filter source.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Span {
+    /// Offset of the first byte.
     pub start: usize,
+    /// Offset just past the last byte.
     pub end: usize,
 }
 
 impl Span {
+    /// The span from `start` to `end` (exclusive).
     pub const fn new(start: usize, end: usize) -> Self {
         Span { start, end }
     }
@@ -23,21 +26,29 @@ impl Span {
     }
 }
 
+/// How serious a [`Diagnostic`] is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
+    /// The filter is rejected.
     Error,
+    /// The filter compiles, but probably does not mean what it says.
     Warning,
 }
 
 /// A compile error or warning, pointing into the filter source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
+    /// Error or warning.
     pub level: Level,
+    /// The part of the source it is about.
     pub span: Span,
+    /// What is wrong, in one line.
     pub message: String,
+    /// How to fix it, such as "did you mean `tcp.port`?".
     pub help: Option<String>,
 }
 
+/// The result of parsing or compiling a filter.
 pub type Result<T> = core::result::Result<T, Diagnostic>;
 
 impl Diagnostic {

@@ -14,3 +14,5 @@ workspace = true
 [lib]
 name = "avulse"
 crate-type = ["cdylib", "staticlib", "rlib"]
+# Same name as the `avulse` facade crate; its API is documented by the C header.
+doc = false

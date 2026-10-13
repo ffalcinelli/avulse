@@ -17,20 +17,31 @@ pub const MAX_VLANS: usize = 2;
 /// Up to this many IPv6 extension headers are walked.
 const MAX_IPV6_EXT: usize = 8;
 
+/// The network-layer header of a [`Packet`].
 #[derive(Clone, Copy, Debug)]
 pub enum Network<'a> {
+    /// No ARP or IP header: an unknown EtherType, or a truncated header.
     None,
+    /// An ARP packet.
     Arp(Arp<'a>),
+    /// An IPv4 header.
     Ipv4(Ipv4<'a>),
+    /// An IPv6 fixed header.
     Ipv6(Ipv6<'a>),
 }
 
+/// The transport-layer header of a [`Packet`].
 #[derive(Clone, Copy, Debug)]
 pub enum Transport<'a> {
+    /// No known transport header: another protocol, a non-first fragment, or a truncated header.
     None,
+    /// A TCP header.
     Tcp(Tcp<'a>),
+    /// A UDP header.
     Udp(Udp<'a>),
+    /// An ICMP message.
     Icmp(Icmp<'a>),
+    /// An ICMPv6 message.
     Icmpv6(Icmpv6<'a>),
 }
 
@@ -38,6 +49,26 @@ pub enum Transport<'a> {
 ///
 /// Parsing never fails. It stops at the first header that is truncated, malformed or of an unknown
 /// type, and everything after it is the payload.
+///
+/// # Examples
+///
+/// ```
+/// use avulse_proto::{Link, Packet};
+///
+/// // IPv4 + UDP from 10.0.0.1:5353 to 10.0.0.2:53, with a 2-byte payload.
+/// let bytes = [
+///     0x45, 0, 0, 30, 0, 0, 0x40, 0, 64, 17, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2, //
+///     0x14, 0xe9, 0, 53, 0, 10, 0, 0, //
+///     0xab, 0xcd,
+/// ];
+/// let pkt = Packet::parse(&bytes, Link::Ip);
+/// let ip = pkt.ipv4().unwrap();
+/// assert_eq!(ip.dst().to_string(), "10.0.0.2");
+/// assert!(ip.dont_fragment());
+/// assert_eq!(pkt.udp().unwrap().dst_port(), 53);
+/// assert_eq!(pkt.payload(), [0xab, 0xcd]);
+/// assert!(pkt.tcp().is_none());
+/// ```
 #[derive(Clone, Debug)]
 pub struct Packet<'a> {
     data: &'a [u8],
@@ -56,6 +87,10 @@ pub struct Packet<'a> {
 }
 
 impl<'a> Packet<'a> {
+    /// Parses `data`, which starts with the header `link` names.
+    ///
+    /// This never fails, allocates or panics. Headers that cannot be read are absent, and the
+    /// bytes from there on are the [`payload`](Self::payload).
     pub fn parse(data: &'a [u8], link: Link) -> Self {
         let mut p = Packet {
             data,
@@ -248,9 +283,11 @@ impl<'a> Packet<'a> {
     pub fn data(&self) -> &'a [u8] {
         self.data
     }
+    /// The Ethernet header, for [`Link::Ethernet`] buffers of at least 14 bytes.
     pub fn eth(&self) -> Option<Ethernet<'a>> {
         self.eth
     }
+    /// The VLAN tags, outermost first (at most [`MAX_VLANS`]).
     pub fn vlans(&self) -> &[VlanTag] {
         &self.vlans[..self.vlan_count]
     }
@@ -258,21 +295,25 @@ impl<'a> Packet<'a> {
     pub fn ethertype(&self) -> Option<u16> {
         self.ethertype
     }
+    /// The ARP or IP header.
     pub fn network(&self) -> Network<'a> {
         self.network
     }
+    /// The ARP packet, if any.
     pub fn arp(&self) -> Option<Arp<'a>> {
         match self.network {
             Network::Arp(a) => Some(a),
             _ => None,
         }
     }
+    /// The IPv4 header, if any.
     pub fn ipv4(&self) -> Option<Ipv4<'a>> {
         match self.network {
             Network::Ipv4(ip) => Some(ip),
             _ => None,
         }
     }
+    /// The IPv6 fixed header, if any.
     pub fn ipv6(&self) -> Option<Ipv6<'a>> {
         match self.network {
             Network::Ipv6(ip) => Some(ip),
@@ -287,6 +328,7 @@ impl<'a> Packet<'a> {
     pub fn ip_protocol(&self) -> Option<u8> {
         self.protocol
     }
+    /// Fragmentation info, if this is an IPv4 fragment or carries an IPv6 fragment header.
     pub fn fragment(&self) -> Option<Fragment> {
         self.fragment
     }
@@ -294,27 +336,32 @@ impl<'a> Packet<'a> {
     pub fn ipv6_fragment_header(&self) -> Option<usize> {
         self.ipv6_frag_header
     }
+    /// The TCP, UDP, ICMP or ICMPv6 header.
     pub fn transport(&self) -> Transport<'a> {
         self.transport
     }
+    /// The TCP header, if any.
     pub fn tcp(&self) -> Option<Tcp<'a>> {
         match self.transport {
             Transport::Tcp(t) => Some(t),
             _ => None,
         }
     }
+    /// The UDP header, if any.
     pub fn udp(&self) -> Option<Udp<'a>> {
         match self.transport {
             Transport::Udp(u) => Some(u),
             _ => None,
         }
     }
+    /// The ICMP message, if any.
     pub fn icmp(&self) -> Option<Icmp<'a>> {
         match self.transport {
             Transport::Icmp(i) => Some(i),
             _ => None,
         }
     }
+    /// The ICMPv6 message, if any.
     pub fn icmpv6(&self) -> Option<Icmpv6<'a>> {
         match self.transport {
             Transport::Icmpv6(i) => Some(i),
@@ -329,6 +376,7 @@ impl<'a> Packet<'a> {
     pub fn payload(&self) -> &'a [u8] {
         &self.data[self.payload.clone()]
     }
+    /// The range of [`payload`](Self::payload) in [`data`](Self::data).
     pub fn payload_range(&self) -> Range<usize> {
         self.payload.clone()
     }

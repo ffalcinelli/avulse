@@ -7,38 +7,57 @@ use core::fmt;
 
 use crate::error::Span;
 
+/// A whole filter: the `let` definitions, then the expression.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Program {
+    /// The `let` definitions, in source order.
     pub lets: Vec<Let>,
+    /// The filter expression.
     pub expr: Expr,
 }
 
 /// `let name = body` (Avulse extension), used as `$name` or `${name}`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Let {
+    /// The macro name, without `$`.
     pub name: String,
+    /// Where the definition is.
     pub span: Span,
+    /// What `$name` expands to.
     pub body: MacroBody,
 }
 
+/// The body of a `let`: an expression, or a set usable after `in`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MacroBody {
+    /// A test or a value, such as `tcp.port == 80` or `tcp.port`.
     Expr(Expr),
+    /// A set, such as `{80, 443}`.
     Set(Set),
 }
 
+/// A test: the logical operators and the relations between operands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expr {
+    /// `a or b or …` (also `||`).
     Or(Vec<Expr>),
+    /// `a xor b` (also `^^`).
     Xor(Box<Expr>, Box<Expr>),
+    /// `a and b and …` (also `&&`).
     And(Vec<Expr>),
+    /// `not a` (also `!`), with the span of the operator.
     Not(Box<Expr>, Span),
+    /// A relation, such as `tcp.port == 80` or `ip.src in {10.0.0.0/8}`.
     Rel {
         /// `any` or `all` before the relation; `None` keeps the operator's default.
         quant: Option<Quant>,
+        /// The left operand.
         lhs: Operand,
+        /// The operator.
         op: RelOp,
+        /// The right operand or set.
         rhs: Rhs,
+        /// The span of the whole relation.
         span: Span,
     },
     /// A bare operand: a field or protocol (presence), a flag, a bitwise `&` (non-zero), a macro.
@@ -54,6 +73,7 @@ pub enum Quant {
     All,
 }
 
+/// A relational operator, as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RelOp {
     /// `==`, `eq`, `any_eq`
@@ -64,62 +84,93 @@ pub enum RelOp {
     AllEq,
     /// `!==`, `~=`, `any_ne`
     AnyNe,
+    /// `<`, `lt`
     Lt,
+    /// `<=`, `le`
     Le,
+    /// `>`, `gt`
     Gt,
+    /// `>=`, `ge`
     Ge,
+    /// `contains`
     Contains,
+    /// `matches`, `~`
     Matches,
+    /// `in`
     In,
+    /// `not in`
     NotIn,
 }
 
+/// The right side of a relation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Rhs {
+    /// A value.
     Operand(Operand),
+    /// A set (after `in` and `not in`).
     Set(Set),
 }
 
+/// A set of values and ranges.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Set {
+    /// `{a, b..c}`: the items and the span of the braces.
     Items(Vec<SetItem>, Span),
+    /// `$name`: a set defined by `let`.
     Macro(String, Span),
 }
 
+/// One item of a set: a value, or an inclusive range `lo..hi`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SetItem {
+    /// The value, or the start of the range.
     pub lo: Operand,
+    /// The inclusive end of the range.
     pub hi: Option<Operand>,
 }
 
+/// A value: a field, literal, slice, function call or arithmetic.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Operand {
     /// A field, protocol, constant or literal, resolved by the checker.
     Word(String, Span),
+    /// A quoted string, after escape processing.
     Str(Vec<u8>, Span),
+    /// A character literal (`'a'`, `'\\x41'`).
     Char(u8, Span),
+    /// `$name`: a value defined by `let`.
     Macro(String, Span),
     /// `base[ranges]`; several ranges concatenate (`frame[0:2,4]`).
     Slice(Box<Operand>, Vec<Slice>, Span),
     /// `field#n` or `field#[ranges]`: the occurrences in the given protocol layers (1-based,
     /// negative from the last).
     Layer(Box<Operand>, Vec<Slice>, Span),
+    /// `a & b`: bitwise and of integers or byte strings.
     BitAnd(Box<Operand>, Box<Operand>, Span),
+    /// `a + b`, `a - b`, `a * b`, `a / b`, `a % b`.
     Arith(ArithOp, Box<Operand>, Box<Operand>, Span),
+    /// Unary `-a`.
     Neg(Box<Operand>, Span),
     /// `@field`: the bytes a field covers on the wire.
     Raw(Box<Operand>, Span),
     /// `{ … }`, which groups arithmetic (parentheses group tests).
     Group(Box<Operand>, Span),
+    /// A function call such as `len(tcp.payload)`: the name and the arguments.
     Call(String, Vec<Operand>, Span),
 }
 
+/// An arithmetic operator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArithOp {
+    /// `+`
     Add,
+    /// `-`
     Sub,
+    /// `*`
     Mul,
+    /// `/`
     Div,
+    /// `%`
     Mod,
 }
 
@@ -136,6 +187,7 @@ impl fmt::Display for ArithOp {
 }
 
 impl Operand {
+    /// The span of the operand in the source.
     pub fn span(&self) -> Span {
         match self {
             Operand::Word(_, s)
@@ -158,14 +210,20 @@ impl Operand {
 /// offsets count from the end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slice {
+    /// The first byte; negative counts from the end.
     pub start: i64,
+    /// Where the range ends.
     pub end: SliceEnd,
 }
 
+/// How a [`Slice`] ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SliceEnd {
+    /// `[i:n]`: `n` bytes.
     Len(i64),
+    /// `[i-j]`: up to and including byte `j`.
     Inclusive(i64),
+    /// `[i:]`: up to the end.
     Open,
 }
 

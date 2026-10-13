@@ -16,6 +16,19 @@ const FUNCTIONS: &[&str] = &[
     "len", "count", "string", "upper", "lower", "abs", "max", "min", "vals", "dec", "hex",
 ];
 
+/// Parses a filter into its syntax tree, without resolving names or checking types.
+///
+/// The tree's [`Display`](core::fmt::Display) prints the canonical form (`avulse filter fmt`).
+/// Use [`Filter::compile`](crate::Filter::compile) to get a filter that can run.
+///
+/// ```
+/// let program = avulse_filter::parse("tcp.port==80 && !udp").unwrap();
+/// assert_eq!(program.to_string(), "tcp.port == 80 and not udp");
+/// ```
+///
+/// # Errors
+///
+/// A [`Diagnostic`] for a lexical or syntax error, such as an unbalanced parenthesis.
 pub fn parse(src: &str) -> Result<Program> {
     let mut p = Parser {
         toks: lex(src)?,
