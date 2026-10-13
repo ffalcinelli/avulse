@@ -99,7 +99,8 @@ pub enum Operand {
     Str(Vec<u8>, Span),
     Char(u8, Span),
     Macro(String, Span),
-    Slice(Box<Operand>, Slice, Span),
+    /// `base[ranges]`; several ranges concatenate (`frame[0:2,4]`).
+    Slice(Box<Operand>, Vec<Slice>, Span),
     /// `field#n` or `field#[ranges]`: the occurrences in the given protocol layers (1-based,
     /// negative from the last).
     Layer(Box<Operand>, Vec<Slice>, Span),
@@ -351,7 +352,16 @@ impl fmt::Display for Operand {
                 _ => write!(f, "'\\x{c:02x}'"),
             },
             Operand::Macro(m, _) => write!(f, "${m}"),
-            Operand::Slice(base, s, _) => write!(f, "{base}[{s}]"),
+            Operand::Slice(base, ranges, _) => {
+                write!(f, "{base}[")?;
+                for (i, s) in ranges.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ",")?;
+                    }
+                    write!(f, "{s}")?;
+                }
+                write!(f, "]")
+            }
             Operand::Layer(base, layers, _) => {
                 write!(f, "{base}")?;
                 fmt_layers(f, layers)

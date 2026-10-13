@@ -578,6 +578,46 @@ fn bytes_and_case() {
 }
 
 #[test]
+fn multi_range_slices() {
+    let f = dns_query();
+    assert!(check(
+        "udp.payload[0:2,3] == 12:34:00 and udp.payload[3,0:2] == 00:12:34",
+        &f
+    ));
+    // Ranges that do not fit are skipped; none fitting gives no value.
+    assert!(check(
+        "udp.payload[0:2,10] == 12:34 and udp.payload[0:2,2:10] == 12:34",
+        &f
+    ));
+    assert!(!check("udp.payload[10,20]", &f));
+    assert!(check(
+        "len(udp.payload[0:2,1:]) == 5 and udp.payload[0:2,3][1:2] == 34:00",
+        &f
+    ));
+    assert!(check("ip.src[0,3] == 0a:01 and eth.src[0,5] == 00:55", &f));
+    let meta = Meta {
+        iface: Some("Eth0"),
+        ..Meta::default()
+    };
+    assert!(check_with("upper(iface)[0,3] == \"E0\"", &f, &meta));
+    // At most 32 bytes: too long a result gives no value, or an error when it is known early.
+    assert!(check("frame[0:20,70:]", &long_frame()));
+    assert!(!check("frame[0:20,40:]", &long_frame()));
+    assert!(
+        error("frame[0:20,20:20] == 00")
+            .message
+            .contains("more than 32 bytes")
+    );
+}
+
+/// A frame long enough for 40-byte slices.
+fn long_frame() -> alloc::vec::Vec<u8> {
+    let mut f = https_syn();
+    f.resize(80, 0);
+    f
+}
+
+#[test]
 fn errors_explain_themselves() {
     let e = error("tcp.prot == 80");
     assert!(e.message.contains("unknown field `tcp.prot`"));

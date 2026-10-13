@@ -21,6 +21,9 @@ struct Ctx {
     field: Option<Field>,
 }
 
+/// Most bytes a multi-range slice can hold (the evaluator's buffer for computed bytes).
+const MAX_CONCAT: i64 = 32;
+
 /// The context of an arithmetic operand.
 const INT: Ctx = Ctx {
     ty: Ty::Int,
@@ -250,7 +253,25 @@ impl<'a> Checker<'a> {
                     )
                     .help("slices apply to protocols, addresses and byte strings"));
                 }
-                typed(Value::Slice(Box::new(b.value), *s), Ty::Bytes, &[])
+                // Several ranges are copied into a bounded buffer; reject what cannot fit.
+                let fixed = |r: &ast::Slice| match r.end {
+                    ast::SliceEnd::Len(n) if r.start >= 0 => Some(n),
+                    ast::SliceEnd::Inclusive(e) if r.start >= 0 && e >= r.start => {
+                        Some(e - r.start + 1)
+                    }
+                    _ => None,
+                };
+                let total = s
+                    .iter()
+                    .try_fold(0i64, |t, r| Some(t.saturating_add(fixed(r)?)));
+                if s.len() > 1 && total.is_some_and(|t| t > MAX_CONCAT) {
+                    return Err(Diagnostic::error(
+                        o.span(),
+                        format!("these ranges add up to more than {MAX_CONCAT} bytes"),
+                    )
+                    .help("compare fewer bytes, or use one range"));
+                }
+                typed(Value::Slice(Box::new(b.value), s.clone()), Ty::Bytes, &[])
             }
             Operand::Group(inner, _) => self.resolve(inner, ctx),
             Operand::Layer(base, layers, _) => {

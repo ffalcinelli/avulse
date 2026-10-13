@@ -335,10 +335,13 @@ fn value<'a>(v: &'a Value, cx: &Cx<'a>) -> Vals<'a> {
         Value::Lit(l) => Vals::one(lit(l)),
         Value::Field(f) => load(*f, cx),
         Value::Layer(f, ranges) => load_layer(*f, ranges, cx),
-        Value::Slice(base, s) => {
+        Value::Slice(base, ranges) => {
             let mut out = Vals::new();
             for x in value(base, cx).as_slice() {
-                out.opt(slice(*x, s.start, s.end));
+                out.opt(match ranges.as_slice() {
+                    [s] => slice(*x, s.start, s.end),
+                    _ => concat(*x, ranges),
+                });
             }
             out
         }
@@ -415,6 +418,25 @@ fn value<'a>(v: &'a Value, cx: &Cx<'a>) -> Vals<'a> {
             out
         }
     }
+}
+
+/// Several ranges of `v`, concatenated (folded if `v` is). Ranges that do not fit are skipped; no
+/// fitting range, or more than [`OWNED`] bytes, gives no value.
+fn concat<'a>(v: V<'a>, ranges: &[Slice]) -> Option<V<'a>> {
+    let mut out = [0; OWNED];
+    let mut n = 0;
+    let mut any = false;
+    for r in ranges {
+        let Some(part) = slice(v, r.start, r.end) else {
+            continue;
+        };
+        any = true;
+        for b in part.seq()?.iter() {
+            *out.get_mut(n)? = b;
+            n += 1;
+        }
+    }
+    any.then_some(V::Owned(out, n as u8))
 }
 
 fn slice<'a>(v: V<'a>, start: i64, end: SliceEnd) -> Option<V<'a>> {

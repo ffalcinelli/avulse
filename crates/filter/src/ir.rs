@@ -66,7 +66,8 @@ pub enum Value {
     Field(Field),
     /// The occurrences of a field in the given protocol layers (`vlan.id#2`).
     Layer(Field, Vec<Slice>),
-    Slice(Box<Value>, Slice),
+    /// The bytes in `ranges`, concatenated; ranges that do not fit are skipped, as in Wireshark.
+    Slice(Box<Value>, Vec<Slice>),
     BitAnd(Box<Value>, Box<Value>),
     /// Byte length of each occurrence.
     Len(Box<Value>),
@@ -245,11 +246,20 @@ impl fmt::Display for Value {
                 f.write_str(def(*field).name)?;
                 crate::ast::fmt_layers(f, layers)
             }
-            Value::Slice(v, s) => match s.end {
-                SliceEnd::Len(n) => write!(f, "{v}[{}:{n}]", s.start),
-                SliceEnd::Inclusive(e) => write!(f, "{v}[{}-{e}]", s.start),
-                SliceEnd::Open => write!(f, "{v}[{}:]", s.start),
-            },
+            Value::Slice(v, ranges) => {
+                write!(f, "{v}[")?;
+                for (i, s) in ranges.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ",")?;
+                    }
+                    match s.end {
+                        SliceEnd::Len(n) => write!(f, "{}:{n}", s.start)?,
+                        SliceEnd::Inclusive(e) => write!(f, "{}-{e}", s.start)?,
+                        SliceEnd::Open => write!(f, "{}:", s.start)?,
+                    }
+                }
+                write!(f, "]")
+            }
             Value::BitAnd(a, b) => write!(f, "(& {a} {b})"),
             Value::Len(v) => write!(f, "(len {v})"),
             Value::Count(v) => write!(f, "(count {v})"),

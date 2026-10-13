@@ -418,22 +418,28 @@ impl Parser {
         }
         while self.peek() == &Tok::LBracket {
             let open = self.bump().span;
-            let slice = match self.bump() {
-                Token {
-                    tok: Tok::Word(w),
-                    span,
-                } => parse_slice(&w).ok_or_else(|| {
-                    Diagnostic::error(span, format!("invalid slice `[{w}]`")).help(SLICE_HELP)
-                })?,
-                t => {
-                    return Err(
-                        Diagnostic::error(t.span, "expected a slice range").help(SLICE_HELP)
-                    );
+            let mut ranges = Vec::new();
+            loop {
+                ranges.push(match self.bump() {
+                    Token {
+                        tok: Tok::Word(w),
+                        span,
+                    } => parse_slice(&w).ok_or_else(|| {
+                        Diagnostic::error(span, format!("invalid slice `[{w}]`")).help(SLICE_HELP)
+                    })?,
+                    t => {
+                        return Err(
+                            Diagnostic::error(t.span, "expected a slice range").help(SLICE_HELP)
+                        );
+                    }
+                });
+                if !self.eat(&Tok::Comma) {
+                    break;
                 }
-            };
+            }
             let close = self.expect(Tok::RBracket, "`]`")?;
             let span = operand.span().to(close).to(open);
-            operand = Operand::Slice(Box::new(operand), slice, span);
+            operand = Operand::Slice(Box::new(operand), ranges, span);
         }
         Ok(Expr::Test(operand))
     }
@@ -467,7 +473,7 @@ impl Parser {
     }
 }
 
-const SLICE_HELP: &str = "slices are `[i]`, `[i:len]`, `[i-j]` (inclusive), `[i:]` or `[:len]`";
+const SLICE_HELP: &str = "slices are `[i]`, `[i:len]`, `[i-j]` (inclusive), `[i:]`, `[:len]`, or a list such as `[0:2,4]`";
 
 fn into_operand(e: Expr, span: Span, ctx: &str) -> Result<Operand> {
     match e {

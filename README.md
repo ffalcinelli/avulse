@@ -40,6 +40,8 @@ outbound and ip.dst not in $lan and $web
   a comment.
 - Sets, ranges and CIDR: `tcp.dstport in {80, 443, 8000..8100}`, `ip.src == 10.0.0.0/8`.
 - Slices and payloads: `eth.src[0:3] == 00:11:22`, `tcp.payload contains "GET"`, `len(udp.payload) > 512`.
+- Multi-range slices concatenate: `eth.src[0:3,5] == 00:11:22:55`. Ranges that do not fit are
+  skipped, as in Wireshark.
 - `&` on bytes and addresses: `udp.payload[2:2] & 80:00`, `eth.dst[0] & 1`,
   `ip.src & 255.255.0.0 == 192.168.0.0`. The result is as long as the shorter side; bare, it tests
   for a set bit. `upper()` and `lower()` fold the string fields (`upper(iface) == "ETH0"`).
@@ -68,8 +70,9 @@ compiles selects the same packets, except:
 - **No reassembly.** As in Wireshark with reassembly off, `tcp.len` is absent on IP fragments.
 - **Stricter types.** A literal that cannot fit the field is an error (`ip.flags == 8`), where
   Wireshark accepts the filter and never matches.
-- **Computed byte strings are capped at 32 bytes.** `&` on two longer byte strings gives no
-  value.
+- **Computed byte strings are capped at 32 bytes.** A multi-range slice or a `&` on two byte
+  strings that comes out longer gives no value (or a compile error when the length is known). A
+  single-range slice has no limit.
 - **Signed arithmetic throughout.** `tcp.srcport + -1` subtracts one; Wireshark converts the `-1` to
   the field's unsigned type. Avulse also accepts literals beyond the field's range in arithmetic
   (`tcp.srcport + 1 == 65536`), which Wireshark rejects.
