@@ -112,6 +112,12 @@ Wireshark.
   not*, and `!==` means *any not*. `not in` means the field is present and none of its values is in the set.
   A comparison with an absent field is false. A filter that copies and pastes from Wireshark and parses must mean
   the same thing. The differences are listed in the README ("Differences from Wireshark").
+- **Compatibility rule.** A filter that compiles means what it means in Wireshark. Avulse may reject more (types,
+  the evaluator's fixed buffers), with an error and a hint, but it never gives a different result silently.
+  Each audience gets its own compatibility: people writing new filters get Wireshark's language, which they
+  know and can test with `tshark`; existing WinDivert users get WinDivert's API, address struct and filter
+  syntax, through the `windivert-compat` shim and its front-end. The native language does not imitate
+  WinDivert's.
 - **Clear rejections.** Fields that need dissector state are rejected with a clear message: `http.*`, `tls.*`, or
   anything that needs TCP reassembly. `matches` (PCRE) only runs in user space, through the fallback path, and
   `filter explain` says so.

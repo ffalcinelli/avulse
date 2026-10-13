@@ -10,7 +10,7 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | Area | State |
 | --- | --- |
 | `crates/proto` (`avulse-proto`) | Done for Phase 1. Zero-copy `no_std` parsing: Ethernet, 2 VLAN tags, ARP, IPv4, IPv6 (8 extension headers, fragments), TCP, UDP, ICMP, ICMPv6. Checksum recalculation. 12 tests, including all truncations and random input. |
-| `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. Wireshark 4.6 syntax covered: quantifiers, arithmetic, layers, value labels, `@field`, `&` on bytes, multi-range slices, `upper`/`lower`, and `matches` (optional `regex` feature). Semantics validated against tshark 4.6/4.7 (`src/tests/tshark.rs`, including every field's byte span against PDML). 50 unit tests, 6 tshark tests (opt-in) and a doctest. No bytecode and no WinDivert front-end yet. |
+| `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. Wireshark 4.6 syntax covered: quantifiers, arithmetic, layers, value labels, `@field`, `&` on bytes, multi-range slices, `upper`/`lower`, and `matches` (optional `regex` feature). Semantics validated against tshark 4.6/4.7 (`src/tests/tshark.rs`, including every field's byte span against PDML). 55 unit tests, 7 tshark tests (opt-in) and a doctest. No bytecode and no WinDivert front-end yet. |
 | `crates/cli` (`avulse`) | `avulse filter check \| fmt \| explain \| eval --hex … \| fields`. Exit codes: 0 match, 1 no match, 2 error. |
 | `crates/{ebpf,backend-linux,avulse,capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
@@ -173,6 +173,13 @@ refer to the packet selected in the Wireshark GUI).
 `Int` values with `Arith`, `Neg`, `Abs` and `Extreme` (`max`/`min`); `Layer` and `Raw` field reads;
 multi-range slices; and `Case` (`upper`/`lower`). `Test::Matches` is user space only: the verifier
 rejects it and the kernel backends pass such packets up (`Filter::user_space_only()`).
+
+**Note on the evaluator's limits.** The checker rejects filters whose values could exceed the
+evaluator's fixed buffers: 4 occurrences (`eval::MAX`, through arithmetic and `&`) and 32 computed
+bytes (`eval::OWNED`, multi-range slices and `&` on bytes). Wireshark accepts these, so the
+`LIMITS` table in `src/tests/tshark.rs` pins them. The bytecode interpreter has the same
+constraints, so this is where to decide whether joined ranges and `&` results should be read in
+place, without a copy, to lift the byte limit. Move each `LIMITS` row to `AGREE` once it works.
 
 **Why.** The Windows driver and the macOS system extension must not walk a heap IR built by user
 space. They get a flat, verified program. The IR evaluator stays the reference implementation.
