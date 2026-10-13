@@ -1,5 +1,6 @@
 //! Recursive-descent parser. Precedence follows Wireshark: `not` binds tightest, then `and`,
-//! `xor`, `or`; `&` binds tighter than comparisons.
+//! `xor`, `or`. Inside a value, unary `-` binds tightest, then `* / %`, `+ -` and `&`, all
+//! tighter than comparisons.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -246,7 +247,9 @@ impl Parser {
         };
         let operand_follows = match self.peek_at(1) {
             Tok::Word(w) => !is_keyword(w),
-            Tok::Str(_) | Tok::Char(_) | Tok::Macro(_) | Tok::LParen => true,
+            Tok::Str(_) | Tok::Char(_) | Tok::Macro(_) | Tok::LParen | Tok::LBrace | Tok::Minus => {
+                true
+            }
             _ => false,
         };
         if !operand_follows {
@@ -256,18 +259,101 @@ impl Parser {
         Some(q)
     }
 
-    /// A primary, optionally followed by `& primary` chains.
+    /// A value: `&` chains of sums of products of (possibly negated) primaries.
     fn value(&mut self) -> Result<Expr> {
         let start = self.span();
-        let mut e = self.primary()?;
+        let mut e = self.sum()?;
         while self.eat(&Tok::Amp) {
             let lhs = into_operand(e, start, "before `&`")?;
             let s = self.span();
-            let rhs = into_operand(self.primary()?, s, "after `&`")?;
+            let rhs = into_operand(self.sum()?, s, "after `&`")?;
             let span = start.to(self.prev_span());
             e = Expr::Test(Operand::BitAnd(Box::new(lhs), Box::new(rhs), span));
         }
         Ok(e)
+    }
+
+    fn sum(&mut self) -> Result<Expr> {
+        let start = self.span();
+        let mut e = self.product()?;
+        loop {
+            let op = if self.eat(&Tok::Plus) {
+                ArithOp::Add
+            } else if self.eat(&Tok::Minus) || self.split_negative() {
+                ArithOp::Sub
+            } else {
+                break;
+            };
+            e = self.arith(e, start, op, Self::product)?;
+        }
+        Ok(e)
+    }
+
+    fn product(&mut self) -> Result<Expr> {
+        let start = self.span();
+        let mut e = self.negation()?;
+        loop {
+            let op = match self.peek() {
+                Tok::Star => ArithOp::Mul,
+                Tok::Slash => ArithOp::Div,
+                Tok::Percent => ArithOp::Mod,
+                _ => break,
+            };
+            self.bump();
+            e = self.arith(e, start, op, Self::negation)?;
+        }
+        Ok(e)
+    }
+
+    fn arith(
+        &mut self,
+        lhs: Expr,
+        start: Span,
+        op: ArithOp,
+        next: fn(&mut Self) -> Result<Expr>,
+    ) -> Result<Expr> {
+        let lhs = into_operand(lhs, start, &format!("before `{op}`"))?;
+        let s = self.span();
+        let rhs = into_operand(next(self)?, s, &format!("after `{op}`"))?;
+        let span = start.to(self.prev_span());
+        Ok(Expr::Test(Operand::Arith(
+            op,
+            Box::new(lhs),
+            Box::new(rhs),
+            span,
+        )))
+    }
+
+    fn negation(&mut self) -> Result<Expr> {
+        let start = self.span();
+        if !self.eat(&Tok::Minus) {
+            return self.primary();
+        }
+        let s = self.span();
+        let inner = into_operand(self.negation()?, s, "after `-`")?;
+        let span = start.to(self.prev_span());
+        Ok(Expr::Test(Operand::Neg(Box::new(inner), span)))
+    }
+
+    /// After an operand, `a -1` is a subtraction: the lexer saw the word `-1`, so turn it into
+    /// `-` followed by `1`.
+    fn split_negative(&mut self) -> bool {
+        let Tok::Word(w) = self.peek() else {
+            return false;
+        };
+        let Some(rest) = w
+            .strip_prefix('-')
+            .filter(|r| r.starts_with(|c: char| c.is_ascii_digit()))
+        else {
+            return false;
+        };
+        let rest = rest.into();
+        let span = self.span();
+        self.toks[self.pos] = Token {
+            tok: Tok::Word(rest),
+            span: Span::new(span.start + 1, span.end),
+        };
+        true
     }
 
     fn primary(&mut self) -> Result<Expr> {
@@ -277,6 +363,12 @@ impl Parser {
                 let e = self.expr()?;
                 self.expect(Tok::RParen, "`)`")?;
                 return Ok(e);
+            }
+            Tok::LBrace => {
+                let s = self.span();
+                let inner = into_operand(self.value()?, s, "inside `{ }`")?;
+                let end = self.expect(Tok::RBrace, "`}`")?;
+                Operand::Group(Box::new(inner), t.span.to(end))
             }
             Tok::Word(w) if is_keyword(&w) => {
                 return Err(Diagnostic::error(
@@ -491,6 +583,10 @@ mod tests {
         );
         // `any`/`all` are quantifiers only in front of an operand.
         assert_eq!(fmt("not all .tcp.port<1"), "not all .tcp.port < 1");
+        assert_eq!(
+            fmt("tcp.srcport-1==a -1 and {a+1}*-b / 2%3 & 4"),
+            "tcp.srcport-1 == a - 1 and {a + 1} * -b / 2 % 3 & 4"
+        );
     }
 
     #[test]

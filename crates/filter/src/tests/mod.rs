@@ -372,6 +372,69 @@ fn quantifiers_and_leading_dots() {
 }
 
 #[test]
+fn arithmetic() {
+    let f = https_syn();
+    assert!(check(
+        "tcp.srcport + 1 == 51001 and tcp.dstport - 444 == -1",
+        &f
+    ));
+    assert!(check("tcp.srcport -1 == 50999 and -tcp.dstport < 0", &f));
+    assert!(check(
+        "tcp.srcport + 1 * 2 == 51002 and {tcp.srcport + 1} * 2 == 102002",
+        &f
+    ));
+    assert!(check("tcp.srcport & 0xff00 + 1 == 0xc700", &f));
+    assert!(check(
+        "tcp.port + tcp.port == 51443 and not tcp.port - tcp.port != 0",
+        &f
+    ));
+    assert!(check(
+        "tcp.port in {440 + 3, 1} and tcp.srcport == {1 + 2} * 17000",
+        &f
+    ));
+    assert!(check(
+        "max(tcp.port) == 51000 and min(tcp.port, udp.port) == 443",
+        &f
+    ));
+    assert!(check(
+        "abs(tcp.dstport - tcp.srcport) == 50557 and max(udp.port, 7) == 7",
+        &f
+    ));
+    // Division by zero and overflow give no value.
+    assert!(!check("tcp.srcport / 0 == 0 or tcp.srcport % 0", &f));
+    assert!(!check("tcp.srcport * 9223372036854775807 > 0", &f));
+    assert!(check(
+        "tcp.srcport + 1 and not tcp.srcport - tcp.srcport",
+        &f
+    ));
+    assert_eq!(
+        compile("tcp.srcport == 2 * {3 + 4} - -1")
+            .ir()
+            .to_string_lossy(),
+        "(any_eq tcp.srcport 15)"
+    );
+    assert!(
+        error("tcp.srcport == 1 / 0")
+            .message
+            .contains("division by zero")
+    );
+    assert!(
+        error("tcp.flags.syn + 1 == 1")
+            .message
+            .contains("needs integers")
+    );
+    assert!(error("ip.src + 1 == 1").message.contains("needs integers"));
+    assert!(error("max(1, 2) == 2").message.contains("needs a field"));
+    assert!(error("1 + 2").message.contains("not a test"));
+    assert!(
+        error("tcp.srcport-1 == 2")
+            .help
+            .unwrap()
+            .contains("tcp.srcport - 1")
+    );
+}
+
+#[test]
 fn errors_explain_themselves() {
     let e = error("tcp.prot == 80");
     assert!(e.message.contains("unknown field `tcp.prot`"));

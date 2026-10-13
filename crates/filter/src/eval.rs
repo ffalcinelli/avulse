@@ -6,7 +6,7 @@ use core::net::IpAddr;
 use avulse_proto::{Network, Packet, VlanTag, ethertype};
 
 use crate::fields::Field;
-use crate::ir::{CmpOp, Lit, Quant, SetItem, SliceEnd, Test, Value};
+use crate::ir::{self, CmpOp, Lit, Quant, SetItem, SliceEnd, Test, Value};
 use crate::meta::Meta;
 
 /// Most occurrences a value can have (two VLAN tags, source and destination).
@@ -16,6 +16,7 @@ const MAX: usize = 4;
 enum V<'a> {
     Bool(bool),
     Uint(u64),
+    Int(i64),
     Ipv4([u8; 4], u8),
     Ipv6([u8; 16], u8),
     Ether([u8; 6]),
@@ -32,7 +33,25 @@ impl V<'_> {
             V::Ether(m) => Some(m),
             V::Bytes(b) => Some(b),
             V::Owned(a, n) => Some(&a[..*n as usize]),
-            V::Bool(_) | V::Uint(_) => None,
+            V::Bool(_) | V::Uint(_) | V::Int(_) => None,
+        }
+    }
+
+    /// The value as a signed integer, for arithmetic.
+    fn int(&self) -> Option<i64> {
+        match self {
+            V::Uint(v) => i64::try_from(*v).ok(),
+            V::Int(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// The value as a number that holds every unsigned and signed value, for comparisons.
+    fn num(&self) -> Option<i128> {
+        match self {
+            V::Uint(v) => Some(*v as i128),
+            V::Int(v) => Some(*v as i128),
+            _ => None,
         }
     }
 
@@ -40,6 +59,7 @@ impl V<'_> {
         match self {
             V::Bool(b) => *b,
             V::Uint(v) => *v != 0,
+            V::Int(v) => *v != 0,
             v => v.bytes().is_some_and(|b| !b.is_empty()),
         }
     }
@@ -196,8 +216,10 @@ fn prefix_eq(a: &[u8], b: &[u8], bits: u8) -> bool {
 }
 
 fn eq(a: &V<'_>, b: &V<'_>) -> bool {
+    if let (Some(x), Some(y)) = (a.num(), b.num()) {
+        return x == y;
+    }
     match (a, b) {
-        (V::Uint(x), V::Uint(y)) => x == y,
         (V::Bool(x), V::Bool(y)) => x == y,
         (V::Ipv4(x, p), V::Ipv4(y, q)) => prefix_eq(x, y, *p.min(q)),
         (V::Ipv6(x, p), V::Ipv6(y, q)) => prefix_eq(x, y, *p.min(q)),
@@ -207,10 +229,15 @@ fn eq(a: &V<'_>, b: &V<'_>) -> bool {
 }
 
 fn ord(a: &V<'_>, b: &V<'_>) -> Option<Ordering> {
+    if let (Some(x), Some(y)) = (a.num(), b.num()) {
+        return Some(x.cmp(&y));
+    }
     match (a, b) {
-        (V::Uint(x), V::Uint(y)) => Some(x.cmp(y)),
         (V::Ipv4(..), V::Ipv6(..)) | (V::Ipv6(..), V::Ipv4(..)) => None,
-        (V::Bool(_), _) | (_, V::Bool(_)) | (V::Uint(_), _) | (_, V::Uint(_)) => None,
+        (V::Bool(_), _)
+        | (_, V::Bool(_))
+        | (V::Uint(_) | V::Int(_), _)
+        | (_, V::Uint(_) | V::Int(_)) => None,
         _ => Some(a.bytes()?.cmp(b.bytes()?)),
     }
 }
@@ -219,6 +246,7 @@ fn lit(l: &Lit) -> V<'_> {
     match l {
         Lit::Bool(b) => V::Bool(*b),
         Lit::Uint(v) => V::Uint(*v),
+        Lit::Int(v) => V::Int(*v),
         Lit::Ipv4(a, p) => V::Ipv4(*a, *p),
         Lit::Ipv6(a, p) => V::Ipv6(*a, *p),
         Lit::Ether(m) => V::Ether(*m),
@@ -242,11 +270,50 @@ fn value<'a>(v: &'a Value, cx: &Cx<'a>) -> Vals<'a> {
             let mut out = Vals::new();
             for x in a.as_slice() {
                 for y in b.as_slice() {
-                    if let (V::Uint(x), V::Uint(y)) = (x, y) {
-                        out.push(V::Uint(x & y));
+                    match (x, y) {
+                        (V::Uint(x), V::Uint(y)) => out.push(V::Uint(x & y)),
+                        _ => out.opt(x.int().zip(y.int()).map(|(x, y)| V::Int(x & y))),
                     }
                 }
             }
+            out
+        }
+        Value::Arith(op, a, b) => {
+            let (a, b) = (value(a, cx), value(b, cx));
+            let mut out = Vals::new();
+            for x in a.as_slice().iter().filter_map(V::int) {
+                for y in b.as_slice().iter().filter_map(V::int) {
+                    out.opt(ir::arith(*op, x, y).map(V::Int));
+                }
+            }
+            out
+        }
+        Value::Neg(a) | Value::Abs(a) => {
+            let abs = matches!(v, Value::Abs(_));
+            let mut out = Vals::new();
+            for x in value(a, cx).as_slice().iter().filter_map(V::int) {
+                out.opt(
+                    if abs {
+                        x.checked_abs()
+                    } else {
+                        x.checked_neg()
+                    }
+                    .map(V::Int),
+                );
+            }
+            out
+        }
+        Value::Extreme { max, args } => {
+            let best = args
+                .iter()
+                .flat_map(|a| {
+                    let vals = value(a, cx);
+                    let (n, v) = (vals.n, vals.v);
+                    v.into_iter().take(n).filter_map(|x| x.int())
+                })
+                .reduce(|a, b| if *max { a.max(b) } else { a.min(b) });
+            let mut out = Vals::new();
+            out.opt(best.map(V::Int));
             out
         }
         Value::Len(base) => {

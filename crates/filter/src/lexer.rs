@@ -39,6 +39,11 @@ pub(crate) enum Tok {
     Bang,
     Amp,
     Tilde,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
     Eof,
 }
 
@@ -80,6 +85,11 @@ impl Tok {
             Tok::Bang => "!",
             Tok::Amp => "&",
             Tok::Tilde => "~",
+            Tok::Plus => "+",
+            Tok::Minus => "-",
+            Tok::Star => "*",
+            Tok::Slash => "/",
+            Tok::Percent => "%",
             _ => "?",
         }
     }
@@ -144,6 +154,14 @@ pub(crate) fn lex(src: &str) -> Result<Vec<Token>> {
                     ));
                 }
             },
+            // `-` and `/` also occur inside words (`00-11-22`, `10.0.0.0/8`, `[1-3]`), so as in
+            // Wireshark they are operators only where a word cannot start: `a - 1`, `-a`, `a / 2`.
+            // `-1` stays a word, a negative number, which the parser splits after an operand.
+            b'-' if !at(i + 1).is_ascii_digit() => single(&mut i, Tok::Minus),
+            b'/' => single(&mut i, Tok::Slash),
+            b'+' => single(&mut i, Tok::Plus),
+            b'*' => single(&mut i, Tok::Star),
+            b'%' => single(&mut i, Tok::Percent),
             b'(' => single(&mut i, Tok::LParen),
             b')' => single(&mut i, Tok::RParen),
             b'{' => single(&mut i, Tok::LBrace),
@@ -499,5 +517,34 @@ mod tests {
                 .contains("field references")
         );
         assert!(lex("tcp @ udp").unwrap_err().message.contains("unexpected"));
+    }
+
+    #[test]
+    fn arithmetic() {
+        assert_eq!(
+            kinds("a + 1 - b * -2 / c % d -1 -e"),
+            vec![
+                w("a"),
+                Tok::Plus,
+                w("1"),
+                Tok::Minus,
+                w("b"),
+                Tok::Star,
+                w("-2"),
+                Tok::Slash,
+                w("c"),
+                Tok::Percent,
+                w("d"),
+                w("-1"),
+                Tok::Minus,
+                w("e"),
+                Tok::Eof
+            ]
+        );
+        // Inside a word, `-` and `/` are not operators.
+        assert_eq!(
+            kinds("tcp.port-1 10.0.0.0/8 aa-bb"),
+            vec![w("tcp.port-1"), w("10.0.0.0/8"), w("aa-bb"), Tok::Eof]
+        );
     }
 }

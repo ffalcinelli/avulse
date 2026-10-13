@@ -5,7 +5,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt;
 
-pub use crate::ast::{Quant, Slice, SliceEnd};
+pub use crate::ast::{ArithOp, Quant, Slice, SliceEnd};
 use crate::fields::{Field, def};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,7 +70,29 @@ pub enum Value {
     Len(Box<Value>),
     /// Number of occurrences.
     Count(Box<Value>),
+    /// Signed arithmetic on every pair of occurrences. Overflow and division by zero give no
+    /// value.
+    Arith(ArithOp, Box<Value>, Box<Value>),
+    Neg(Box<Value>),
+    Abs(Box<Value>),
+    /// The largest (or smallest) of all occurrences of all arguments; absent arguments are
+    /// skipped.
+    Extreme {
+        max: bool,
+        args: Vec<Value>,
+    },
     Lit(Lit),
+}
+
+/// Checked signed arithmetic, shared by constant folding and evaluation.
+pub(crate) fn arith(op: ArithOp, a: i64, b: i64) -> Option<i64> {
+    match op {
+        ArithOp::Add => a.checked_add(b),
+        ArithOp::Sub => a.checked_sub(b),
+        ArithOp::Mul => a.checked_mul(b),
+        ArithOp::Div => a.checked_div(b),
+        ArithOp::Mod => a.checked_rem(b),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +106,8 @@ pub enum SetItem {
 pub enum Lit {
     Bool(bool),
     Uint(u64),
+    /// A signed integer, for arithmetic.
+    Int(i64),
     /// Address and prefix length (32 for a single address).
     Ipv4([u8; 4], u8),
     /// Address and prefix length (128 for a single address).
@@ -218,6 +242,16 @@ impl fmt::Display for Value {
             Value::BitAnd(a, b) => write!(f, "(& {a} {b})"),
             Value::Len(v) => write!(f, "(len {v})"),
             Value::Count(v) => write!(f, "(count {v})"),
+            Value::Arith(op, a, b) => write!(f, "({op} {a} {b})"),
+            Value::Neg(v) => write!(f, "(neg {v})"),
+            Value::Abs(v) => write!(f, "(abs {v})"),
+            Value::Extreme { max, args } => {
+                write!(f, "({}", if *max { "max" } else { "min" })?;
+                for a in args {
+                    write!(f, " {a}")?;
+                }
+                write!(f, ")")
+            }
             Value::Lit(l) => write!(f, "{l}"),
         }
     }
@@ -228,6 +262,7 @@ impl fmt::Display for Lit {
         match self {
             Lit::Bool(b) => write!(f, "{b}"),
             Lit::Uint(v) => write!(f, "{v}"),
+            Lit::Int(v) => write!(f, "{v}"),
             Lit::Ipv4(a, p) => {
                 write!(f, "{}", core::net::Ipv4Addr::from(*a))?;
                 if *p < 32 { write!(f, "/{p}") } else { Ok(()) }

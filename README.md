@@ -30,6 +30,10 @@ outbound and ip.dst not in $lan and $web
   and `ip.addr != x` means neither is `x`. `!==` means "some differs". `ip.dst not in {…}` needs an
   IPv4 header, like any comparison: one with an absent field is false.
 - Quantifiers: `all tcp.port > 1024`, `any ip.addr !== 10.0.0.1`, `all ip.addr in {10.0.0.0/8}`.
+- Arithmetic and functions: `tcp.srcport + 1 == tcp.dstport`, `{len(tcp) - 20} * 2 > 8`,
+  `max(tcp.srcport, tcp.dstport) < 1024`, `abs(tcp.srcport - tcp.dstport) == 1`. Results are signed.
+  As in Wireshark, `-` and `/` need spaces (`tcp.srcport-1` is a field name), and `{ }` groups
+  arithmetic while `( )` groups tests.
 - Sets, ranges and CIDR: `tcp.dstport in {80, 443, 8000..8100}`, `ip.src == 10.0.0.0/8`.
 - Slices and payloads: `eth.src[0:3] == 00:11:22`, `tcp.payload contains "GET"`, `len(udp.payload) > 512`.
   An integer compared with bytes is one byte, as in Wireshark 4.6: `tcp[13] == 18` is 0x12, and
@@ -54,6 +58,9 @@ compiles selects the same packets, except:
 - **No reassembly.** As in Wireshark with reassembly off, `tcp.len` is absent on IP fragments.
 - **Stricter types.** A literal that cannot fit the field is an error (`ip.flags == 8`), where
   Wireshark accepts the filter and never matches.
+- **Signed arithmetic throughout.** `tcp.srcport + -1` subtracts one; Wireshark converts the `-1` to
+  the field's unsigned type. Avulse also accepts literals beyond the field's range in arithmetic
+  (`tcp.srcport + 1 == 65536`), which Wireshark rejects.
 
 Avulse also accepts some syntax that Wireshark rejects, and that never changes the meaning of a
 Wireshark filter: `#`, `//` and `/* */` comments, `let` macros, `~=` (Wireshark 3.6's spelling of

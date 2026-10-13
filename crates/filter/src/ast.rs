@@ -101,7 +101,32 @@ pub enum Operand {
     Macro(String, Span),
     Slice(Box<Operand>, Slice, Span),
     BitAnd(Box<Operand>, Box<Operand>, Span),
+    Arith(ArithOp, Box<Operand>, Box<Operand>, Span),
+    Neg(Box<Operand>, Span),
+    /// `{ … }`, which groups arithmetic (parentheses group tests).
+    Group(Box<Operand>, Span),
     Call(String, Vec<Operand>, Span),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+}
+
+impl fmt::Display for ArithOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            ArithOp::Add => "+",
+            ArithOp::Sub => "-",
+            ArithOp::Mul => "*",
+            ArithOp::Div => "/",
+            ArithOp::Mod => "%",
+        })
+    }
 }
 
 impl Operand {
@@ -113,6 +138,9 @@ impl Operand {
             | Operand::Macro(_, s)
             | Operand::Slice(_, _, s)
             | Operand::BitAnd(_, _, s)
+            | Operand::Arith(_, _, _, s)
+            | Operand::Neg(_, s)
+            | Operand::Group(_, s)
             | Operand::Call(_, _, s) => *s,
         }
     }
@@ -300,6 +328,9 @@ impl fmt::Display for Operand {
                 write!(f, "]")
             }
             Operand::BitAnd(a, b, _) => write!(f, "{a} & {b}"),
+            Operand::Arith(op, a, b, _) => write!(f, "{a} {op} {b}"),
+            Operand::Neg(a, _) => write!(f, "-{a}"),
+            Operand::Group(a, _) => write!(f, "{{{a}}}"),
             Operand::Call(name, args, _) => {
                 write!(f, "{name}(")?;
                 for (i, a) in args.iter().enumerate() {

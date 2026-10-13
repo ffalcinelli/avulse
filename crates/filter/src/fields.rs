@@ -9,6 +9,8 @@ pub enum Ty {
     Bool,
     /// Unsigned integer of the given width in bits.
     Uint(u8),
+    /// Signed 64-bit integer: the result of arithmetic.
+    Int,
     Ipv4,
     Ipv6,
     /// IPv4 or IPv6 (extension fields such as `local.addr`).
@@ -25,6 +27,7 @@ impl Ty {
         match self {
             Ty::Bool => "a boolean",
             Ty::Uint(_) => "an unsigned integer",
+            Ty::Int => "an integer",
             Ty::Ipv4 => "an IPv4 address",
             Ty::Ipv6 => "an IPv6 address",
             Ty::Ip => "an IP address",
@@ -46,7 +49,7 @@ impl Ty {
     pub fn is_ordered(self) -> bool {
         matches!(
             self,
-            Ty::Uint(_) | Ty::Ipv4 | Ty::Ipv6 | Ty::Ip | Ty::Ether | Ty::Bytes | Ty::Str
+            Ty::Uint(_) | Ty::Int | Ty::Ipv4 | Ty::Ipv6 | Ty::Ip | Ty::Ether | Ty::Bytes | Ty::Str
         )
     }
 }

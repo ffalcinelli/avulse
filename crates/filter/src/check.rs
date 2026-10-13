@@ -5,10 +5,10 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::ast::{self, Expr, MacroBody, Operand, Quant, RelOp, Rhs};
+use crate::ast::{self, ArithOp, Expr, MacroBody, Operand, Quant, RelOp, Rhs};
 use crate::error::{Diagnostic, Result, Span};
 use crate::fields::{self, Consts, Origin, Ty};
-use crate::ir::{CmpOp, Lit, SetItem, Test, Value};
+use crate::ir::{self, CmpOp, Lit, SetItem, Test, Value};
 use crate::lit;
 
 /// The type (and symbolic constants) that the other side of a relation expects.
@@ -17,6 +17,12 @@ struct Ctx {
     ty: Ty,
     consts: Consts,
 }
+
+/// The context of an arithmetic operand.
+const INT: Ctx = Ctx {
+    ty: Ty::Int,
+    consts: &[],
+};
 
 struct Typed {
     value: Value,
@@ -164,7 +170,12 @@ impl<'a> Checker<'a> {
                 .help(format!("use it after `in`, e.g. `ip.addr in ${name}`"))),
             }),
             Operand::Slice(..) => Ok(Test::Exists(self.typed(o)?.value)),
-            Operand::BitAnd(..) => Ok(Test::Truthy(self.typed(o)?.value)),
+            // As in Wireshark, a bare `&` or arithmetic tests that some result is not zero.
+            Operand::Arith(..) | Operand::Neg(..) if is_const(o) => Err(not_a_test(o)),
+            Operand::BitAnd(..) | Operand::Arith(..) | Operand::Neg(..) => {
+                Ok(Test::Truthy(self.typed(o)?.value))
+            }
+            Operand::Group(inner, _) => self.bare(inner),
             Operand::Call(..) | Operand::Str(..) | Operand::Char(..) => Err(not_a_test(o)),
         }
     }
@@ -233,14 +244,28 @@ impl<'a> Checker<'a> {
                 }
                 typed(Value::Slice(Box::new(b.value), *s), Ty::Bytes, &[])
             }
+            Operand::Group(inner, _) => self.resolve(inner, ctx),
+            Operand::Arith(..) | Operand::Neg(..) if is_const(o) => match ctx {
+                Some(ctx) => typed(Value::Lit(self.literal(o, ctx)?), ctx.ty, &[]),
+                None => Ok(Resolved::Literal(o)),
+            },
+            Operand::Arith(op, a, b, _) => {
+                let a = self.numeric(a, "arithmetic")?;
+                let b = self.numeric(b, "arithmetic")?;
+                typed(Value::Arith(*op, Box::new(a), Box::new(b)), Ty::Int, &[])
+            }
+            Operand::Neg(a, _) => {
+                let a = self.numeric(a, "`-`")?;
+                typed(Value::Neg(Box::new(a)), Ty::Int, &[])
+            }
             Operand::BitAnd(a, b, _) => {
                 let a_t = self.typed(a)?;
-                if !matches!(a_t.ty, Ty::Uint(_)) {
+                if !matches!(a_t.ty, Ty::Uint(_) | Ty::Int) {
                     return Err(Diagnostic::error(a.span(), format!("`&` needs an integer, but `{a}` is {}", a_t.ty))
                         .help("slices are bytes: compare them with bytes, or use an integer field such as `tcp.flags`"));
                 }
                 let b_t = expect_typed(self.resolve(b, Some(a_t.ctx()))?)?;
-                if !matches!(b_t.ty, Ty::Uint(_)) {
+                if !matches!(b_t.ty, Ty::Uint(_) | Ty::Int) {
                     return Err(Diagnostic::error(
                         b.span(),
                         format!("`&` needs an integer, but `{b}` is {}", b_t.ty),
@@ -253,6 +278,20 @@ impl<'a> Checker<'a> {
                 )
             }
             Operand::Call(name, args, span) => {
+                if let "max" | "min" = name.as_str() {
+                    if args.is_empty() || args.iter().all(is_const) {
+                        return Err(Diagnostic::error(
+                            *span,
+                            format!("`{name}` needs a field among its arguments"),
+                        ));
+                    }
+                    let args = args
+                        .iter()
+                        .map(|a| self.numeric(a, &format!("`{name}`")))
+                        .collect::<Result<Vec<_>>>()?;
+                    let max = name == "max";
+                    return typed(Value::Extreme { max, args }, Ty::Int, &[]);
+                }
                 let [arg] = args.as_slice() else {
                     return Err(Diagnostic::error(
                         *span,
@@ -260,6 +299,10 @@ impl<'a> Checker<'a> {
                     ));
                 };
                 match name.as_str() {
+                    "abs" => {
+                        let v = self.numeric(arg, "`abs`")?;
+                        typed(Value::Abs(Box::new(v)), Ty::Int, &[])
+                    }
                     "len" => {
                         let t = self.typed(arg)?;
                         if !t.ty.is_bytes() {
@@ -284,15 +327,48 @@ impl<'a> Checker<'a> {
                         *span,
                         format!("the function `{name}` is not supported"),
                     )
-                    .help("supported functions: `len`, `count`")),
+                    .help("supported functions: `len`, `count`, `max`, `min`, `abs`")),
                 }
             }
+        }
+    }
+
+    /// An operand of arithmetic: an integer field, function or expression, or an integer.
+    fn numeric(&mut self, o: &'a Operand, what: &str) -> Result<Value> {
+        let t = expect_typed(self.resolve(o, Some(INT))?)?;
+        match t.ty {
+            Ty::Uint(_) | Ty::Int => Ok(t.value),
+            ty => Err(Diagnostic::error(
+                o.span(),
+                format!("{what} needs integers, but `{o}` is {ty}"),
+            )),
         }
     }
 
     /// Converts a literal to the type expected by the other operand.
     fn literal(&mut self, o: &Operand, ctx: Ctx) -> Result<Lit> {
         let span = o.span();
+        if matches!(
+            o,
+            Operand::Arith(..) | Operand::Neg(..) | Operand::Group(..)
+        ) {
+            let v = const_int(o)?;
+            return match ctx.ty {
+                Ty::Int => Ok(Lit::Int(v)),
+                Ty::Uint(bits) => Ok(match u64::try_from(v) {
+                    Ok(u) => Lit::Uint(fits(u, bits, span)?),
+                    // Wireshark accepts a negative value, which no field equals.
+                    Err(_) => Lit::Int(v),
+                }),
+                Ty::Bytes => u8::try_from(v).map(|b| Lit::Bytes(vec![b])).map_err(|_| {
+                    Diagnostic::error(span, format!("{v} is too large for a byte value"))
+                }),
+                ty => Err(Diagnostic::error(
+                    span,
+                    format!("expected {ty}, found the integer {v}"),
+                )),
+            };
+        }
         let mismatch = || {
             let mut d = Diagnostic::error(span, format!("expected {}, found `{o}`", ctx.ty));
             if !ctx.consts.is_empty() {
@@ -302,6 +378,17 @@ impl<'a> Checker<'a> {
             d
         };
         let lit = match (o, ctx.ty) {
+            (Operand::Word(w, _), Ty::Uint(_))
+                if w.starts_with('-') && lit::parse_int(w).is_some() =>
+            {
+                Lit::Int(lit::parse_int(w).unwrap_or_default())
+            }
+            (Operand::Word(w, _), Ty::Int) => match lit::parse_int(w) {
+                Some(v) => Lit::Int(v),
+                None if looks_like_field(w) => return Err(unknown_field(w, span)),
+                None => return Err(mismatch()),
+            },
+            (Operand::Char(c, _), Ty::Int) => Lit::Int(*c as i64),
             (Operand::Word(w, _), Ty::Uint(bits)) => {
                 let v = fields::constant(ctx.consts, w)
                     .or_else(|| lit::parse_uint(w))
@@ -548,7 +635,8 @@ impl<'a> Checker<'a> {
                     };
                     let hi = self.set_member(hi_op, l)?;
                     let span = item.lo.span().to(hi_op.span());
-                    let orderable = matches!(l.ty, Ty::Uint(_) | Ty::Ipv4 | Ty::Ipv6 | Ty::Ip);
+                    let orderable =
+                        matches!(l.ty, Ty::Uint(_) | Ty::Int | Ty::Ipv4 | Ty::Ipv6 | Ty::Ip);
                     if !orderable || lo.has_prefix() || hi.has_prefix() {
                         return Err(Diagnostic::error(
                             span,
@@ -611,7 +699,7 @@ fn mirror(op: RelOp) -> RelOp {
 
 fn compatible(a: Ty, b: Ty) -> bool {
     match (a, b) {
-        (Ty::Uint(_), Ty::Uint(_)) => true,
+        (Ty::Uint(_) | Ty::Int, Ty::Uint(_) | Ty::Int) => true,
         (Ty::Ip, Ty::Ipv4 | Ty::Ipv6 | Ty::Ip) | (Ty::Ipv4 | Ty::Ipv6, Ty::Ip) => true,
         (Ty::Bytes | Ty::Ether | Ty::Str, Ty::Bytes | Ty::Ether | Ty::Str) => true,
         (a, b) => a == b,
@@ -619,8 +707,15 @@ fn compatible(a: Ty, b: Ty) -> bool {
 }
 
 fn lit_le(a: &Lit, b: &Lit) -> bool {
+    let num = |l: &Lit| match l {
+        Lit::Uint(v) => Some(*v as i128),
+        Lit::Int(v) => Some(*v as i128),
+        _ => None,
+    };
+    if let (Some(a), Some(b)) = (num(a), num(b)) {
+        return a <= b;
+    }
     match (a, b) {
-        (Lit::Uint(a), Lit::Uint(b)) => a <= b,
         (Lit::Ipv4(a, _), Lit::Ipv4(b, _)) => a <= b,
         (Lit::Ipv6(a, _), Lit::Ipv6(b, _)) => a <= b,
         _ => false,
@@ -635,6 +730,40 @@ fn fits(v: u64, bits: u8, span: Span) -> Result<u64> {
             span,
             format!("{v} does not fit in {bits} bits"),
         ))
+    }
+}
+
+/// Whether an operand is a constant integer expression (`1 + 2`, `-0x10`, `{'a' * 2}`).
+fn is_const(o: &Operand) -> bool {
+    match o {
+        Operand::Word(w, _) => fields::lookup(w).is_none() && lit::parse_int(w).is_some(),
+        Operand::Char(..) => true,
+        Operand::Group(a, _) | Operand::Neg(a, _) => is_const(a),
+        Operand::Arith(_, a, b, _) => is_const(a) && is_const(b),
+        _ => false,
+    }
+}
+
+/// Folds a constant integer expression, as Wireshark does.
+fn const_int(o: &Operand) -> Result<i64> {
+    let overflow = || Diagnostic::error(o.span(), "the constant overflows a 64-bit integer");
+    match o {
+        Operand::Word(w, span) => lit::parse_int(w)
+            .ok_or_else(|| Diagnostic::error(*span, format!("expected an integer, found `{w}`"))),
+        Operand::Char(c, _) => Ok(*c as i64),
+        Operand::Group(a, _) => const_int(a),
+        Operand::Neg(a, _) => const_int(a)?.checked_neg().ok_or_else(overflow),
+        Operand::Arith(op, a, b, span) => {
+            let (a, b) = (const_int(a)?, const_int(b)?);
+            if matches!(op, ArithOp::Div | ArithOp::Mod) && b == 0 {
+                return Err(Diagnostic::error(*span, "division by zero"));
+            }
+            ir::arith(*op, a, b).ok_or_else(overflow)
+        }
+        _ => Err(Diagnostic::error(
+            o.span(),
+            format!("expected an integer, found `{o}`"),
+        )),
     }
 }
 
@@ -686,6 +815,16 @@ pub(crate) fn unknown_field(w: &str, span: Span) -> Diagnostic {
         );
     }
     let d = Diagnostic::error(span, format!("unknown field `{w}`"));
+    // `tcp.port-1`: `-` and `/` belong to words, so arithmetic needs spaces, as in Wireshark.
+    if let Some((i, sep)) = w.char_indices().rev().find(|(_, c)| matches!(c, '-' | '/'))
+        && fields::lookup(&w[..i]).is_some()
+    {
+        let rest = &w[i + 1..];
+        return d.help(format!(
+            "write `{} {sep} {rest}` with spaces for arithmetic",
+            &w[..i]
+        ));
+    }
     match closest(w) {
         Some(s) => d.help(format!("did you mean `{s}`?")),
         None => d.help("run `avulse filter fields` for the list of fields"),

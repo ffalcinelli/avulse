@@ -20,6 +20,14 @@ pub(crate) fn parse_uint(s: &str) -> Option<u64> {
     u64::from_str_radix(digits, radix).ok()
 }
 
+/// An integer with an optional leading `-`.
+pub(crate) fn parse_int(s: &str) -> Option<i64> {
+    match s.strip_prefix('-') {
+        Some(d) => parse_uint(d).and_then(|v| 0i64.checked_sub_unsigned(v)),
+        None => parse_uint(s).and_then(|v| i64::try_from(v).ok()),
+    }
+}
+
 pub(crate) fn parse_bool(s: &str) -> Option<bool> {
     match s {
         "1" | "true" | "True" | "TRUE" => Some(true),
@@ -121,6 +129,10 @@ mod tests {
         assert_eq!(parse_uint("08"), None);
         assert_eq!(parse_uint("+1"), None);
         assert_eq!(parse_uint("0x"), None);
+        assert_eq!(parse_int("-0x10"), Some(-16));
+        assert_eq!(parse_int("-9223372036854775808"), Some(i64::MIN));
+        assert_eq!(parse_int("9223372036854775808"), None);
+        assert_eq!(parse_int("--1"), None);
     }
 
     #[test]
