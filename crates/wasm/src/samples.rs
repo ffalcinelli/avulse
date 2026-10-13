@@ -133,7 +133,7 @@ pub fn samples() -> Vec<Sample> {
         },
         Sample {
             name: "HTTP GET",
-            summary: "192.168.1.2:40002 → 93.184.215.14:80, `GET / HTTP/1.1` with a Host header",
+            summary: "192.168.1.2:40002 → 93.184.215.14:80, GET / HTTP/1.1 with a Host header",
             bytes: finish(eth(
                 GATEWAY_MAC,
                 HOST_MAC,

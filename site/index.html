@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Avulse · divert packets, filter them like Wireshark</title>
+  <meta name="description" content="Avulse diverts, modifies and re-injects network packets on Linux, Windows and macOS. A superset of WinDivert with an Ethernet layer and Wireshark display filters. Try the filter engine in your browser.">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0b3954">
+  <meta property="og:title" content="Avulse">
+  <meta property="og:description" content="Divert, modify and re-inject packets on Linux, Windows and macOS, with Wireshark display filters.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://ffalcinelli.github.io/avulse/">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="playground.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="#top" aria-label="Avulse home">
+        <img src="favicon.svg" alt="" width="28" height="28">
+        <span>avulse</span>
+      </a>
+      <nav aria-label="Main">
+        <a href="#playground">Playground</a>
+        <a href="#features">Features</a>
+        <a href="#roadmap">Roadmap</a>
+        <a href="#docs">Docs</a>
+        <a href="https://github.com/ffalcinelli/avulse">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="top">
+      <div class="wrap hero-grid">
+        <div>
+          <p class="eyebrow">Linux · Windows · macOS · Rust</p>
+          <h1>Divert packets.<br>Filter them like Wireshark.</h1>
+          <p class="lede">
+            Avulse captures network packets so a program can inspect, drop, modify or re-inject
+            them. It covers what WinDivert does, adds an Ethernet layer, and speaks the display
+            filter language you already use in Wireshark, checked against <code>tshark</code>.
+          </p>
+          <div class="cta">
+            <a class="button primary" href="#playground">Try the filter playground</a>
+            <a class="button" href="guide/">Read the guide</a>
+          </div>
+          <div class="install">
+            <span>CLI</span>
+            <code>cargo install --locked --git https://github.com/ffalcinelli/avulse avulse-cli</code>
+          </div>
+          <p class="note">
+            <strong>Pre-alpha.</strong> The filter language and packet parser work today; packet
+            capture is next. The crates.io and PyPI packages only reserve the name.
+          </p>
+        </div>
+        <figure class="hero-code" aria-label="An example filter">
+          <pre><code><span class="c"># Web traffic leaving the local network</span>
+<span class="k">let</span> lan = {<span class="n">10.0.0.0/8</span>, <span class="n">172.16.0.0/12</span>, <span class="n">192.168.0.0/16</span>}
+<span class="k">let</span> web = <span class="f">tcp.port</span> <span class="k">in</span> {<span class="n">80</span>, <span class="n">443</span>, <span class="n">8000</span>..<span class="n">8100</span>}
+
+<span class="f">outbound</span> <span class="k">and</span> <span class="f">ip.dst</span> <span class="k">not in</span> <span class="v">$lan</span> <span class="k">and</span> <span class="v">$web</span></code></pre>
+          <figcaption>A Wireshark display filter, plus <code>let</code> macros and direction.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section id="playground" class="section playground" aria-labelledby="playground-title">
+      <div class="wrap">
+        <h2 id="playground-title">Filter playground</h2>
+        <p class="section-lede">
+          This is the real Avulse filter engine, compiled to WebAssembly and running in your
+          browser. Type a filter: it is checked as you type and run against the sample packets
+          below. Nothing leaves your device.
+        </p>
+
+        <div class="pg-grid">
+          <div class="pg-editor">
+            <div class="pg-toolbar">
+              <label for="pg-examples">Examples</label>
+              <select id="pg-examples"></select>
+              <button type="button" id="pg-share" class="small">Copy link</button>
+            </div>
+            <label class="sr-only" for="pg-filter">Filter</label>
+            <textarea id="pg-filter" spellcheck="false" autocapitalize="off" autocomplete="off" rows="6"></textarea>
+            <div class="pg-options">
+              <label><input type="checkbox" id="pg-outbound" checked> Outbound</label>
+              <label>Interface <input type="text" id="pg-iface" value="eth0" size="8" spellcheck="false"></label>
+            </div>
+            <div id="pg-status" class="pg-status" role="status" aria-live="polite">Loading the engine…</div>
+            <pre id="pg-diagnostics" class="pg-diagnostics" hidden></pre>
+            <details class="pg-details" id="pg-canonical-box" open>
+              <summary>Canonical form <span class="muted">(<code>avulse filter fmt</code>)</span></summary>
+              <pre id="pg-canonical"></pre>
+            </details>
+            <details class="pg-details">
+              <summary>Compiled filter <span class="muted">(<code>avulse filter explain</code>)</span></summary>
+              <pre id="pg-ir"></pre>
+            </details>
+            <details class="pg-details" id="pg-fields-box">
+              <summary>Fields</summary>
+              <label class="sr-only" for="pg-field-search">Search fields</label>
+              <input type="search" id="pg-field-search" placeholder="Search fields, e.g. port" spellcheck="false">
+              <ul id="pg-fields" class="pg-fields"></ul>
+            </details>
+          </div>
+
+          <div class="pg-results">
+            <table class="pg-samples">
+              <caption>Sample packets <span class="muted">(Ethernet frames, ETHERNET layer)</span></caption>
+              <thead><tr><th scope="col">Result</th><th scope="col">Packet</th></tr></thead>
+              <tbody id="pg-sample-rows"></tbody>
+            </table>
+            <details class="pg-details" id="pg-custom">
+              <summary>Your own packet</summary>
+              <label for="pg-hex">Bytes in hex</label>
+              <textarea id="pg-hex" rows="4" spellcheck="false" placeholder="4500 0028 …"></textarea>
+              <div class="pg-options">
+                <label for="pg-link">Starts with</label>
+                <select id="pg-link">
+                  <option value="ethernet">an Ethernet header</option>
+                  <option value="ip">an IP header</option>
+                </select>
+                <span id="pg-hex-result" class="verdict" role="status" aria-live="polite"></span>
+              </div>
+            </details>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="features" class="section" aria-labelledby="features-title">
+      <div class="wrap">
+        <h2 id="features-title">Why Avulse</h2>
+        <div class="cards">
+          <article class="card">
+            <h3>Everything WinDivert does</h3>
+            <p>The same model: NETWORK, NETWORK_FORWARD, FLOW, SOCKET and REFLECT layers, flags,
+              priorities, batching and asynchronous I/O, and a WinDivert-compatible shim so
+              existing programs, pydivert and jdivert can move over unchanged.</p>
+          </article>
+          <article class="card">
+            <h3>Plus an Ethernet layer</h3>
+            <p>See whole frames, including non-IP traffic such as ARP and LLDP, and VLAN tags.
+              Filter on <code>eth.*</code>, <code>vlan.*</code> and <code>arp.*</code>.</p>
+          </article>
+          <article class="card">
+            <h3>Wireshark filters, verified</h3>
+            <p>Filters are Wireshark 4.6 display filters. A differential test runs every field
+              and hundreds of filters through <code>tshark</code> and Avulse, and the few
+              <a href="guide/filters/wireshark.html">differences</a> are documented.</p>
+          </article>
+          <article class="card">
+            <h3>Errors that help</h3>
+            <p>Strict types and spans in every message: a typo gets a “did you mean”, and a
+              comparison that could never match is an error instead of a silent false.</p>
+          </article>
+          <article class="card">
+            <h3>One engine, every kernel</h3>
+            <p>Parsing and matching are <code>no_std</code> Rust with no <code>unsafe</code>, and
+              never allocate or panic on any input, so the same code runs in user space, the
+              Windows driver and the macOS system extension.</p>
+          </article>
+          <article class="card">
+            <h3>Exact in the kernel</h3>
+            <p>On Linux, filters will compile to eBPF at runtime and match in the kernel; on
+              Windows and macOS, to verified bytecode. No more superset matching with a user-space
+              re-check.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="roadmap" class="section" aria-labelledby="roadmap-title">
+      <div class="wrap">
+        <h2 id="roadmap-title">Roadmap</h2>
+        <p class="section-lede">Avulse is built in phases, each with an exit criterion. See the
+          <a href="guide/project/design.html">design chapter</a> and the full
+          <a href="https://github.com/ffalcinelli/avulse/blob/main/docs/roadmap.md">roadmap</a>.</p>
+        <ol class="phases">
+          <li class="done"><span class="phase">0</span><div><h3>Setup and spikes</h3><p>Workspace, CI, names. eBPF codegen, Rust Windows driver and macOS spikes are pending.</p></div></li>
+          <li class="now"><span class="phase">1</span><div><h3>Parser and filter engine</h3><p>Done: parsing, the language, the evaluator, <code>tshark</code> validation, the CLI. Next: bytecode, the WinDivert front-end.</p></div></li>
+          <li><span class="phase">2</span><div><h3>Linux packet layers</h3><p>NETWORK, NETWORK_FORWARD and ETHERNET through TC eBPF, with exact in-kernel matching.</p></div></li>
+          <li><span class="phase">3</span><div><h3>Linux events, API v0.1</h3><p>FLOW, SOCKET and REFLECT; the first release of the Rust API and C ABI.</p></div></li>
+          <li><span class="phase">4</span><div><h3>WinDivert compatibility</h3><p>The shim, validated by the pydivert and jdivert test suites.</p></div></li>
+          <li><span class="phase">5</span><div><h3>Windows driver</h3><p>WFP callouts and an NDIS filter, signed.</p></div></li>
+          <li><span class="phase">6</span><div><h3>macOS</h3><p>A Network Extension system extension, notarized.</p></div></li>
+          <li><span class="phase">7</span><div><h3>Bindings and 1.0</h3><p>Native Python and Java bindings, benchmarks, a frozen API.</p></div></li>
+        </ol>
+      </div>
+    </section>
+
+    <section id="docs" class="section" aria-labelledby="docs-title">
+      <div class="wrap">
+        <h2 id="docs-title">Documentation</h2>
+        <div class="cards docs">
+          <a class="card link" href="guide/">
+            <h3>Guide</h3>
+            <p>Getting started, the filter language in depth, the differences from Wireshark, the
+              CLI.</p>
+          </a>
+          <a class="card link" href="guide/reference/fields.html">
+            <h3>Field reference</h3>
+            <p>Every field a filter can use, with its type and symbolic names.</p>
+          </a>
+          <a class="card link" href="api/rust/">
+            <h3>Rust API</h3>
+            <p>rustdoc for <code>avulse-proto</code> and <code>avulse-filter</code>.</p>
+          </a>
+          <a class="card link" href="api/python/">
+            <h3>Python</h3>
+            <p>The <code>avulse</code> package: a placeholder until the native bindings.</p>
+          </a>
+          <a class="card link" href="guide/project/design.html">
+            <h3>Design</h3>
+            <p>Architecture, backends per platform, and why Rust.</p>
+          </a>
+          <a class="card link" href="https://github.com/ffalcinelli/avulse/blob/main/CONTRIBUTING.md">
+            <h3>Contributing</h3>
+            <p>Checks, conventions, and how the docs are tested.</p>
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <p>Avulse is dual-licensed under LGPL-3.0-or-later or GPL-2.0-or-later.</p>
+      <p><a href="https://github.com/ffalcinelli/avulse">GitHub</a> ·
+        <a href="https://github.com/ffalcinelli/avulse/issues">Issues</a> ·
+        <a href="https://crates.io/crates/avulse">crates.io</a> ·
+        <a href="https://pypi.org/project/avulse/">PyPI</a></p>
+    </div>
+  </footer>
+</body>
+</html>
