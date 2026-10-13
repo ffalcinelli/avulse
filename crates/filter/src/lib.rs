@@ -72,6 +72,7 @@ mod lit;
 pub mod meta;
 mod parser;
 pub mod regex;
+mod value;
 
 use alloc::vec::Vec;
 

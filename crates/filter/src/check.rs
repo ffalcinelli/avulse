@@ -9,7 +9,7 @@ use crate::ast::{self, ArithOp, Expr, MacroBody, Operand, Quant, RelOp, Rhs};
 use crate::error::{Diagnostic, Result, Span};
 use crate::fields::{self, Consts, Field, Origin, Ty};
 use crate::ir::{self, CmpOp, Lit, SetItem, Test, Value};
-use crate::{eval, labels, lit, regex};
+use crate::{labels, lit, regex, value};
 
 /// The type (and symbolic names) that the other side of a relation expects.
 #[derive(Clone, Copy)]
@@ -260,7 +260,10 @@ impl<'a> Checker<'a> {
                 if s.len() > 1 && !fits_owned(&value) {
                     return Err(Diagnostic::error(
                         o.span(),
-                        format!("these ranges can add up to more than {} bytes", eval::OWNED),
+                        format!(
+                            "these ranges can add up to more than {} bytes",
+                            value::OWNED
+                        ),
                     )
                     .help("give each range a length, e.g. `[0:4,8:4]`, or use one range"));
                 }
@@ -365,7 +368,7 @@ impl<'a> Checker<'a> {
                         o.span(),
                         format!(
                             "`&` on bytes gives at most {} bytes, and `{o}` can be longer",
-                            eval::OWNED
+                            value::OWNED
                         ),
                     )
                     .help("slice a side first, e.g. `tcp.payload[0:4] & ff:ff:00:00`"));
@@ -953,7 +956,7 @@ fn fits(v: u64, bits: u8, span: Span) -> Result<u64> {
 /// Most occurrences `v` can have: arithmetic and `&` combine every pair.
 fn occurrences(v: &Value) -> usize {
     match v {
-        Value::Field(f) | Value::Layer(f, _) | Value::Raw(f, _) => eval::occurrences(*f),
+        Value::Field(f) | Value::Layer(f, _) | Value::Raw(f, _) => value::occurrences(*f),
         Value::Slice(v, _)
         | Value::Len(v)
         | Value::Case { value: v, .. }
@@ -969,14 +972,14 @@ fn occurrences(v: &Value) -> usize {
 /// Rejects a combination with more occurrences than the evaluator holds.
 fn check_occurrences(v: &Value, o: &Operand) -> Result<()> {
     let n = occurrences(v);
-    if n <= eval::MAX {
+    if n <= value::MAX {
         return Ok(());
     }
     Err(Diagnostic::error(
         o.span(),
         format!(
             "`{o}` has up to {n} combinations of occurrences, more than the {} values Avulse evaluates",
-            eval::MAX
+            value::MAX
         ),
     )
     .help("use fields with one occurrence, e.g. `tcp.srcport` instead of `tcp.port`"))
@@ -984,7 +987,7 @@ fn check_occurrences(v: &Value, o: &Operand) -> Result<()> {
 
 /// Whether the byte string `v` always fits the evaluator's buffer for computed bytes.
 fn fits_owned(v: &Value) -> bool {
-    byte_len(v).is_some_and(|n| n <= eval::OWNED)
+    byte_len(v).is_some_and(|n| n <= value::OWNED)
 }
 
 /// Longest byte string `v` can be, if that is bounded.

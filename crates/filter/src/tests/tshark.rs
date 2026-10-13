@@ -727,11 +727,11 @@ const STRICTER: &[&str] = &[
 ];
 
 /// Filters tshark accepts but Avulse rejects, because the result could exceed the evaluator's
-/// fixed buffers (no allocation, for the kernels): [`eval::MAX`] occurrences and [`eval::OWNED`]
+/// fixed buffers (no allocation, for the kernels): [`value::MAX`] occurrences and [`value::OWNED`]
 /// computed bytes.
 ///
-/// [`eval::MAX`]: crate::eval::MAX
-/// [`eval::OWNED`]: crate::eval::OWNED
+/// [`value::MAX`]: crate::value::MAX
+/// [`value::OWNED`]: crate::value::OWNED
 const LIMITS: &[&str] = &[
     "tcp.port + tcp.port + tcp.port == 6",
     "tcp.port & tcp.port & tcp.port == 0",
@@ -1137,7 +1137,7 @@ fn tshark_raw_spans() {
                     .map(|&(_, pos, size)| (pos, size))
                     .collect();
                 let mut got: Vec<(usize, usize)> =
-                    crate::eval::raw_spans(d.field, &pkt, &Meta::default())
+                    crate::value::raw_spans(d.field, &pkt, &Meta::default())
                         .as_slice()
                         .iter()
                         .map(|&(_, start, len)| (start, len))
