@@ -869,3 +869,17 @@ fn render_points_at_the_problem() {
     assert!(r.contains("  | ^^^^^^^^^"), "{r}");
     assert!(r.contains("= help:"), "{r}");
 }
+
+/// Found by the `filter` fuzz target: an unknown escape before a multi-byte character made the
+/// error span end inside it, and `render` panicked.
+#[test]
+fn render_never_splits_a_character() {
+    let src = "tcp.payload contains \"\\Ҥπ\"";
+    let e = error(src);
+    assert_eq!(e.message, "unknown escape sequence");
+    assert_eq!(&src[e.span.start..e.span.end], "\\Ҥ");
+    assert!(e.render(src).contains("^^"), "{}", e.render(src));
+    // A span inside a character, from any source, still renders.
+    let odd = crate::Diagnostic::error(crate::Span::new(23, 24), "x");
+    assert!(odd.render(src).contains("^"));
+}

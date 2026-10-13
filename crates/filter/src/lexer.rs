@@ -365,8 +365,13 @@ fn escape(b: &[u8], i: &mut usize) -> Result<u8> {
             v as u8
         }
         _ => {
+            // Cover the whole character after the backslash, which may take several bytes.
+            let mut end = (*i).min(b.len());
+            while b.get(end).is_some_and(|c| c & 0xc0 == 0x80) {
+                end += 1;
+            }
             return Err(Diagnostic::error(
-                Span::new(start, (*i).min(b.len())),
+                Span::new(start, end),
                 "unknown escape sequence",
             ));
         }
