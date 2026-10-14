@@ -264,7 +264,7 @@ fn check(i: &Insn, pc: usize, count: usize, pool: &[u8]) -> Result<(), VerifyErr
             }
             zero(wb | wc | i.imm)?;
         }
-        Op::Jt | Op::Jf => {
+        Op::Jt | Op::Jf | Op::Jmp => {
             zero(wa | wb | wc)?;
             let target = i.imm as usize;
             if target <= pc || target > count {

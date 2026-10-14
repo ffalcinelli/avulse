@@ -314,6 +314,15 @@ impl Encoder {
             }
             Test::And(v) => self.junction(v, Op::Jf, depth)?,
             Test::Or(v) => self.junction(v, Op::Jt, depth)?,
+            Test::If(c, x, y) => {
+                self.test(c, depth)?;
+                let to_else = self.emit(Op::Jf, 0, 0, 0, 0)?;
+                self.test(x, depth)?;
+                let to_end = self.emit(Op::Jmp, 0, 0, 0, 0)?;
+                self.patch(to_else);
+                self.test(y, depth)?;
+                self.patch(to_end);
+            }
             Test::Xor(x, y) => {
                 if depth >= BOOLEANS {
                     return Err(EncodeError::TooDeep);
@@ -326,6 +335,14 @@ impl Encoder {
             }
         }
         Ok(())
+    }
+
+    /// Points the jump at `at` to the next instruction.
+    fn patch(&mut self, at: usize) {
+        let next = self.insns.len() as u32;
+        if let Some(i) = self.insns.get_mut(at) {
+            i.imm = next;
+        }
     }
 
     /// `and` (`exit` = `jf`) or `or` (`exit` = `jt`): each operand, then a jump to the end when it

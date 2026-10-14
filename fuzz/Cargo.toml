@@ -28,3 +28,10 @@ path = "fuzz_targets/filter.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "windivert"
+path = "fuzz_targets/windivert.rs"
+test = false
+doc = false
+bench = false

@@ -33,7 +33,7 @@ answer. Wireshark has no such limits; the `LIMITS` table of the `tshark` test pi
 - **64 levels of nesting.** Parentheses, `not`, braces, function calls and the expression tree
   itself nest at most 64 levels, and a macro can use macros at most 4 levels deep. The passes over
   a filter are recursive, so this keeps the deepest filter under 1 MiB of stack (in a release
-  build).
+  build). [WinDivert filters](windivert.md) have WinDivert's own limits instead.
 
 The bytecode that the kernel backends run has the same limits, since it shares the evaluator's
 operations on values. Reading joined ranges in place, without a copy, could lift the first one

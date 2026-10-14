@@ -20,8 +20,9 @@ filters, through both `tshark` and Avulse over the same captures, and checks tha
 same packets.
 
 This makes filters easy to write and easy to test: you can try them on a capture in Wireshark
-first. Existing WinDivert filters will be accepted, unchanged, by the WinDivert-compatible shim,
-which has its own front-end for WinDivert's syntax.
+first. Existing WinDivert filters are accepted too, through a front-end for
+[WinDivert's syntax](windivert.md) that gives WinDivert's results, and `avulse filter convert`
+translates them.
 
 ## What a filter can see
 

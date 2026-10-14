@@ -18,6 +18,7 @@
 - [Regular expressions](filters/regex.md)
 - [Metadata fields](filters/metadata.md)
 - [Differences from Wireshark](filters/wireshark.md)
+- [WinDivert filters](filters/windivert.md)
 - [Evaluator limits](filters/limits.md)
 
 # Reference

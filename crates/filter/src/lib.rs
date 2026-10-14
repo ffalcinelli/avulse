@@ -71,9 +71,11 @@ mod labels;
 mod lexer;
 mod lit;
 pub mod meta;
+mod native;
 mod parser;
 pub mod regex;
 mod value;
+mod windivert;
 
 use alloc::vec::Vec;
 
@@ -118,6 +120,32 @@ impl Filter {
             ir,
             warnings: checker.warnings,
             regexes: checker.regexes,
+        })
+    }
+
+    /// Compiles a WinDivert filter for a handle at `layer`, with WinDivert 2.2's syntax and
+    /// semantics (see the [guide]). The result is an ordinary filter: it matches packets, compiles
+    /// to bytecode, and its [`ir`](Self::ir) prints as a native filter.
+    ///
+    /// ```
+    /// use avulse_filter::{Filter, Layer};
+    ///
+    /// let f = Filter::compile_windivert("outbound and tcp.DstPort == 80", Layer::Network).unwrap();
+    /// assert_eq!(f.ir().native().to_string(), "outbound and tcp.dstport == 80");
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The first error, as WinDivert reports it: an unknown token (names are case-sensitive), a
+    /// field or macro that the layer does not have, an index out of bounds, or a filter too long
+    /// or too deep. The ETHERNET layer has no WinDivert filters.
+    ///
+    /// [guide]: https://ffalcinelli.github.io/avulse/guide/filters/windivert.html
+    pub fn compile_windivert(src: &str, layer: meta::Layer) -> Result<Self, Diagnostic> {
+        Ok(Filter {
+            ir: windivert::compile(src, layer)?,
+            warnings: Vec::new(),
+            regexes: Vec::new(),
         })
     }
 

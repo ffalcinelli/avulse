@@ -53,6 +53,13 @@ fn test<'a>(t: &'a Test, cx: &Cx<'a>) -> bool {
         Test::And(v) => v.iter().all(|t| test(t, cx)),
         Test::Or(v) => v.iter().any(|t| test(t, cx)),
         Test::Xor(a, b) => test(a, cx) != test(b, cx),
+        Test::If(c, a, b) => {
+            if test(c, cx) {
+                test(a, cx)
+            } else {
+                test(b, cx)
+            }
+        }
     }
 }
 

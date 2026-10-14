@@ -2,6 +2,9 @@ mod bytecode;
 mod frames;
 mod pcap;
 mod tshark;
+mod windivert;
+#[rustfmt::skip]
+mod windivert_vectors;
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -923,6 +926,7 @@ fn deep_filters() {
     let frame = https_syn();
     f.matches(&Packet::parse(&frame, Link::Ethernet), &Meta::default());
     let _ = f.program();
+    let _ = f.ir().native().to_string();
     let too = "let m00 = tcp\n".to_string() + &src.replacen("(tcp or udp)", "($m00 or udp)", 1);
     assert_eq!(error(&too).message, "macros nest too deeply");
 }

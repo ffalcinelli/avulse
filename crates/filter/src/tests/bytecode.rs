@@ -167,6 +167,7 @@ const CMP: u8 = 35;
 const MEMBER: u8 = 36;
 const SAVEB: u8 = 39;
 const JT: u8 = 48;
+const JMP: u8 = 50;
 
 fn insn(op: u8, a: u8, b: u8, c: u8, imm: u32) -> [u8; 8] {
     let i = imm.to_le_bytes();
@@ -282,6 +283,8 @@ fn verifier_rejects_bad_instructions() {
     assert_eq!(insn_error(insn(CMP, 16, 0, 1, 0), &[]), K::BadOperand);
     assert_eq!(insn_error(insn(JT, 0, 0, 0, 0), &[]), K::BadJump);
     assert_eq!(insn_error(insn(JT, 0, 0, 0, 2), &[]), K::BadJump);
+    assert_eq!(insn_error(insn(JMP, 0, 0, 0, 0), &[]), K::BadJump);
+    assert_eq!(insn_error(insn(JMP, 1, 0, 0, 1), &[]), K::ReservedOperand);
     // A jump back, at the second instruction.
     let back = program(&[insn(CONST, 0, 0, 0, 1), insn(JT, 0, 0, 0, 0)], &[]);
     assert_eq!(

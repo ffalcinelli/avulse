@@ -92,4 +92,12 @@ pub struct Meta<'a> {
     pub parent_endpoint_id: Option<u64>,
     /// Flow endpoints, for the FLOW and SOCKET layers (`local.addr`, `remote.port`, …).
     pub flow: Option<FlowTuple>,
+    /// Timestamp of the packet or event (`timestamp`), in the backend's units.
+    pub timestamp: i64,
+    /// Priority of the handle (`priority`); at the REFLECT layer, of the handle the event is
+    /// about.
+    pub priority: i16,
+    /// A deterministic per-packet hash, which the `random8`, `random16` and `random32` fields read
+    /// as WinDivert does: bits 48 to 55, 32 to 47, and 0 to 31.
+    pub hash: u64,
 }

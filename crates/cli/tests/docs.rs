@@ -1,10 +1,11 @@
 //! Keeps the documentation honest: every filter in the guide and the README compiles (or fails,
-//! when marked so), and the field reference matches the field registry.
+//! when marked so), WinDivert filters through the WinDivert front-end, and the field reference
+//! matches the field registry.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use avulse_filter::Filter;
+use avulse_filter::{Filter, Layer};
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -30,31 +31,34 @@ fn markdown_files() -> Vec<PathBuf> {
     files
 }
 
-/// A filter taken from a ```` ```filter ```` block.
+/// A filter taken from a ```` ```filter ```` or ```` ```windivert ```` block.
 struct Example {
     file: PathBuf,
     line: usize,
     src: String,
     error: bool,
+    windivert: bool,
 }
 
-/// The filters in the ```` ```filter ```` and ```` ```filter,error ```` blocks of `text`. A blank
+/// The filters in the ```` ```filter ```` and ```` ```filter,error ```` blocks of `text` (and the
+/// ```` ```windivert ```` ones, for the NETWORK layer). A blank
 /// line separates filters in a block, except after `let` lines, which belong to the next filter.
 fn examples(file: &Path, text: &str) -> Vec<Example> {
     let mut out = Vec::new();
-    let mut block: Option<(bool, usize, Vec<&str>)> = None;
+    let mut block: Option<(bool, bool, usize, Vec<&str>)> = None;
     for (i, line) in text.lines().enumerate() {
         let trimmed = line.trim();
         match &mut block {
             None => {
                 if let Some(info) = trimmed.strip_prefix("```") {
                     let mut tags = info.split(',').map(str::trim);
-                    if tags.next() == Some("filter") {
-                        block = Some((tags.any(|t| t == "error"), i + 2, Vec::new()));
+                    if let Some(kind @ ("filter" | "windivert")) = tags.next() {
+                        let error = tags.any(|t| t == "error");
+                        block = Some((error, kind == "windivert", i + 2, Vec::new()));
                     }
                 }
             }
-            Some((error, start, lines)) => {
+            Some((error, windivert, start, lines)) => {
                 if trimmed == "```" {
                     let mut pending = String::new();
                     let mut line_no = *start;
@@ -73,6 +77,7 @@ fn examples(file: &Path, text: &str) -> Vec<Example> {
                             line: line_no,
                             src: std::mem::take(&mut pending),
                             error: *error,
+                            windivert: *windivert,
                         });
                     }
                     assert!(
@@ -123,7 +128,12 @@ fn filters_in_the_docs_compile() {
             count += 1;
             let file = ex.file.strip_prefix(root()).unwrap_or(&ex.file);
             let at = format!("{}:{}", file.display(), ex.line);
-            match (Filter::compile(&ex.src), ex.error) {
+            let compiled = if ex.windivert {
+                Filter::compile_windivert(ex.src.trim_end(), Layer::Network)
+            } else {
+                Filter::compile(&ex.src)
+            };
+            match (compiled, ex.error) {
                 (Ok(_), true) => failures.push(format!("{at}: compiles, but is marked `error`")),
                 (Err(e), false) => failures.push(format!("{at}:\n{}", e.render(&ex.src))),
                 _ => {}

@@ -5,14 +5,14 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-13, Steps 1, 1b and 2 done, fuzz targets added)
+## Status (2026-10-14, Steps 1, 1b, 2 and 3 done)
 
 | Area | State |
 | --- | --- |
 | `crates/proto` (`avulse-proto`) | Done for Phase 1. Zero-copy `no_std` parsing: Ethernet, 2 VLAN tags, ARP, IPv4, IPv6 (8 extension headers, fragments), TCP, UDP, ICMP, ICMPv6. Checksum recalculation. 12 tests, including all truncations and random input. |
-| `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. Wireshark 4.6 syntax covered: quantifiers, arithmetic, layers, value labels, `@field`, `&` on bytes, multi-range slices, `upper`/`lower`, and `matches` (optional `regex` feature). Semantics validated against tshark 4.6/4.7 (`src/tests/tshark.rs`, including every field's byte span against PDML). Bytecode, verifier and `no_std` interpreter (`bytecode/`), sharing the value operations in `value.rs` with the IR evaluator. 67 unit tests (including the bytecode differential tests), 8 tshark tests (opt-in) and doctests. No WinDivert front-end yet. |
-| `crates/cli` (`avulse`) | `avulse filter check \| fmt \| explain [--bytecode] \| eval --hex … \| fields [--format markdown]`. Exit codes: 0 match, 1 no match, 2 error. |
-| `fuzz/` | cargo-fuzz targets `bytecode` (verifier and interpreter on arbitrary programs) and `filter` (parser, `fmt` round trip, checker, evaluator, bytecode agreement). Outside the workspace. |
+| `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. Wireshark 4.6 syntax covered: quantifiers, arithmetic, layers, value labels, `@field`, `&` on bytes, multi-range slices, `upper`/`lower`, and `matches` (optional `regex` feature). Semantics validated against tshark 4.6/4.7 (`src/tests/tshark.rs`, including every field's byte span against PDML). Bytecode, verifier and `no_std` interpreter (`bytecode/`), sharing the value operations in `value.rs` with the IR evaluator. WinDivert 2.2 front-end (`windivert/`), passing WinDivert's 241 vectors through the IR, the bytecode and the native round trip; `ir::Test::native()` prints native syntax. Nesting is bounded (native 64 levels, 4 macro levels; WinDivert 341 parentheses). 75 unit tests, 9 tshark tests (opt-in) and doctests. |
+| `crates/cli` (`avulse`) | `avulse filter check \| fmt \| explain [--bytecode] \| eval --hex … \| convert [--layer …] \| fields [--format markdown]`. Exit codes: 0 match, 1 no match, 2 error. |
+| `fuzz/` | cargo-fuzz targets `bytecode` (verifier and interpreter on arbitrary programs), `filter` (parser, `fmt` round trip, checker, evaluator, bytecode agreement) and `windivert` (front-end, bytecode and native agreement). Outside the workspace. |
 | `crates/wasm` (`avulse-wasm`) | The filter engine for the website's playground (wasm-bindgen, `publish = false`). |
 | Docs and website | README (front page), guide (`book/`, mdBook), `site/` with the playground, rustdoc and pdoc, built by `scripts/build-site.sh` and deployed by `pages.yml` to <https://ffalcinelli.github.io/avulse/>. Every public item is documented (`missing_docs`). |
 | `crates/{ebpf,backend-linux,avulse,capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
@@ -267,7 +267,43 @@ Add `avulse filter explain --bytecode` to dump the program.
 **Acceptance:** differential and fuzz tests are clean (fuzz ≥ 10 min locally), the no_std build still
 passes, and `exec` uses no `alloc`.
 
-### Step 3: WinDivert front-end and conformance vectors
+### Step 3: WinDivert front-end and conformance vectors (done)
+
+**Outcome.** `crates/filter/src/windivert/` (`Filter::compile_windivert(src, layer)`), the
+`avulse filter convert [--layer …]` command and the guide page `filters/windivert.md`.
+
+- **Semantics, read from `windivert_helper.c`/`windivert_shared.c`** (no code copied). Names are
+  **case-sensitive** (the step's note below was wrong). `not` flips the operator of one test, so a
+  missing header still makes it false, and it cannot precede a parenthesis. Values are a sign and
+  a 128-bit magnitude; IPv4 is `::ffff:a.b.c.d`; fields narrower than 64 bits compare only the low
+  32 bits at run time. WinDivert's compiler replaces comparisons that a field's range decides by
+  `protocol == result` (`ip.TOS < 0` is `not ip`), and the front-end reproduces it with the same
+  range table. `localPort`/`remotePort` on ICMP are the type (sending side) or 0.
+- **Lowering to existing IR**, so that `convert` works: `packet16[i]` is a 2-byte slice of `frame`
+  compared with bytes, `ip.HdrLength` is `ip.hdr_len` times 4, `tcp.PayloadLength` is
+  `len(tcp.payload)` or 0, `localAddr` splits by family. The planned `Value::Read` was not needed.
+  New: `Test::If` for `(a? b: c)` (one node, so conditionals nested in conditions do not blow up;
+  bytecode `jmp` opcode, version 2), the extension fields `timestamp`, `priority` and
+  `random8/16/32` (`Meta::timestamp`, `priority`, `hash`), and `ir::Test::native()`/`native_tests()`.
+- **Conformance:** `src/tests/windivert.rs` runs the 241 vectors (`scripts/gen_windivert_vectors.py`
+  generates the table) through the IR, the bytecode and the converted native filter; the random
+  ones only compile. Plus grammar, error, quirk and convert tests.
+- **Stack safety, found on the way:** the native parser overflowed the stack on about 1000 nested
+  parentheses (and `not`s, `+` chains, `-`s). It now bounds the expression tree to 64 levels, and
+  the checker bounds macro nesting to 4; the WinDivert parser keeps `and`/`or` lists flat and
+  allows 341 parentheses like WinDivert. The worst accepted filters need under 1 MiB of stack in
+  release builds (about 3 MiB in debug), checked by `deep_filters_are_bounded` and
+  `windivert_deepest_filters`.
+- **Known differences** (guide): malformed packets that WinDivert's parser reads differently
+  (UDP payload end, IPv6 mobility header, ICMP after IPv6, truncated TCP options); compiled
+  `@` filter objects are not accepted; `convert` refuses output over 10,000 tests.
+- **For Phase 4 (compat shim):** fill `Meta::hash` with WinDivert's packet hash, and at the REFLECT
+  layer `Meta::layer`/`priority` with the reflected handle's.
+- **Fuzzing:** the new `windivert` target (seeded with the vectors) ran 10 minutes, 6.9 million
+  inputs, clean. `filter` ran another 10 minutes after the parser changes, with inputs up to
+  4 KiB (1 million), clean.
+
+The original plan of the step follows.
 
 **Note from Step 2.** The IR extensions below must reach the bytecode too: put their semantics in
 `value.rs`, add an opcode (or a field id) with its verifier rule, disassembly and rejection test,
@@ -367,7 +403,7 @@ starting each phase, expand it into steps in this file, in the same format as ab
 - [x] Step 1b: Wireshark syntax coverage
 - [x] Docs: README, guide, website with playground, Rust and Python API docs
 - [x] Step 2: bytecode + verifier + interpreter
-- [ ] Step 3: WinDivert front-end + 241 vectors + `filter convert`
+- [x] Step 3: WinDivert front-end + 241 vectors + `filter convert`
 - [ ] Step 4: TCP options (fuzz targets done)
 - [ ] Step 5: spikes A, B, C
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement

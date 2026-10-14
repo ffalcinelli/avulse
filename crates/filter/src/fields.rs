@@ -369,6 +369,11 @@ fields! {
     ProcessName: "process.name", Ty::Str, Extension, NONE, "Process name (FLOW, SOCKET layers)";
     EndpointId: "endpoint.id", U64, Extension, NONE, "Endpoint ID (FLOW, SOCKET layers)";
     ParentEndpointId: "parent.endpoint.id", U64, Extension, NONE, "Parent endpoint ID (FLOW, SOCKET layers)";
+    Timestamp: "timestamp", Ty::Int, Extension, NONE, "Timestamp of the packet or event, as the backend reports it";
+    Priority: "priority", Ty::Int, Extension, NONE, "Priority of the handle (REFLECT layer: of the handle the event is about)";
+    Random8: "random8", U8, Extension, NONE, "8 bits of a per-packet hash (WinDivert's `random8`)";
+    Random16: "random16", U16, Extension, NONE, "16 bits of a per-packet hash (WinDivert's `random16`)";
+    Random32: "random32", U32, Extension, NONE, "32 bits of a per-packet hash (WinDivert's `random32`)";
 }
 
 /// The field named `name`, if Avulse supports it.

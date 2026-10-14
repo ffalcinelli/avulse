@@ -73,6 +73,7 @@
 //! | 40 | `xorb` | `a` | acc = acc xor `bool[a]` |
 //! | 48 | `jt` | `imm` = target | jump to `imm` if acc |
 //! | 49 | `jf` | `imm` = target | jump to `imm` unless acc |
+//! | 50 | `jmp` | `imm` = target | jump to `imm` |
 //!
 //! The quantifier is 0 for `any` and 1 for `all`. A jump target is an instruction index greater
 //! than the jump's own, or the number of instructions to end the program. Since every jump goes
@@ -127,7 +128,7 @@ pub use encode::EncodeError;
 pub use verify::{VerifyError, VerifyErrorKind, verify};
 
 /// The format version. A program of another version is rejected.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 
 /// The largest program, header and pool included.
 pub const MAX_SIZE: usize = 64 * 1024;
@@ -174,10 +175,11 @@ enum Op {
     XorB = 40,
     Jt = 48,
     Jf = 49,
+    Jmp = 50,
 }
 
 impl Op {
-    const ALL: [Op; 24] = [
+    const ALL: [Op; 25] = [
         Op::Lit,
         Op::Field,
         Op::Layer,
@@ -202,6 +204,7 @@ impl Op {
         Op::XorB,
         Op::Jt,
         Op::Jf,
+        Op::Jmp,
     ];
 
     fn from_u8(b: u8) -> Option<Op> {
@@ -234,6 +237,7 @@ impl Op {
             Op::XorB => "xorb",
             Op::Jt => "jt",
             Op::Jf => "jf",
+            Op::Jmp => "jmp",
         }
     }
 }
@@ -673,7 +677,7 @@ impl fmt::Display for Program {
                 Op::Contains => write!(f, " {} r{b}, r{c}", quant(a))?,
                 Op::Not => {}
                 Op::SaveB | Op::XorB => write!(f, " b{a}")?,
-                Op::Jt | Op::Jf => write!(f, " {}", i.imm)?,
+                Op::Jt | Op::Jf | Op::Jmp => write!(f, " {}", i.imm)?,
             }
             writeln!(f)?;
         }

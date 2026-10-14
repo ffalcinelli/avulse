@@ -80,6 +80,19 @@ bytecode, 7 instructions, 101 bytes:
 6  not
 ```
 
+## `avulse filter convert`
+
+Compiles a [WinDivert filter](../filters/windivert.md) and prints a native filter that selects the
+same packets. `--layer <network|network-forward|flow|socket|reflect>` (default `network`) is the
+WinDivert layer the filter is for: it decides which fields and macros are valid.
+
+```console
+$ avulse filter convert 'inbound and (tcp.Syn or udp.DstPort == 53) and !loopback'
+inbound and (tcp.flags.syn == true or udp.dstport == 53) and not loopback
+$ avulse filter convert 'packet16[1] > 0x40 and ip.HdrLength == 5'
+frame[2:2] > 00:40 and ip.hdr_len == 20
+```
+
 ## `avulse filter eval`
 
 Evaluates the filter against one packet given in hex, and prints `match` or `no match`.

@@ -1000,6 +1000,11 @@ pub(crate) fn load<'a>(f: Field, p: &Packet<'a>, m: &Meta<'a>) -> Vals<'a> {
         Field::ProcessName => o.opt(m.process_name.map(|s| V::Bytes(s.as_bytes()))),
         Field::EndpointId => o.opt(m.endpoint_id.map(V::Uint)),
         Field::ParentEndpointId => o.opt(m.parent_endpoint_id.map(V::Uint)),
+        Field::Timestamp => o.push(V::Int(m.timestamp)),
+        Field::Priority => o.push(V::Int(m.priority.into())),
+        Field::Random8 => o.push(V::Uint((m.hash >> 48) & 0xff)),
+        Field::Random16 => o.push(V::Uint((m.hash >> 32) & 0xffff)),
+        Field::Random32 => o.push(V::Uint(m.hash & 0xffff_ffff)),
     }
     o
 }

@@ -195,6 +195,11 @@ that the value is true.
 | `process.name` | string | Process name (FLOW, SOCKET layers) |
 | `endpoint.id` | unsigned integer (64 bits) | Endpoint ID (FLOW, SOCKET layers) |
 | `parent.endpoint.id` | unsigned integer (64 bits) | Parent endpoint ID (FLOW, SOCKET layers) |
+| `timestamp` | integer | Timestamp of the packet or event, as the backend reports it |
+| `priority` | integer | Priority of the handle (REFLECT layer: of the handle the event is about) |
+| `random8` | unsigned integer (8 bits) | 8 bits of a per-packet hash (WinDivert's `random8`) |
+| `random16` | unsigned integer (16 bits) | 16 bits of a per-packet hash (WinDivert's `random16`) |
+| `random32` | unsigned integer (32 bits) | 32 bits of a per-packet hash (WinDivert's `random32`) |
 
 ## Rejected Wireshark fields
 

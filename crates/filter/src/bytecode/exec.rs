@@ -93,10 +93,12 @@ fn run_in<'a>(code: &'a [u8], pool: &'a [u8], p: &'a Packet<'a>, m: &'a Meta<'a>
                     }
                     Op::XorB => acc ^= bools.get(i.a as usize).copied().unwrap_or(false),
                     // The verifier only accepts forward jumps; never go back regardless.
-                    Op::Jt | Op::Jf if acc == (op == Op::Jt) => match i.imm as usize {
-                        target if target < pc => return false,
-                        target => pc = target,
-                    },
+                    Op::Jt | Op::Jf | Op::Jmp if op == Op::Jmp || acc == (op == Op::Jt) => {
+                        match i.imm as usize {
+                            target if target < pc => return false,
+                            target => pc = target,
+                        }
+                    }
                     _ => {}
                 }
                 continue;

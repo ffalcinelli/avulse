@@ -76,3 +76,17 @@ process.name == "curl" and protocol == tcp and remote.addr != 127.0.0.1
 
 On packet layers, `local.*` and `remote.*` are filled from the headers and the direction, and
 `protocol` is the transport protocol after any IPv6 extension headers.
+
+## Time, priority and hash
+
+These come from WinDivert, and are mostly useful in [WinDivert filters](windivert.md):
+
+| Field | Type | Value |
+| --- | --- | --- |
+| `timestamp` | signed integer | the packet or event timestamp, in the backend's units |
+| `priority` | signed integer | the handle's priority; at the `reflect` layer, the priority of the handle the event is about |
+| `random8`, `random16`, `random32` | integer | bits of a deterministic per-packet hash the backend computes, as WinDivert's fields of the same names |
+
+```filter
+timestamp > 0 and random8 < 128
+```

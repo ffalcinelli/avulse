@@ -5,7 +5,7 @@ use std::io::{IsTerminal, Read, Write};
 use std::process::ExitCode;
 
 use avulse_filter::fields::{APPLICATION, FIELDS, FieldDef, Origin, Ty, UNSUPPORTED};
-use avulse_filter::{Diagnostic, Filter, Meta, parse};
+use avulse_filter::{Diagnostic, Filter, Layer, Meta, parse};
 use avulse_proto::{Link, Packet};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -58,6 +58,14 @@ enum FilterCommand {
         #[arg(long)]
         iface: Option<String>,
     },
+    /// Convert a WinDivert filter to an Avulse filter that selects the same packets.
+    Convert {
+        #[command(flatten)]
+        source: Source,
+        /// The WinDivert layer the filter is for.
+        #[arg(long, value_enum, default_value_t = LayerArg::Network)]
+        layer: LayerArg,
+    },
     /// List the fields filters can use.
     Fields {
         /// Output format. `markdown` is the guide's field reference.
@@ -81,6 +89,19 @@ struct Source {
     #[arg(short, long, conflicts_with = "filter")]
     file: Option<std::path::PathBuf>,
 }
+
+#[derive(Clone, Copy, ValueEnum)]
+enum LayerArg {
+    Network,
+    NetworkForward,
+    Flow,
+    Socket,
+    Reflect,
+}
+
+/// Largest converted filter, in tests: native filters have no conditional, so WinDivert's
+/// `(a? b: c)` repeats `a`, and nested conditions can double the size at every level.
+const CONVERT_MAX_TESTS: usize = 10_000;
 
 #[derive(Clone, Copy, ValueEnum)]
 enum LinkArg {
@@ -180,6 +201,27 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 }
             }
             out(&text);
+            Ok(ExitCode::SUCCESS)
+        }
+        FilterCommand::Convert { source, layer } => {
+            let s = source.read()?;
+            let layer = match layer {
+                LayerArg::Network => Layer::Network,
+                LayerArg::NetworkForward => Layer::NetworkForward,
+                LayerArg::Flow => Layer::Flow,
+                LayerArg::Socket => Layer::Socket,
+                LayerArg::Reflect => Layer::Reflect,
+            };
+            let f = Filter::compile_windivert(&s, layer).map_err(|e| render(&e, &s))?;
+            let n = f.ir().native_tests();
+            if n > CONVERT_MAX_TESTS {
+                return Err(format!(
+                    "the converted filter would have {}{n} tests, more than {CONVERT_MAX_TESTS}: \
+                     native filters have no conditional, so each `(a? b: c)` repeats `a`",
+                    if n == usize::MAX { "at least " } else { "" },
+                ));
+            }
+            out(&format!("{}\n", f.ir().native()));
             Ok(ExitCode::SUCCESS)
         }
         FilterCommand::Eval {
