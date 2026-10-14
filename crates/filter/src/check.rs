@@ -53,6 +53,10 @@ enum Resolved<'a> {
     Literal(&'a Operand),
 }
 
+/// Deepest chain of macros using macros. With the parser's `MAX_DEPTH`, it bounds the depth of
+/// the IR, which every later pass recurses over.
+const MACRO_DEPTH: usize = 4;
+
 pub(crate) struct Checker<'a> {
     lets: &'a [ast::Let],
     stack: Vec<&'a str>,
@@ -116,6 +120,14 @@ impl<'a> Checker<'a> {
                 span,
                 format!("`${name}` refers to itself"),
             ));
+        }
+        // Each expansion can add a whole expression's depth to the tree.
+        if self.stack.len() >= MACRO_DEPTH {
+            return Err(
+                Diagnostic::error(span, "macros nest too deeply").help(format!(
+                    "a macro can use macros at most {MACRO_DEPTH} levels deep"
+                )),
+            );
         }
         self.stack.push(&l.name);
         if !self.used.contains(&l.name.as_str()) {

@@ -3,7 +3,8 @@ mod frames;
 mod pcap;
 mod tshark;
 
-use alloc::string::String;
+use alloc::format;
+use alloc::string::{String, ToString};
 use core::net::{IpAddr, Ipv4Addr};
 
 use avulse_proto::{Link, Packet, Tcp, ethertype, ip_proto};
@@ -882,4 +883,46 @@ fn render_never_splits_a_character() {
     // A span inside a character, from any source, still renders.
     let odd = crate::Diagnostic::error(crate::Span::new(23, 24), "x");
     assert!(odd.render(src).contains("^"));
+}
+
+/// Deep filters are errors, not stack overflows: the parser bounds the tree, the checker the
+/// macros, and the deepest accepted filter goes through every pass. That filter needs under 1 MiB
+/// of stack in release builds and about 3 MiB in debug ones, so the test runs on a bigger stack.
+#[test]
+fn deep_filters_are_bounded() {
+    extern crate std;
+    std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(deep_filters)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn deep_filters() {
+    let deep = |n: usize| "(".repeat(n) + "tcp" + &")".repeat(n);
+    let too_deep = "the filter nests too deeply";
+    assert_eq!(error(&deep(10_000)).message, too_deep);
+    assert_eq!(error(&deep(65)).message, too_deep);
+    compile(&deep(63));
+    assert_eq!(error(&"not ".repeat(10_000)).message, too_deep);
+    let sum = "tcp.len".to_string() + &" + 1".repeat(10_000) + " == 1";
+    assert_eq!(error(&sum).message, too_deep);
+    let neg = "tcp.len == ".to_string() + &"-".repeat(10_000) + "1";
+    assert_eq!(error(&neg).message, too_deep);
+    // The deepest filter that compiles: 63 levels in each of 5 nested macros.
+    let body = |inner: &str| (0..31).fold(inner.to_string(), |e, _| format!("not ({e} or udp)"));
+    let mut src = String::new();
+    let mut prev = "tcp".to_string();
+    for i in 0..4 {
+        src += &format!("let m{i} = {}\n", body(&prev));
+        prev = format!("$m{i}");
+    }
+    src += &body(&prev);
+    let f = compile(&src);
+    let frame = https_syn();
+    f.matches(&Packet::parse(&frame, Link::Ethernet), &Meta::default());
+    let _ = f.program();
+    let too = "let m00 = tcp\n".to_string() + &src.replacen("(tcp or udp)", "($m00 or udp)", 1);
+    assert_eq!(error(&too).message, "macros nest too deeply");
 }

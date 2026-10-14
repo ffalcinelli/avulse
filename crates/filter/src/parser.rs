@@ -11,6 +11,10 @@ use crate::ast::*;
 use crate::error::{Diagnostic, Result, Span};
 use crate::lexer::{Tok, Token, lex};
 
+/// Deepest expression tree, and deepest nesting of parentheses, `not`, `-`, braces, calls and
+/// sets. It bounds the recursion of the parser and of every pass over the tree.
+pub(crate) const MAX_DEPTH: usize = 64;
+
 /// Function names recognized before `(`.
 const FUNCTIONS: &[&str] = &[
     "len", "count", "string", "upper", "lower", "abs", "max", "min", "vals", "dec", "hex",
@@ -33,6 +37,8 @@ pub fn parse(src: &str) -> Result<Program> {
     let mut p = Parser {
         toks: lex(src)?,
         pos: 0,
+        depth: 0,
+        nest: 0,
     };
     let mut lets = Vec::new();
     while p.is_word("let") {
@@ -55,9 +61,38 @@ pub fn parse(src: &str) -> Result<Program> {
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
+    /// Depth of the expression just parsed.
+    depth: usize,
+    /// Nested parses in progress.
+    nest: usize,
+}
+
+fn too_deep(span: Span) -> Diagnostic {
+    Diagnostic::error(span, "the filter nests too deeply")
+        .help(format!("expressions can nest at most {MAX_DEPTH} levels"))
 }
 
 impl Parser {
+    /// Records that the expression just built is `d` levels deep.
+    fn depth_is(&mut self, d: usize) -> Result<()> {
+        if d > MAX_DEPTH {
+            return Err(too_deep(self.prev_span()));
+        }
+        self.depth = d;
+        Ok(())
+    }
+
+    /// Runs a nested parse: parentheses, `not`, `-`, braces, calls and sets.
+    fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if self.nest >= MAX_DEPTH {
+            return Err(too_deep(self.span()));
+        }
+        self.nest += 1;
+        let r = f(self);
+        self.nest -= 1;
+        r
+    }
+
     fn peek(&self) -> &Tok {
         &self.toks[self.pos].tok
     }
@@ -146,12 +181,15 @@ impl Parser {
 
     fn expr(&mut self) -> Result<Expr> {
         let mut v = vec![self.xor()?];
+        let mut d = self.depth;
         while self.eat(&Tok::OrOr) || self.eat_word(&["or", "OR"]) {
             v.push(self.xor()?);
+            d = d.max(self.depth);
         }
         Ok(if v.len() == 1 {
             v.remove(0)
         } else {
+            self.depth_is(d + 1)?;
             Expr::Or(v)
         })
     }
@@ -159,19 +197,24 @@ impl Parser {
     fn xor(&mut self) -> Result<Expr> {
         let mut e = self.and()?;
         while self.eat(&Tok::XorXor) || self.eat_word(&["xor", "XOR"]) {
+            let d = self.depth;
             e = Expr::Xor(Box::new(e), Box::new(self.and()?));
+            self.depth_is(d.max(self.depth) + 1)?;
         }
         Ok(e)
     }
 
     fn and(&mut self) -> Result<Expr> {
         let mut v = vec![self.unary()?];
+        let mut d = self.depth;
         while self.eat(&Tok::AndAnd) || self.eat_word(&["and", "AND"]) {
             v.push(self.unary()?);
+            d = d.max(self.depth);
         }
         Ok(if v.len() == 1 {
             v.remove(0)
         } else {
+            self.depth_is(d + 1)?;
             Expr::And(v)
         })
     }
@@ -179,7 +222,9 @@ impl Parser {
     fn unary(&mut self) -> Result<Expr> {
         let span = self.span();
         if self.eat(&Tok::Bang) || self.eat_word(&["not", "NOT"]) {
-            return Ok(Expr::Not(Box::new(self.unary()?), span));
+            let inner = self.nested(Self::unary)?;
+            self.depth_is(self.depth + 1)?;
+            return Ok(Expr::Not(Box::new(inner), span));
         }
         self.relation()
     }
@@ -234,13 +279,15 @@ impl Parser {
             return Ok(lhs);
         };
         let lhs = into_operand(lhs, start, &format!("before `{op}`"))?;
+        let d = self.depth;
         let rhs = match op {
-            RelOp::In | RelOp::NotIn => Rhs::Set(self.set()?),
+            RelOp::In | RelOp::NotIn => Rhs::Set(self.nested(Self::set)?),
             _ => {
                 let s = self.span();
                 Rhs::Operand(into_operand(self.value()?, s, &format!("after `{op}`"))?)
             }
         };
+        self.depth_is(d.max(self.depth) + 1)?;
         let span = start.to(self.prev_span());
         Ok(Expr::Rel {
             quant,
@@ -283,7 +330,9 @@ impl Parser {
         while self.eat(&Tok::Amp) {
             let lhs = into_operand(e, start, "before `&`")?;
             let s = self.span();
+            let d = self.depth;
             let rhs = into_operand(self.sum()?, s, "after `&`")?;
+            self.depth_is(d.max(self.depth) + 1)?;
             let span = start.to(self.prev_span());
             e = Expr::Test(Operand::BitAnd(Box::new(lhs), Box::new(rhs), span));
         }
@@ -331,7 +380,9 @@ impl Parser {
     ) -> Result<Expr> {
         let lhs = into_operand(lhs, start, &format!("before `{op}`"))?;
         let s = self.span();
+        let d = self.depth;
         let rhs = into_operand(next(self)?, s, &format!("after `{op}`"))?;
+        self.depth_is(d.max(self.depth) + 1)?;
         let span = start.to(self.prev_span());
         Ok(Expr::Test(Operand::Arith(
             op,
@@ -347,7 +398,8 @@ impl Parser {
             return self.primary();
         }
         let s = self.span();
-        let inner = into_operand(self.negation()?, s, "after `-`")?;
+        let inner = into_operand(self.nested(Self::negation)?, s, "after `-`")?;
+        self.depth_is(self.depth + 1)?;
         let span = start.to(self.prev_span());
         Ok(Expr::Test(Operand::Neg(Box::new(inner), span)))
     }
@@ -388,13 +440,14 @@ impl Parser {
         };
         let operand = match t.tok {
             Tok::LParen => {
-                let e = self.expr()?;
+                let e = self.nested(Self::expr)?;
                 self.expect(Tok::RParen, "`)`")?;
                 return Ok(e);
             }
             Tok::LBrace => {
                 let s = self.span();
-                let inner = into_operand(self.value()?, s, "inside `{ }`")?;
+                let inner = into_operand(self.nested(Self::value)?, s, "inside `{ }`")?;
+                self.depth_is(self.depth + 1)?;
                 let end = self.expect(Tok::RBrace, "`}`")?;
                 Operand::Group(Box::new(inner), t.span.to(end))
             }
@@ -407,22 +460,38 @@ impl Parser {
             Tok::Word(w) if self.peek() == &Tok::LParen && FUNCTIONS.contains(&w.as_str()) => {
                 self.bump();
                 let mut args = Vec::new();
+                let mut d = 0;
                 if self.peek() != &Tok::RParen {
                     loop {
                         let s = self.span();
-                        args.push(into_operand(self.value()?, s, "as a function argument")?);
+                        let arg = self.nested(Self::value)?;
+                        d = d.max(self.depth);
+                        args.push(into_operand(arg, s, "as a function argument")?);
                         if !self.eat(&Tok::Comma) {
                             break;
                         }
                     }
                 }
+                self.depth_is(d + 1)?;
                 let end = self.expect(Tok::RParen, "`)`")?;
                 Operand::Call(w, args, t.span.to(end))
             }
-            Tok::Word(w) => Operand::Word(w, t.span),
-            Tok::Str(s) => Operand::Str(s, t.span),
-            Tok::Char(c) => Operand::Char(c, t.span),
-            Tok::Macro(m) => Operand::Macro(m, t.span),
+            Tok::Word(w) => {
+                self.depth = 1;
+                Operand::Word(w, t.span)
+            }
+            Tok::Str(s) => {
+                self.depth = 1;
+                Operand::Str(s, t.span)
+            }
+            Tok::Char(c) => {
+                self.depth = 1;
+                Operand::Char(c, t.span)
+            }
+            Tok::Macro(m) => {
+                self.depth = 1;
+                Operand::Macro(m, t.span)
+            }
             other => {
                 return Err(Diagnostic::error(
                     t.span,
@@ -442,10 +511,12 @@ impl Parser {
                         .help("layers are `#n`, `#[a-b]`, `#[a:count]`, `#[a:]` or a list such as `#[1,3]`; negative ones count from the last")
                 })?;
             let span = operand.span().to(t.span);
+            self.depth_is(self.depth + 1)?;
             operand = Operand::Layer(Box::new(operand), layers, span);
         }
         if let Some(at) = raw {
             let span = at.to(operand.span());
+            self.depth_is(self.depth + 1)?;
             operand = Operand::Raw(Box::new(operand), span);
         }
         while self.peek() == &Tok::LBracket {
@@ -471,6 +542,7 @@ impl Parser {
             }
             let close = self.expect(Tok::RBracket, "`]`")?;
             let span = operand.span().to(close).to(open);
+            self.depth_is(self.depth + 1)?;
             operand = Operand::Slice(Box::new(operand), ranges, span);
         }
         Ok(Expr::Test(operand))
@@ -479,16 +551,21 @@ impl Parser {
     fn set(&mut self) -> Result<Set> {
         if let Tok::Macro(m) = self.peek().clone() {
             let span = self.bump().span;
+            self.depth = 1;
             return Ok(Set::Macro(m, span));
         }
         let open = self.expect(Tok::LBrace, "`{` or a macro")?;
         let mut items = Vec::new();
+        let mut d = 0;
         while self.peek() != &Tok::RBrace {
             let s = self.span();
             let lo = into_operand(self.value()?, s, "in a set")?;
+            d = d.max(self.depth);
             let hi = if self.eat(&Tok::DotDot) {
                 let s = self.span();
-                Some(into_operand(self.value()?, s, "after `..`")?)
+                let hi = into_operand(self.value()?, s, "after `..`")?;
+                d = d.max(self.depth);
+                Some(hi)
             } else {
                 None
             };
@@ -501,6 +578,7 @@ impl Parser {
         if items.is_empty() {
             return Err(Diagnostic::error(open.to(close), "empty set"));
         }
+        self.depth_is(d + 1)?;
         Ok(Set::Items(items, open.to(close)))
     }
 }
