@@ -1109,11 +1109,13 @@ fn proto_compare(o: &Operand) -> Diagnostic {
 }
 
 pub(crate) fn unknown_field(w: &str, span: Span) -> Diagnostic {
-    if let Some((name, why)) = fields::UNSUPPORTED
+    if let Some((_, why)) = fields::UNSUPPORTED
         .iter()
         .find(|(n, _)| w == *n || w.strip_prefix(n).is_some_and(|r| r.starts_with('.')))
     {
-        return Diagnostic::error(span, format!("`{name}` is not supported")).help(*why);
+        // Name the field as written: the entry may be a prefix (`tcp.analysis` for
+        // `tcp.analysis.flags`).
+        return Diagnostic::error(span, format!("`{w}` is not supported")).help(*why);
     }
     let proto = w.split('.').next().unwrap_or(w);
     if fields::APPLICATION.contains(&proto) && fields::lookup(proto).is_none() {

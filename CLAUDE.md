@@ -38,7 +38,7 @@ CI (`.github/workflows/ci.yml`) runs fmt and clippy, then `cargo test` on Linux,
 
 ### `avulse-proto`
 
-`Packet::parse(bytes, Link::{Ethernet, Ip})` does zero-copy parsing of Ethernet, up to 2 VLAN tags (QinQ), ARP, IPv4, IPv6 (walking up to 8 extension headers, plus fragments), TCP, UDP, ICMP and ICMPv6. Parsing **never fails, allocates or panics**: it stops at the first truncated or unknown header, and the rest of the buffer becomes the payload. `headers.rs` holds the per-header views, and `checksum.rs` handles recalculation.
+`Packet::parse(bytes, Link::{Ethernet, Ip})` does zero-copy parsing of Ethernet, up to 2 VLAN tags (QinQ), ARP, IPv4, IPv6 (walking up to 8 extension headers, plus fragments), TCP (options through a bounded walk, `Tcp::option_iter`/`option`), UDP, ICMP and ICMPv6. Parsing **never fails, allocates or panics**: it stops at the first truncated or unknown header, and the rest of the buffer becomes the payload. `headers.rs` holds the per-header views, and `checksum.rs` handles recalculation.
 
 ### `avulse-filter`: the pipeline
 

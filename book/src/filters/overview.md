@@ -30,7 +30,8 @@ A filter sees one packet, and only its outermost headers:
 
 - Ethernet, up to two VLAN tags (802.1Q and 802.1ad), ARP;
 - IPv4 and IPv6, with the IPv6 extension headers and the fragment headers;
-- TCP, UDP, ICMP and ICMPv6, and the payload after them;
+- TCP (with the MSS, window scale, SACK permitted and timestamps options), UDP, ICMP and
+  ICMPv6, and the payload after them;
 - the [metadata](metadata.md) the backend provides: direction, loopback, interface, layer, event,
   process and flow endpoints.
 
@@ -40,6 +41,10 @@ rejected with a hint: match ports or payload bytes instead.
 
 ```filter,error
 http.request.method == "GET"
+```
+
+```filter
+tcp.flags.syn and tcp.options.mss_val < 1200 and not tcp.options.sack_perm
 ```
 
 ```filter

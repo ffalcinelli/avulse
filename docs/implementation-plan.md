@@ -5,12 +5,12 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-14, Steps 1, 1b, 2 and 3 done)
+## Status (2026-10-14, Steps 1 to 4 done; next: the Phase 0 spikes)
 
 | Area | State |
 | --- | --- |
-| `crates/proto` (`avulse-proto`) | Done for Phase 1. Zero-copy `no_std` parsing: Ethernet, 2 VLAN tags, ARP, IPv4, IPv6 (8 extension headers, fragments), TCP, UDP, ICMP, ICMPv6. Checksum recalculation. 12 tests, including all truncations and random input. |
-| `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. Wireshark 4.6 syntax covered: quantifiers, arithmetic, layers, value labels, `@field`, `&` on bytes, multi-range slices, `upper`/`lower`, and `matches` (optional `regex` feature). Semantics validated against tshark 4.6/4.7 (`src/tests/tshark.rs`, including every field's byte span against PDML). Bytecode, verifier and `no_std` interpreter (`bytecode/`), sharing the value operations in `value.rs` with the IR evaluator. WinDivert 2.2 front-end (`windivert/`), passing WinDivert's 241 vectors through the IR, the bytecode and the native round trip; `ir::Test::native()` prints native syntax. Nesting is bounded (native 64 levels, 4 macro levels; WinDivert 341 parentheses). 75 unit tests, 9 tshark tests (opt-in) and doctests. |
+| `crates/proto` (`avulse-proto`) | Done for Phase 1. Zero-copy `no_std` parsing: Ethernet, 2 VLAN tags, ARP, IPv4, IPv6 (8 extension headers, fragments), TCP (options: `Tcp::option_iter`, `option`), UDP, ICMP, ICMPv6. Checksum recalculation. 13 tests, including all truncations and random input. |
+| `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. Wireshark 4.6 syntax covered: quantifiers, arithmetic, layers, value labels, `@field`, `&` on bytes, multi-range slices, `upper`/`lower`, and `matches` (optional `regex` feature). Semantics validated against tshark 4.6/4.7 (`src/tests/tshark.rs`, including every field's byte span against PDML). Bytecode, verifier and `no_std` interpreter (`bytecode/`), sharing the value operations in `value.rs` with the IR evaluator. WinDivert 2.2 front-end (`windivert/`), passing WinDivert's 241 vectors through the IR, the bytecode and the native round trip; `ir::Test::native()` prints native syntax. Nesting is bounded (native 64 levels, 4 macro levels; WinDivert 341 parentheses). TCP options: `tcp.options`, `.mss`, `.mss_val`, `.wscale`, `.wscale.shift`, `.wscale.multiplier`, `.sack_perm`, `.timestamp`, `.tsval`, `.tsecr`. 76 unit tests, 9 tshark tests (opt-in) and doctests. |
 | `crates/cli` (`avulse`) | `avulse filter check \| fmt \| explain [--bytecode] \| eval --hex … \| convert [--layer …] \| fields [--format markdown]`. Exit codes: 0 match, 1 no match, 2 error. |
 | `fuzz/` | cargo-fuzz targets `bytecode` (verifier and interpreter on arbitrary programs), `filter` (parser, `fmt` round trip, checker, evaluator, bytecode agreement) and `windivert` (front-end, bytecode and native agreement). Outside the workspace. |
 | `crates/wasm` (`avulse-wasm`) | The filter engine for the website's playground (wasm-bindgen, `publish = false`). |
@@ -359,12 +359,23 @@ IR → native-syntax printer.
 **Acceptance:** every non-random vector passes, and `convert` output re-compiles to an IR that is
 equivalent on the vector packets.
 
-### Step 4: Language gaps (small, independent)
+### Step 4: Language gaps (done)
 
 (`matches` and `&` on bytes moved to Step 1b and are done.)
 
-- **TCP options:** `tcp.options.mss_val`, `tcp.options.wscale.shift`, `tcp.options.sack_perm`,
-  `tcp.option_kind`. Parse options in `proto` (bounded loop).
+- [x] **TCP options.** `avulse-proto` walks the options (`Tcp::option_iter`, `Tcp::option`,
+  `TcpOption::{mss, wscale_shift, timestamps}`) the way Wireshark 4.6/4.7 does, checked with
+  tshark on crafted headers: the walk ends after EOL, and at a length below 2 or past the header;
+  unknown kinds are skipped by their length; a known option of the wrong length is present (its
+  protocol item) but has no value. Fields: `tcp.options` (the option bytes),
+  `tcp.options.mss`/`mss_val`, `tcp.options.wscale`/`wscale.shift`/`wscale.multiplier` (2 to the
+  shift, at most 16384), `tcp.options.sack_perm`, `tcp.options.timestamp`/`timestamp.tsval`/`tsecr`,
+  with their `@field` spans. **Not** `tcp.option_kind`/`option_len`/`options.nop`/`options.eol`:
+  they repeat once per option, up to 40 times, and a value holds at most 4 occurrences, so they
+  are rejected with a hint (as are SACK edges, which are relative sequence numbers). Each option
+  field reads the first option of its kind; two MSS options are a documented divergence
+  (`dup_mss` in `tests/tshark.rs`). The bytecode version is 3 (the field table changed).
+  Unsupported-field errors now name the field as written. tshark 4.6.6 and 4.7.4 agree.
 - [x] `cargo-fuzz` targets for the parser/checker (arbitrary UTF-8 must never panic) and for `eval` on
   arbitrary packets: the `filter` target in `fuzz/` (added with Step 2).
 
@@ -404,6 +415,6 @@ starting each phase, expand it into steps in this file, in the same format as ab
 - [x] Docs: README, guide, website with playground, Rust and Python API docs
 - [x] Step 2: bytecode + verifier + interpreter
 - [x] Step 3: WinDivert front-end + 241 vectors + `filter convert`
-- [ ] Step 4: TCP options (fuzz targets done)
+- [x] Step 4: TCP options, fuzz targets
 - [ ] Step 5: spikes A, B, C
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement

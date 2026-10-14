@@ -702,6 +702,18 @@ pub(crate) fn raw_spans(f: Field, p: &Packet<'_>, meta: &Meta<'_>) -> Spans {
         Field::TcpChecksum => at(l4 + 16, 2),
         Field::TcpUrgentPointer => at(l4 + 18, 2),
         Field::TcpLen => at(l4, 0),
+        Field::TcpOptions => at(l4 + 20, p.tcp().map_or(0, |t| t.options().len())),
+        f if option_kind(f).is_some() => {
+            let opt = p.tcp().and_then(|t| t.option(option_kind(f)?));
+            let (o, n) = opt.map_or((0, 0), |o| (l4 + o.offset(), o.bytes().len()));
+            match f {
+                Field::TcpOptionsMssVal => at(o + 2, 2),
+                Field::TcpOptionsWscaleShift | Field::TcpOptionsWscaleMultiplier => at(o + 2, 1),
+                Field::TcpOptionsTimestampTsval => at(o + 2, 4),
+                Field::TcpOptionsTimestampTsecr => at(o + 6, 4),
+                _ => at(o, n),
+            }
+        }
         Field::TcpPayload | Field::UdpPayload => {
             let r = p.payload_range();
             at(r.start, r.len());
@@ -767,6 +779,39 @@ fn port_pair(pkt: &Packet<'_>) -> Option<(u16, u16)> {
     pkt.tcp()
         .map(|t| (t.src_port(), t.dst_port()))
         .or_else(|| pkt.udp().map(|u| (u.src_port(), u.dst_port())))
+}
+
+/// The kind of the option a TCP option field reads.
+fn option_kind(f: Field) -> Option<u8> {
+    use avulse_proto::tcp_option as k;
+    Some(match f {
+        Field::TcpOptionsMss | Field::TcpOptionsMssVal => k::MSS,
+        Field::TcpOptionsWscale
+        | Field::TcpOptionsWscaleShift
+        | Field::TcpOptionsWscaleMultiplier => k::WSCALE,
+        Field::TcpOptionsSackPerm => k::SACK_PERM,
+        Field::TcpOptionsTimestamp
+        | Field::TcpOptionsTimestampTsval
+        | Field::TcpOptionsTimestampTsecr => k::TIMESTAMP,
+        _ => return None,
+    })
+}
+
+/// A TCP option field, read from the first option of its kind. An option of the wrong length is
+/// present, but has no value.
+fn tcp_option<'a>(f: Field, p: &Packet<'a>) -> Option<V<'a>> {
+    let opt = p.tcp()?.option(option_kind(f)?)?;
+    Some(match f {
+        Field::TcpOptionsMss
+        | Field::TcpOptionsWscale
+        | Field::TcpOptionsSackPerm
+        | Field::TcpOptionsTimestamp => V::Bytes(opt.bytes()),
+        Field::TcpOptionsMssVal => V::Uint(opt.mss()?.into()),
+        Field::TcpOptionsWscaleShift => V::Uint(opt.wscale_shift()?.into()),
+        Field::TcpOptionsWscaleMultiplier => V::Uint(1 << opt.wscale_shift()?.min(14)),
+        Field::TcpOptionsTimestampTsval => V::Uint(opt.timestamps()?.0.into()),
+        _ => V::Uint(opt.timestamps()?.1.into()),
+    })
 }
 
 /// Every occurrence of field `f`.
@@ -911,6 +956,21 @@ pub(crate) fn load<'a>(f: Field, p: &Packet<'a>, m: &Meta<'a>) -> Vals<'a> {
         Field::TcpWindowSizeValue => o.opt(p.tcp().and_then(|t| u(t.window() as u64))),
         Field::TcpChecksum => o.opt(p.tcp().and_then(|t| u(t.checksum() as u64))),
         Field::TcpUrgentPointer => o.opt(p.tcp().and_then(|t| u(t.urgent_ptr() as u64))),
+        Field::TcpOptions => o.opt(
+            p.tcp()
+                .map(|t| t.options())
+                .filter(|b| !b.is_empty())
+                .map(V::Bytes),
+        ),
+        Field::TcpOptionsMss
+        | Field::TcpOptionsMssVal
+        | Field::TcpOptionsWscale
+        | Field::TcpOptionsWscaleShift
+        | Field::TcpOptionsWscaleMultiplier
+        | Field::TcpOptionsSackPerm
+        | Field::TcpOptionsTimestamp
+        | Field::TcpOptionsTimestampTsval
+        | Field::TcpOptionsTimestampTsecr => o.opt(tcp_option(f, p)),
         // Without reassembly, Wireshark leaves `tcp.len` unset on a first fragment. An IPv6
         // atomic fragment (offset 0, no more fragments, RFC 6946) is a whole datagram.
         Field::TcpLen => o.opt(

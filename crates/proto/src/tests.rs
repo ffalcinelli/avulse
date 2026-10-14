@@ -356,3 +356,52 @@ fn random_bytes_never_panic() {
         }
     }
 }
+
+/// The option walk agrees with Wireshark on the cases `tests/tshark.rs` in avulse-filter checks:
+/// wrong lengths, overflow, EOL, unknown kinds.
+#[test]
+fn tcp_options() {
+    use crate::tcp_option as k;
+    let hdr = |opts: &[u8]| {
+        let mut h = vec![0; 20];
+        h.extend_from_slice(opts);
+        h.resize(h.len().next_multiple_of(4), 0);
+        h[12] = (h.len() as u8 / 4) << 4;
+        h
+    };
+    let kinds = |opts: &[u8]| {
+        let h = hdr(opts);
+        Tcp::new(&h)
+            .unwrap()
+            .option_iter()
+            .map(|o| o.kind())
+            .collect::<Vec<_>>()
+    };
+    let full = hdr(&[
+        2, 4, 0x05, 0xb4, 4, 2, 8, 10, 0, 0, 0, 1, 0, 0, 0, 2, 1, 3, 3, 7,
+    ]);
+    let t = Tcp::new(&full).unwrap();
+    assert_eq!(
+        kinds(&[
+            2, 4, 0x05, 0xb4, 4, 2, 8, 10, 0, 0, 0, 1, 0, 0, 0, 2, 1, 3, 3, 7
+        ]),
+        [2, 4, 8, 1, 3]
+    );
+    assert_eq!(t.option(k::MSS).unwrap().mss(), Some(1460));
+    assert_eq!(t.option(k::MSS).unwrap().offset(), 20);
+    assert_eq!(t.option(k::SACK_PERM).unwrap().bytes(), [4, 2]);
+    assert_eq!(t.option(k::TIMESTAMP).unwrap().timestamps(), Some((1, 2)));
+    assert_eq!(t.option(k::WSCALE).unwrap().wscale_shift(), Some(7));
+    // A wrong length: the option is there, its value is not.
+    let h = hdr(&[2, 3, 5, 1]);
+    let mss = Tcp::new(&h).unwrap().option(k::MSS).unwrap();
+    assert_eq!((mss.bytes().len(), mss.mss()), (3, None));
+    assert_eq!(kinds(&[2, 3, 5, 1]), [2, 1]);
+    // Past the end, or a length below 2: the walk stops.
+    assert_eq!(kinds(&[1, 3, 10, 7]), [1]);
+    assert_eq!(kinds(&[9, 1, 2, 4, 5, 0xb4]), [0u8; 0]);
+    // Nothing after EOL; unknown kinds are skipped by their length.
+    assert_eq!(kinds(&[1, 0, 2, 4, 5, 0xb4]), [1, 0]);
+    assert_eq!(kinds(&[99, 4, 1, 2, 2, 4, 5, 0xb4]), [99, 2]);
+    assert_eq!(kinds(&[]), [0u8; 0]);
+}

@@ -132,6 +132,36 @@ They have the same name and meaning as in Wireshark.
 | `tcp.window_size_value` | unsigned integer (16 bits) | Window (unscaled) |
 | `tcp.checksum` | unsigned integer (16 bits) | Checksum |
 | `tcp.urgent_pointer` | unsigned integer (16 bits) | Urgent pointer |
+| `tcp.options` | byte string | Option bytes (when the header has options) |
+
+### tcp.options.mss
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `tcp.options.mss` | protocol | Maximum segment size option (the first one) |
+| `tcp.options.mss_val` | unsigned integer (16 bits) | MSS value |
+
+### tcp.options.wscale
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `tcp.options.wscale` | protocol | Window scale option (the first one) |
+| `tcp.options.wscale.shift` | unsigned integer (8 bits) | Window scale shift count |
+| `tcp.options.wscale.multiplier` | unsigned integer (16 bits) | Window scale multiplier: 2 to the shift count, at most 16384 |
+
+### tcp.options.sack_perm
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `tcp.options.sack_perm` | protocol | SACK permitted option |
+
+### tcp.options.timestamp
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `tcp.options.timestamp` | protocol | Timestamps option (the first one) |
+| `tcp.options.timestamp.tsval` | unsigned integer (32 bits) | Timestamp value |
+| `tcp.options.timestamp.tsecr` | unsigned integer (32 bits) | Timestamp echo reply |
 | `tcp.len` | unsigned integer (32 bits) | Payload length (absent on IP fragments) |
 | `tcp.payload` | byte string | Payload (when not empty) |
 
@@ -220,7 +250,14 @@ error with this hint.
 | `tcp.time_relative` | needs stream tracking |
 | `tcp.segment` | needs TCP reassembly |
 | `tcp.reassembled` | needs TCP reassembly |
-| `tcp.options` | TCP options are not decoded yet; slice `tcp` instead, e.g. `tcp[20:1] == 02` |
+| `tcp.option_kind` | a header has up to 40 options, more than a field can hold; test an option, e.g. `tcp.options.sack_perm`, or search `tcp.options` |
+| `tcp.option_len` | a header has up to 40 options, more than a field can hold; test an option, e.g. `tcp.options.sack_perm`, or search `tcp.options` |
+| `tcp.options.nop` | NOP options repeat; search the option bytes, e.g. `tcp.options contains 01:01` |
+| `tcp.options.eol` | search the option bytes, e.g. `tcp.options contains 00` |
+| `tcp.options.sack` | SACK edges are relative sequence numbers, which need stream tracking |
+| `tcp.options.sack_le` | SACK edges are relative sequence numbers, which need stream tracking |
+| `tcp.options.sack_re` | SACK edges are relative sequence numbers, which need stream tracking |
+| `tcp.options` | this TCP option is not decoded; slice `tcp.options` instead, e.g. `tcp.options[0] == 02` |
 | `ip.host` | host names need DNS; compare addresses |
 | `ip.src_host` | host names need DNS; compare addresses |
 | `ip.dst_host` | host names need DNS; compare addresses |

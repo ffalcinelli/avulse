@@ -13,6 +13,8 @@ pinned by a row in that test.
 - **No partial headers.** Wireshark keeps the fields of a header that is cut short, as far as the
   bytes go. Avulse drops the incomplete header, so its fields are absent.
 - **No reassembly.** As in Wireshark with reassembly off, `tcp.len` is absent on IP fragments.
+- **One TCP option of each kind.** A header with two MSS options has two `tcp.options.mss_val`
+  values in Wireshark; Avulse reads the first. Normal packets carry each option once.
 - **Signed arithmetic throughout.** `tcp.srcport + -1` subtracts one; Wireshark converts the `-1`
   to the field's unsigned type. Avulse also accepts literals beyond the field's range in
   arithmetic (`tcp.srcport + 1 == 65536`), which Wireshark rejects.
@@ -28,6 +30,10 @@ pinned by a row in that test.
 - **Stateful and application fields.** `tcp.seq`, `tcp.stream`, `tcp.analysis.*`, `http.*`,
   `dns.*` and the others in the [field reference](../reference/fields.md#rejected-wireshark-fields)
   need state across packets or a dissector. Each is rejected with a hint.
+- **Repeated TCP options.** `tcp.option_kind`, `tcp.option_len`, `tcp.options.nop` and
+  `tcp.options.eol` repeat once per option, up to 40 times, more than a value can hold; test an
+  option (`tcp.options.sack_perm`) or search `tcp.options` instead. SACK edges are relative
+  sequence numbers, which need stream tracking.
 - **Formatting functions.** `string()`, `dec()`, `hex()`, `float()` and `vals()`, and `${field}`
   references to the packet selected in the GUI.
 

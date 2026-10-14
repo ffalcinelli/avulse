@@ -203,6 +203,48 @@ pub(super) fn corpus() -> Corpus {
                 &[0x02, 0x07, 0x04, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0, 0],
             ),
         ),
+        // TCP options: a typical SYN, and the edge cases of Wireshark's option walk.
+        (
+            "syn_opts",
+            v4(
+                ipp::TCP,
+                &tcp_with(
+                    41000,
+                    443,
+                    Tcp::SYN,
+                    &[
+                        2, 4, 0x05, 0xb4, 4, 2, 8, 10, 0, 0, 0, 1, 0, 0, 0, 2, 1, 3, 3, 7,
+                    ],
+                    b"",
+                ),
+            ),
+        ),
+        (
+            "opt_odd",
+            v4(
+                ipp::TCP,
+                // MSS of length 3, then a NOP, then an unknown kind, then window scale 15.
+                &tcp_with(1, 2, Tcp::ACK, &[2, 3, 5, 1, 99, 4, 1, 2, 3, 3, 15, 0], b""),
+            ),
+        ),
+        (
+            "opt_overflow",
+            v4(ipp::TCP, &tcp_with(1, 2, Tcp::ACK, &[1, 3, 10, 7], b"")),
+        ),
+        (
+            "opt_after_eol",
+            v4(
+                ipp::TCP,
+                &tcp_with(1, 2, Tcp::ACK, &[1, 0, 0, 0, 2, 4, 5, 0xb4], b""),
+            ),
+        ),
+        (
+            "dup_mss",
+            v4(
+                ipp::TCP,
+                &tcp_with(1, 2, Tcp::SYN, &[2, 4, 0x05, 0xb4, 2, 4, 0x02, 0x18], b""),
+            ),
+        ),
         ("trunc_ip", truncated(https_syn(), 14 + 10)),
         ("trunc_tcp", truncated(https_syn(), 14 + 20 + 10)),
         ("trunc_v6_ext", truncated(hbh_tcp, 14 + 40 + 4)),
@@ -225,7 +267,14 @@ pub(super) fn raw_corpus(eth_corpus: &Corpus) -> Corpus {
 ///   only the outermost headers, as WinDivert does.
 /// - `trunc_*`: tshark sets the fields of a header that is cut short as far as the bytes go.
 ///   Avulse stops at the first incomplete header, so its fields are absent.
-const SKIP: &[&str] = &["unreachable", "trunc_ip", "trunc_tcp", "trunc_v6_ext"];
+/// - `dup_mss`: two MSS options. tshark reads both; Avulse reads the first option of each kind.
+const SKIP: &[&str] = &[
+    "unreachable",
+    "trunc_ip",
+    "trunc_tcp",
+    "trunc_v6_ext",
+    "dup_mss",
+];
 
 /// Filters that must select the same frames in tshark and Avulse.
 pub(super) const AGREE: &[&str] = &[
@@ -664,6 +713,21 @@ pub(super) const AGREE: &[&str] = &[
     "tcp.window_size_value == 4096",
     "tcp.checksum == 0",
     "tcp.urgent_pointer == 0",
+    // TCP options.
+    "tcp.options",
+    "tcp.options.mss_val == 1460",
+    "tcp.options.mss and not tcp.options.mss_val",
+    "len(tcp.options.mss) == 3",
+    "tcp.options.wscale.shift == 7",
+    "tcp.options.wscale.multiplier == 128",
+    "tcp.options.wscale.multiplier == 16384",
+    "tcp.options.sack_perm",
+    "tcp.options.timestamp.tsval == 1 and tcp.options.timestamp.tsecr == 2",
+    "tcp.options contains 04:02",
+    "tcp.options[0] == 2",
+    "tcp.options.mss[2:2] == 05:b4",
+    "@tcp.options.mss_val == 05:b4",
+    "tcp.flags.syn and not tcp.options",
     "udp.srcport == 5353 and udp.dstport == 53",
     "udp.checksum == 0",
     // Field against field, and functions on absent fields.
@@ -711,6 +775,10 @@ pub(super) const DIVERGENCES: &[(&str, &[&str], &[&str])] = &[
     ("len(ipv6) == 40", &[], &["trunc_v6_ext"]),
     // Wireshark converts a negative operand to the field's unsigned type; Avulse stays signed.
     ("tcp.srcport + -1 == 50999", &[], &["syn", "http_vlan"]),
+    // Two MSS options: tshark reads both, Avulse the first.
+    ("tcp.options.mss_val == 536", &["dup_mss"], &[]),
+    ("count(tcp.options.mss_val) == 2", &["dup_mss"], &[]),
+    ("all tcp.options.mss_val == 1460", &[], &["dup_mss"]),
 ];
 
 /// Filters tshark accepts but Avulse rejects on purpose, because the literal cannot fit the field

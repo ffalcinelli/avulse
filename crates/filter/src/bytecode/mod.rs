@@ -128,7 +128,7 @@ pub use encode::EncodeError;
 pub use verify::{VerifyError, VerifyErrorKind, verify};
 
 /// The format version. A program of another version is rejected.
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 
 /// The largest program, header and pool included.
 pub const MAX_SIZE: usize = 64 * 1024;
