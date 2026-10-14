@@ -78,8 +78,8 @@ verifies it once, when the handle opens, before running it on each packet:
 
 | Phase | Content | State |
 | --- | --- | --- |
-| 0 | Repository, CI, names; spikes: eBPF codegen, Rust Windows driver, macOS | setup done, spikes pending |
-| 1 | `proto` and `filter`: parser, checker, IR, evaluator, bytecode, WinDivert front-end, `tshark` validation, CLI | done; TCP options remain |
+| 0 | Repository, CI, names; spikes: eBPF codegen, Rust Windows driver, macOS | setup done; eBPF codegen spike done (go); the others pending |
+| 1 | `proto` and `filter`: parser, checker, IR, evaluator, bytecode, WinDivert front-end, `tshark` validation, CLI | done |
 | 2 | Linux packet layers: NETWORK, NETWORK_FORWARD, ETHERNET | planned |
 | 3 | Linux event layers (FLOW, SOCKET, REFLECT); API v0.1 | planned |
 | 4 | WinDivert compatibility shim; pydivert and jdivert suites as conformance tests | planned |

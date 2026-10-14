@@ -12,6 +12,10 @@ You need a stable Rust toolchain (edition 2024). Optional tools:
 - [`mdbook`](https://rust-lang.github.io/mdBook/), [`wasm-pack`](https://drager.github.io/wasm-pack/)
   and [`uv`](https://docs.astral.sh/uv/), to build the documentation site.
 
+On Linux, building `avulse-ebpf` also needs `clang` (with the BPF target, as distributions ship
+it) and the kernel UAPI headers (`linux-libc-dev` on Debian and Ubuntu). Tests that load BPF
+programs need root, so they are opt-in (`AVULSE_BPF=1`) and meant for a VM: see `Vagrantfile`.
+
 ## Checks
 
 CI runs these on Linux, Windows and macOS. Run them before sending a change:

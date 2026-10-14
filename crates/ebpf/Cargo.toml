@@ -7,6 +7,16 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish.workspace = true
+build = "build.rs"
+
+[dependencies]
+avulse-filter.workspace = true
+avulse-proto.workspace = true
+
+# The loader (`loader` module) needs a Linux kernel; the code generator builds everywhere.
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = "0.14.0"
+libc = "0.2"
 
 [lints]
 workspace = true

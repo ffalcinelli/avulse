@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-14, Steps 1 to 4 done; next: the Phase 0 spikes)
+## Status (2026-10-14, Steps 1 to 4 and Spike A done; next: Spikes B and C)
 
 | Area | State |
 | --- | --- |
@@ -15,7 +15,8 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `fuzz/` | cargo-fuzz targets `bytecode` (verifier and interpreter on arbitrary programs), `filter` (parser, `fmt` round trip, checker, evaluator, bytecode agreement) and `windivert` (front-end, bytecode and native agreement). Outside the workspace. |
 | `crates/wasm` (`avulse-wasm`) | The filter engine for the website's playground (wasm-bindgen, `publish = false`). |
 | Docs and website | README (front page), guide (`book/`, mdBook), `site/` with the playground, rustdoc and pdoc, built by `scripts/build-site.sh` and deployed by `pages.yml` to <https://ffalcinelli.github.io/avulse/>. Every public item is documented (`missing_docs`). |
-| `crates/{ebpf,backend-linux,avulse,capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
+| `crates/ebpf` (`avulse-ebpf`) | Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Needs clang on Linux. |
+| `crates/{backend-linux,avulse,capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
 | CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
 | Release (`.github/workflows/release.yml`) | Builds and publishes the Python placeholder on `v*` tags. **No crates.io job yet.** |
@@ -56,6 +57,13 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
   - `gh` is authenticated for API calls (runs, PRs, environments).
 - **Privileged tests run only in Vagrant VMs.** Run one VM at a time and `vagrant destroy -f` it right
   after, even on failure. Never download big files into `/tmp` (a small tmpfs); use `~/.cache`.
+  - `Vagrantfile` (repo root) has `default` (Ubuntu 24.04, 6.8) and `legacy` (22.04, 5.15), with
+    nothing to provision. Build the test binary on the host (`cargo test -p avulse-ebpf --test kernel
+    --no-run`) and run it in the VM: `vagrant ssh default -c "sudo AVULSE_BPF=1
+    /vagrant/target/debug/deps/kernel-<hash> --nocapture --test-threads=1"`. On 22.04 it prints a
+    harmless warning about the weak `GLIBC_2.39` requirement.
+  - The 24.04 box sometimes hangs at boot (guest RCU stalls, `vagrant up` times out waiting for
+    SSH). Destroy it and run `vagrant up` again.
 - **Fuzzing:** `cargo-fuzz` is installed in `~/.cargo/bin`. Without a nightly toolchain, run it
   with `RUSTC_BOOTSTRAP=1` (Arch's rustc ships the ASan runtime):
   `cd fuzz && RUSTC_BOOTSTRAP=1 cargo fuzz run filter -- -max_total_time=600`. Seed the `filter`
@@ -381,13 +389,16 @@ equivalent on the vector packets.
 
 ### Step 5: Phase 0 spikes (need VMs or hardware; see roadmap, Phase 0)
 
-- **Spike A: eBPF codegen.** In `crates/ebpf`, emit eBPF for a tiny IR subset (`tcp.dstport == N`)
-  at runtime with a hand-rolled instruction encoder.
+- [x] **Spike A: eBPF codegen.** Done 2026-10-14, verdict go; see `docs/spikes/ebpf-codegen.md`
+  for the results and the findings that Phase 2 must take into account (the action program after
+  the matcher, set lowering, `xor`, VLAN offload). In `crates/ebpf`, emit eBPF for a tiny IR subset
+  (`tcp.dstport == N`) at runtime with a hand-rolled instruction encoder.
   1. A static C TC program (`crates/ebpf/bpf/tc.bpf.c`, clsact cls_bpf, reuse
      `../ebpfdivert/src/ebpfdivert.bpf.c` parsing) fills a per-CPU "facts" map and calls
      `bpf_tail_call` into a `PROG_ARRAY` slot.
   2. The generated matcher reads the facts, plus `bpf_skb_load_bytes` for slices, and returns the
-     verdict.
+     verdict. (It cannot return: a tail call does not. It writes the verdict to the facts and
+     tail-calls a static action program.)
   3. Load everything with `aya`.
   4. Test with `BPF_PROG_TEST_RUN` in the Vagrant `default` (6.8) and `legacy` (5.15) VMs; reuse
      `../ebpfdivert/Vagrantfile`.
@@ -416,5 +427,5 @@ starting each phase, expand it into steps in this file, in the same format as ab
 - [x] Step 2: bytecode + verifier + interpreter
 - [x] Step 3: WinDivert front-end + 241 vectors + `filter convert`
 - [x] Step 4: TCP options, fuzz targets
-- [ ] Step 5: spikes A, B, C
+- [ ] Step 5: spikes A (done, go), B, C
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement

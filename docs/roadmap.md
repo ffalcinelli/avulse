@@ -168,8 +168,10 @@ event == connect and process.pid == 1234 and remote.port == 443   # SOCKET layer
 The pipeline is IR → bytecode (forward jumps only, so the verifier proves termination) → interpreter.
 
 - **Linux.** The IR is code-generated into eBPF **at runtime**. A static C TC program parses the headers into a
-  per-CPU "facts" struct, then calls `bpf_tail_call` into the handle's generated matcher, which returns the
-  verdict. This makes filtering **exact in the kernel**, which fixes ebpfdivert's main weakness.
+  per-CPU "facts" struct, then calls `bpf_tail_call` into the handle's generated matcher. A tail call does not
+  return, so the matcher writes its verdict into the facts and tail-calls a static action program, which diverts
+  or passes the packet. This makes filtering **exact in the kernel**, which fixes ebpfdivert's main weakness.
+  Spike A confirmed it on 5.15 and 6.8 (`docs/spikes/ebpf-codegen.md`).
 - **Linux fallback.** If the verifier rejects the generated program (for example, an old kernel or a huge
   filter), fall back to ebpfdivert's approach: superset rules in the kernel, then the interpreter in user space
   with auto-reinjection.
@@ -199,7 +201,7 @@ The phases run in order. Each has an exit criterion.
 1. Create the repo, Cargo workspace, CI (Linux, Windows, macOS runners), licenses, and claim the name on crates.io,
    PyPI and GitHub.
 2. **Spike A, eBPF codegen.** Generate a trivial matcher at runtime, tail-call into it from a static TC program,
-   and get it through the verifier on 5.15 and 6.8.
+   and get it through the verifier on 5.15 and 6.8. Done: go (`docs/spikes/ebpf-codegen.md`).
 3. **Spike B, Windows Rust driver.** Build a `windows-drivers-rs` KMDF driver that registers one WFP callout and
    one NDIS LWF, test-signed, loaded in a Windows VM. Decide whether pure Rust is viable or whether a thin C shim is
    needed.
