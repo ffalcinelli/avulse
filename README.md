@@ -98,7 +98,9 @@ assert!(filter.matches(&packet, &Meta { outbound: true, ..Meta::default() }));
 | [`avulse-filter`](crates/filter) | The filter language: parser, type checker, IR, evaluator. `no_std` + `alloc`. |
 | [`avulse-cli`](crates/cli) | The `avulse` command: `filter check`, `fmt`, `explain`, `eval`, `fields`. |
 | [`avulse-wasm`](crates/wasm) | The engine compiled to WebAssembly, for the playground. |
-| `avulse`, `avulse-ebpf`, `avulse-backend-linux`, `avulse-capi`, `avulse-windivert-compat` | Placeholders for the coming phases. |
+| [`avulse`](crates/avulse) | The handle API (preview): handles, flags, parameters, the packet address, and the platform backends to come. |
+| `avulse-ebpf` | Prototype of the Linux in-kernel filter (filter IR to eBPF). |
+| `avulse-capi`, `avulse-windivert-compat` | Placeholders for the coming phases. |
 | [`bindings/python`](bindings/python) | The `avulse` PyPI package: a placeholder. |
 
 ## Related projects

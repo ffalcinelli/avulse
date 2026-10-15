@@ -5,7 +5,6 @@ members = [
     "crates/proto",
     "crates/filter",
     "crates/ebpf",
-    "crates/backend-linux",
     "crates/avulse",
     "crates/capi",
     "crates/windivert-compat",

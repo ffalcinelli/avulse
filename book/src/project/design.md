@@ -22,11 +22,10 @@ macOS.
 ```text
 crates/proto            no_std: Ethernet, VLAN, ARP, IPv4/6, TCP, UDP, ICMP/v6; checksums
 crates/filter           filter language: parser → checker → IR → evaluator, bytecode
-crates/ebpf             IR → eBPF code generation; static C programs (TC, cgroup)    planned
-crates/backend-linux    aya loader, TC attach, ring buffer, injection, registry      planned
+crates/ebpf             IR → eBPF code generation; static C programs (TC, cgroup)    prototype
 driver/windows          KMDF driver: WFP callouts + NDIS filter, runs proto+filter    planned
 macos/                  system extension (Network Extension) + XPC client             planned
-crates/avulse           public Rust API, backend trait, capability query             planned
+crates/avulse           public API, capabilities; platform backends as modules     API done
 crates/capi             C ABI (libavulse)                                             planned
 crates/windivert-compat WinDivert ABI shim                                            planned
 crates/cli              the avulse command

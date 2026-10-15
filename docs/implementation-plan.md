@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-15, Steps 1 to 4 and Spikes A and B done, Spike C deferred; next: Step 6)
+## Status (2026-10-15, Steps 1 to 6 and Spikes A and B done, Spike C deferred; next: Step 7)
 
 | Area | State |
 | --- | --- |
@@ -17,7 +17,8 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | Docs and website | README (front page), guide (`book/`, mdBook), `site/` with the playground, rustdoc and pdoc, built by `scripts/build-site.sh` and deployed by `pages.yml` to <https://ffalcinelli.github.io/avulse/>. Every public item is documented (`missing_docs`). |
 | `crates/ebpf` (`avulse-ebpf`) | Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Needs clang on Linux. |
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
-| `crates/{backend-linux,avulse,capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
+| `crates/avulse` (`avulse`) | Step 6: the handle API with no backend yet. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends will be modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. |
+| `crates/{capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
 | CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
 | Release (`.github/workflows/release.yml`) | Builds and publishes the Python placeholder on `v*` tags. **No crates.io job yet.** |
@@ -457,11 +458,28 @@ wrong):
 - **Fail-open everywhere.** A full ring, an empty program-array slot, a stale heartbeat, or a
   shut-down handle all pass the packet.
 - **Kernel baseline:** 5.10 with BTF. Test on 6.8 (`default`) and 5.15 (`legacy`).
+- **The backends are modules of the `avulse` crate** (`crates/avulse/src/backend/linux/…`), not
+  crates: the facade must call them, and they implement its traits, so separate crates would
+  depend on each other. One crate to publish (owner decision, 2026-10-15). The empty
+  `backend-linux` stub was removed.
 - **The NETWORK layers see IP packets** (`Link::Ip`). The matcher's `frame` base is the L3
   offset, and a captured NETWORK packet starts at the IP header. The L2 header goes in the
   address's reinjection blob.
 
-### Step 6: The public API and the address, without a backend
+### Step 6: The public API and the address, without a backend (done)
+
+**Outcome.** `crates/avulse` (see the Status table and `CLAUDE.md`), and the guide page
+`libraries/handles.md`. As planned, except:
+- the trait is crate-private and split in two: `Backend` for the platform (`capabilities`, `open`)
+  and `Opened` for an open handle;
+- `Handle::send` also requires the address's layer to be the handle's;
+- `MAX_PACKET_LEN` (65,600) sizes receive buffers;
+- `OpenOptions::interfaces` selects the capture interfaces;
+- the CLI binary is no longer documented by rustdoc (`doc = false`), because it collided with the
+  library's `avulse` docs.
+
+The original plan of the step follows.
+
 
 **Why.** Every later step needs the types. They are not frozen until Phase 3, but should be close.
 
@@ -524,8 +542,9 @@ still equal `Facts::from_packet` (extended with the metadata) on the whole corpu
 
 ### Step 8: `backend-linux`: open, attach, receive
 
-**Where.** `crates/backend-linux` (Linux only, `aya` plus `libc`), implementing Step 6's
-`Backend`.
+**Where.** `crates/avulse/src/backend/linux/` (Linux only; `aya` and `libc` as Linux-only
+dependencies of `avulse`), implementing Step 6's `Backend` and `Opened`, and returned by
+`backend::platform()` on Linux.
 
 - **Open:**
   - compile the filter;
@@ -557,7 +576,8 @@ nothing reinjects yet), and a `SNIFF` handle receives them while the pings still
 
 ### Step 9: Injection
 
-**Where.** `crates/backend-linux` (`send`), plus the `lo` ingress redirect in the static program.
+**Where.** `crates/avulse/src/backend/linux/` (`send`), plus the `lo` ingress redirect in the
+static program.
 
 Port ebpfdivert's path table:
 
@@ -617,7 +637,7 @@ match-all fallback, which costs a trip to user space per packet.
 
 ### Step 11: The ETHERNET layer
 
-**Where.** `crates/ebpf/bpf/tc.bpf.c`, `crates/backend-linux`.
+**Where.** `crates/ebpf/bpf/tc.bpf.c`, `crates/avulse/src/backend/linux/`.
 
 - **Capture:** every frame on the selected interfaces, non-IP included (ARP, LLDP, VLAN-tagged).
   An offloaded VLAN tag is put back into the captured frame, so the bytes match what the filter
@@ -640,7 +660,7 @@ MAC, and LLDP sniffing.
 
 ### Step 12: The privileged suite (Phase 2 exit)
 
-**Where.** `crates/backend-linux/tests/` (root only, `AVULSE_PRIV=1`, network namespaces and veth
+**Where.** `crates/avulse/tests/` (root only, `AVULSE_PRIV=1`, network namespaces and veth
 pairs, like `../ebpfdivert/tests/test_integration.c`), run in the VMs like `tests/kernel.rs`.
 
 Port the packet-layer scenarios of `test_integration.c`:
@@ -672,7 +692,7 @@ a 6.x kernel). It does not replace the 5.15 VM run.
 
 **Acceptance (Phase 2 exit):** the whole suite passes on both VMs, run one at a time, and each VM
 is destroyed afterwards. Then update `docs/roadmap.md` (Phase 2 done) and `CLAUDE.md` (what
-`backend-linux` and `avulse` now hold).
+what the `avulse` crate and its Linux backend now hold).
 
 ## Checklist
 
@@ -686,9 +706,9 @@ is destroyed afterwards. Then update `docs/roadmap.md` (Phase 2 done) and `CLAUD
 - [x] Step 3: WinDivert front-end + 241 vectors + `filter convert`
 - [x] Step 4: TCP options, fuzz targets
 - [x] Step 5: spikes A (go) and B (go, pure Rust); C deferred until a Mac is available
-- [ ] Step 6: public API and address (`crates/avulse`)
+- [x] Step 6: public API and address (`crates/avulse`)
 - [ ] Step 7: kernel side of capture (config, metadata facts, ring buffer, verdicts)
-- [ ] Step 8: `backend-linux` open, attach, registry, heartbeat, receive
+- [ ] Step 8: Linux backend: open, attach, registry, heartbeat, receive
 - [ ] Step 9: injection
 - [ ] Step 10: matcher coverage and superset fallback
 - [ ] Step 11: ETHERNET layer

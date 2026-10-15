@@ -29,6 +29,7 @@
 # Libraries
 
 - [Rust crates](libraries/rust.md)
+- [Handles and addresses](libraries/handles.md)
 - [Python](libraries/python.md)
 
 # Project

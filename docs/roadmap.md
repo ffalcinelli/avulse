@@ -59,11 +59,12 @@ avulse/                    (Cargo workspace)
 ├─ crates/filter           parser (std) → typed AST → IR → optimizer → bytecode + verifier + interpreter (no_std)
 │                          + `windivert` front-end (old syntax → same IR)
 ├─ crates/ebpf             IR → eBPF codegen; static C programs (TC parser/dispatch, cgroup/sockops events)
-├─ crates/backend-linux    aya loader, TC clsact attach, ringbuf, injection, registry/heartbeat, events
-├─ crates/backend-windows  user side: IOCTL/overlapped I/O to the driver
 ├─ driver/windows          KMDF driver (windows-drivers-rs): WFP callouts + NDIS LWF, uses proto+filter
 ├─ macos/                  system extension (Swift NE providers ↔ Rust staticlib) + XPC client backend
-├─ crates/avulse           public Rust API, Backend trait, capability query
+├─ crates/avulse           public Rust API, capability query, and the backends as modules:
+│                            backend/linux (aya loader, TC clsact attach, ringbuf, injection,
+│                            registry/heartbeat, events), backend/windows (IOCTL/overlapped I/O
+│                            to the driver), backend/macos (XPC client)
 ├─ crates/capi             C ABI (cbindgen) → libavulse
 ├─ crates/windivert-compat WinDivert ABI shim (WinDivertOpen/Recv/Send…, 80-byte WINDIVERT_ADDRESS)
 └─ crates/cli              capture / inject / `filter check|explain|fmt|test`
@@ -288,7 +289,7 @@ Exit: a macOS test suite passes on real hardware, and the capability matrix is p
 - `ebpfdivert/src/ebpfdivert.bpf.c` and `ebpfdivert/src/ebpfdivert_events.bpf.c`: verifier-tuned BPF code (global
   funcs for 5.15, inline-asm length bounds, `barrier_var`), ported as the static BPF programs.
 - `ebpfdivert/src/handle.c`: injection-path table, registry/heartbeat, queue semantics, REFLECT diffing (logic
-  reference for `backend-linux`).
+  reference for the Linux backend).
 - `ebpfdivert/src/prefilter.c`: superset-lowering ideas for the verifier-rejection fallback.
 - `ebpfdivert/tests/test_filter.c`, `test_bpf.c`, `tests/run_integration_tests.sh`: vectors and integration
   scenarios.
