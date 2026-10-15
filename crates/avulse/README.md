@@ -3,9 +3,10 @@
 Divert, modify and re-inject network packets on Linux, Windows and macOS. Avulse covers every WinDivert
 feature, adds an Ethernet layer, and uses a Wireshark-compatible filter language.
 
-**Pre-alpha.** This crate holds the API that the platform backends will implement: handles, flags,
-parameters and the packet address. No platform has a backend yet, so opening a handle fails with
-`Error::Unsupported`; the Linux backend is next. Follow the project at
+**Pre-alpha.** This crate holds the handle API: handles, flags, parameters and the packet address.
+On Linux, handles receive packets at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff
+or drop); sending is next. Other platforms have no backend yet: opening a handle there fails with
+`Error::Unsupported`. Follow the project at
 <https://github.com/ffalcinelli/avulse>, and see the
 [roadmap](https://github.com/ffalcinelli/avulse/blob/main/docs/roadmap.md).
 

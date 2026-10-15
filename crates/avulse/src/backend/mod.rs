@@ -11,11 +11,10 @@ use std::time::Duration;
 
 use avulse_filter::{Filter, Layer};
 
-use crate::{Address, Error, Flags, Param, Result, Shutdown};
+use crate::{Address, Flags, Param, Result, Shutdown};
 
 /// What a backend gets to open a handle.
-// The backends read every field (Linux from Step 8); until then only the tests do.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
 pub(crate) struct Spec<'a> {
     pub filter: &'a Filter,
     pub layer: Layer,
@@ -27,10 +26,18 @@ pub(crate) struct Spec<'a> {
     pub params: [u64; 3],
 }
 
+#[cfg(target_os = "linux")]
+mod linux;
+
 /// A platform backend.
 pub(crate) trait Backend: Sync {
     fn capabilities(&self) -> Capabilities;
     fn open(&self, spec: &Spec<'_>) -> Result<Box<dyn Opened>>;
+    /// Removes what processes that died without closing their handles left behind, and returns
+    /// how many handles that was.
+    fn cleanup(&self) -> Result<usize> {
+        Ok(0)
+    }
 }
 
 /// A handle a backend opened.
@@ -50,23 +57,26 @@ pub(crate) trait Opened: Send + Sync {
 
 /// The backend of this platform.
 pub(crate) fn platform() -> &'static dyn Backend {
-    &Unavailable
+    #[cfg(target_os = "linux")]
+    return &linux::Linux;
+    #[cfg(not(target_os = "linux"))]
+    return &Unavailable;
 }
 
 /// The backend of platforms that have none yet.
+#[cfg(not(target_os = "linux"))]
 struct Unavailable;
 
+#[cfg(not(target_os = "linux"))]
 impl Backend for Unavailable {
     fn capabilities(&self) -> Capabilities {
         Capabilities::NONE
     }
 
     fn open(&self, _: &Spec<'_>) -> Result<Box<dyn Opened>> {
-        Err(Error::Unsupported(if cfg!(target_os = "linux") {
-            "the Linux backend is not implemented yet"
-        } else {
-            "there is no backend for this platform yet"
-        }))
+        Err(crate::Error::Unsupported(
+            "there is no backend for this platform yet",
+        ))
     }
 }
 

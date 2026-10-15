@@ -1,0 +1,507 @@
+//! The Linux backend: eBPF programs on the TC hooks of each interface (`avulse-ebpf`).
+//!
+//! Each handle loads its own instance of the static programs, with its own maps, and its filter
+//! compiled to an eBPF matcher. When the code generator cannot compile the filter, or the
+//! verifier rejects it, the matcher takes every packet of the layer and user space evaluates the
+//! filter on each record; until injection exists, such handles must sniff. The programs are
+//! attached as classic cls_bpf filters at TC priority `30001 - priority`, on the selected
+//! interfaces and on `lo`. Matching packets go to a ring buffer, which `recv` drains into a queue.
+
+mod heartbeat;
+mod queue;
+mod record;
+mod registry;
+mod sys;
+#[cfg(test)]
+mod tests;
+
+use std::collections::HashMap;
+use std::io;
+use std::os::fd::{AsFd, BorrowedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+
+use avulse_ebpf::abi::{self, Config, Record};
+use avulse_ebpf::codegen;
+use avulse_ebpf::loader::{self, Classifier, Hook};
+use avulse_filter::ir::Test;
+use avulse_filter::{Filter, Layer};
+use avulse_proto::{Link, Packet};
+
+use self::heartbeat::Beat;
+use self::queue::Queue;
+use self::record::Entry;
+use self::registry::Registry;
+use super::{Backend, Capabilities, LayerSupport, Opened, Spec};
+use crate::{Address, Error, Flags, Param, Result, Shutdown};
+
+/// TC priority of a handle of priority 0 when no other handle is open, and the base of
+/// `30001 - priority`.
+const TC_PRIORITY_BASE: u32 = 30_001;
+
+pub(crate) struct Linux;
+
+impl Backend for Linux {
+    fn capabilities(&self) -> Capabilities {
+        // Receiving works at the packet layers; injection comes with Step 9.
+        let packets = LayerSupport {
+            open: true,
+            divert: true,
+            drop: true,
+            inject: false,
+            modify: false,
+        };
+        let mut c = Capabilities::NONE;
+        for layer in [Layer::Network, Layer::NetworkForward, Layer::Ethernet] {
+            c.layers[layer as usize] = packets;
+        }
+        c
+    }
+
+    fn open(&self, spec: &Spec<'_>) -> Result<Box<dyn Opened>> {
+        match spec.layer {
+            Layer::Network | Layer::NetworkForward | Layer::Ethernet => {
+                Ok(Box::new(Handle::open(spec)?))
+            }
+            _ => Err(Error::Unsupported(
+                "the FLOW, SOCKET and REFLECT layers (Phase 3)",
+            )),
+        }
+    }
+
+    fn cleanup(&self) -> Result<usize> {
+        match Registry::lock_existing()? {
+            Some(registry) => Ok(registry.reap()?),
+            None => Ok(0),
+        }
+    }
+}
+
+/// An I/O error, keeping the kind of the system error under it (such as `PermissionDenied`).
+fn io_error(e: loader::Error) -> Error {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&e);
+    while let Some(s) = source {
+        if let Some(io) = s.downcast_ref::<io::Error>() {
+            return Error::Io(io::Error::new(io.kind(), e.to_string()));
+        }
+        source = s.source();
+    }
+    Error::Io(io::Error::other(e.to_string()))
+}
+
+/// The TC priorities of this process's open handles, for when the registry is unavailable.
+static LOCAL_TC_PRIORITIES: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// An open handle.
+struct Handle {
+    layer: Layer,
+    priority: i16,
+    /// The filter, when user space must evaluate it (the kernel matcher is not exact).
+    filter: Option<Filter>,
+    rx: Rx,
+    shut_send: AtomicBool,
+    /// The heartbeat and configuration; `None` for `SEND_ONLY` handles, which capture nothing.
+    beat: Option<Arc<Beat>>,
+    /// The programs and their TC filters, detached when dropped.
+    classifier: Option<Classifier>,
+    /// The registry key.
+    registered: Option<u64>,
+    /// The TC priority, while it is in [`LOCAL_TC_PRIORITIES`].
+    tc_priority: Option<u16>,
+}
+
+/// The receive side.
+struct Rx {
+    /// The ring buffer, and what draining it needs. Its lock serializes the readers.
+    ring: Mutex<Option<Ring>>,
+    queue: Mutex<QueueState>,
+    /// Set while `recv` would not block: the queue has packets, or the handle is shut down.
+    ready: sys::Flag,
+    /// Readable when `ready` is, or the ring buffer has records.
+    epoll: sys::Epoll,
+}
+
+struct Ring {
+    buf: loader::Ring,
+    /// Interface names by index, for filters on `iface`.
+    names: HashMap<u32, String>,
+}
+
+struct QueueState {
+    queue: Queue,
+    shut: bool,
+    ready: bool,
+}
+
+impl Handle {
+    fn open(spec: &Spec<'_>) -> Result<Handle> {
+        let lo = sys::interfaces()?
+            .into_iter()
+            .find(|i| i.kind == sys::ARPHRD_LOOPBACK)
+            .map_or(1, |i| i.index);
+        let rx = Rx::new(spec.params)?;
+        let mut handle = Handle {
+            layer: spec.layer,
+            priority: spec.priority,
+            filter: None,
+            rx,
+            shut_send: AtomicBool::new(false),
+            beat: None,
+            classifier: None,
+            registered: None,
+            tc_priority: None,
+        };
+        if spec.flags.contains(Flags::SEND_ONLY) {
+            return Ok(handle);
+        }
+        let targets = targets(spec.interfaces)?;
+
+        let mut classifier =
+            Classifier::load_with_ring(loader::DEFAULT_RING_BYTES).map_err(io_error)?;
+        let exact = set_matcher(&mut classifier, spec.filter)?;
+        if !exact {
+            if !spec.flags.contains(Flags::SNIFF) {
+                return Err(Error::Unsupported(
+                    "this filter runs in user space, which needs SNIFF until injection exists",
+                ));
+            }
+            handle.filter = Some(spec.filter.clone());
+        }
+        let ring = classifier
+            .take_ring()
+            .ok_or_else(|| Error::Io(io::Error::other("the classifier has no ring buffer")))?;
+        handle.rx.epoll.add(ring.as_fd())?;
+        *lock(&handle.rx.ring) = Some(Ring {
+            buf: ring,
+            names: HashMap::new(),
+        });
+
+        let mut flags = 0;
+        if spec.flags.contains(Flags::SNIFF) {
+            flags |= abi::CFG_SNIFF;
+        }
+        if spec.flags.contains(Flags::DROP) {
+            flags |= abi::CFG_DROP;
+        }
+        if spec.flags.contains(Flags::FRAGMENTS) {
+            flags |= abi::CFG_FRAGMENTS;
+        }
+        if sys::sysctl_on("net/ipv4/ip_forward") || sys::sysctl_on("net/ipv6/conf/all/forwarding") {
+            flags |= abi::CFG_FWD_CHECK;
+        }
+        if !targets.lo_selected {
+            flags |= abi::CFG_SKIP_LO;
+        }
+
+        // Under the lock: the TC priority depends on the other handles, and must be registered
+        // before another process picks one.
+        let registry = Registry::lock()?;
+        let _ = registry.reap();
+        let tc_priority = tc_priority(spec.priority, &registry)?;
+        let config = Config {
+            flags,
+            priority: tc_priority as u32,
+            lo_ifindex: lo,
+            layer: spec.layer as u8,
+            ..Config::default()
+        };
+        // The configuration goes first: a program attached with the zero configuration would
+        // divert at the NETWORK layer, with no heartbeat check.
+        let beat = Arc::new(Beat::new(
+            config,
+            classifier.config_writer().map_err(io_error)?,
+        ));
+        beat.update(|_| {}).map_err(io_error)?;
+        let mut attachments = Vec::new();
+        for iface in &targets.list {
+            for hook in [Hook::Ingress, Hook::Egress] {
+                // Dropping the classifier detaches what is attached so far.
+                attachments.push(
+                    classifier
+                        .attach(&iface.name, hook, tc_priority)
+                        .map_err(io_error)?,
+                );
+            }
+        }
+        handle.classifier = Some(classifier);
+        handle.registered = registry.add(&registry::Entry {
+            pid: sys::pid(),
+            start_time: sys::start_time(sys::pid()).unwrap_or(0),
+            tc_priority,
+            timestamp: sys::now_ns(),
+            flags: spec.flags.bits(),
+            layer: spec.layer as u8,
+            priority: spec.priority,
+            attachments,
+            filter: spec.filter.ir().native().to_string(),
+        })?;
+        lock(&LOCAL_TC_PRIORITIES).push(tc_priority);
+        handle.tc_priority = Some(tc_priority);
+        drop(registry);
+        heartbeat::add(&beat);
+        handle.beat = Some(beat);
+        Ok(handle)
+    }
+}
+
+/// Generates the matcher, or takes every packet of the layer when the code generator cannot
+/// compile the filter or the verifier rejects it. Returns whether the kernel matcher is exact.
+fn set_matcher(classifier: &mut Classifier, filter: &Filter) -> Result<bool> {
+    if let Ok(m) = codegen::compile(filter.ir()) {
+        match classifier.set_matcher(&m) {
+            Ok(_) => return Ok(true),
+            Err(loader::Error::Rejected { .. }) => {}
+            Err(e) => return Err(io_error(e)),
+        }
+    }
+    let all = codegen::compile(&Test::Const(true))
+        .map_err(|e| Error::Io(io::Error::other(e.to_string())))?;
+    classifier.set_matcher(&all).map_err(io_error)?;
+    Ok(false)
+}
+
+/// The TC priority of a handle: `30001 - priority`, or after every open handle for priority 0.
+fn tc_priority(priority: i16, registry: &Registry) -> Result<u16> {
+    if priority != 0 {
+        return Ok((TC_PRIORITY_BASE as i32 - priority as i32) as u16);
+    }
+    let local = lock(&LOCAL_TC_PRIORITIES).iter().copied().max();
+    Ok(after(registry.max_tc_priority()?.max(local.unwrap_or(0))))
+}
+
+/// The TC priority after `max`, the highest in use: at least that of priority 0.
+fn after(max: u16) -> u16 {
+    if (max as u32) < TC_PRIORITY_BASE {
+        TC_PRIORITY_BASE as u16
+    } else {
+        max.saturating_add(1)
+    }
+}
+
+/// The interfaces to attach to.
+struct Targets {
+    list: Vec<sys::Interface>,
+    /// Whether the application selected `lo` (it is attached anyway).
+    lo_selected: bool,
+}
+
+/// The selected interfaces (all when `names` is empty), plus the loopback device. Only Ethernet
+/// and loopback devices: the programs expect an Ethernet header.
+fn targets(names: &[String]) -> Result<Targets> {
+    let all = sys::interfaces()?;
+    for name in names {
+        match all.iter().find(|i| &i.name == name) {
+            None => {
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no interface {name}"),
+                )));
+            }
+            Some(i) if !matches!(i.kind, sys::ARPHRD_ETHER | sys::ARPHRD_LOOPBACK) => {
+                return Err(Error::Unsupported(
+                    "interfaces without an Ethernet header (tun, WireGuard, IP tunnels)",
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    let selected = |i: &sys::Interface| names.is_empty() || names.contains(&i.name);
+    let lo_selected = all
+        .iter()
+        .any(|i| i.kind == sys::ARPHRD_LOOPBACK && selected(i));
+    let list = all
+        .into_iter()
+        .filter(|i| match i.kind {
+            sys::ARPHRD_LOOPBACK => true,
+            sys::ARPHRD_ETHER => selected(i),
+            _ => false,
+        })
+        .collect();
+    Ok(Targets { list, lo_selected })
+}
+
+impl Rx {
+    fn new(params: [u64; 3]) -> io::Result<Rx> {
+        let ready = sys::Flag::new()?;
+        let epoll = sys::Epoll::new()?;
+        epoll.add(ready.as_fd())?;
+        Ok(Rx {
+            ring: Mutex::new(None),
+            queue: Mutex::new(QueueState {
+                queue: Queue::new(params),
+                shut: false,
+                ready: false,
+            }),
+            ready,
+            epoll,
+        })
+    }
+
+    /// Makes `ready` say whether `recv` would return at once.
+    fn update(&self, q: &mut QueueState) {
+        let want = q.shut || !q.queue.is_empty();
+        if want != q.ready {
+            if want {
+                self.ready.set();
+            } else {
+                self.ready.clear();
+            }
+            q.ready = want;
+        }
+    }
+}
+
+impl Handle {
+    /// Moves the ring buffer's records to the queue. Returns how many it read.
+    fn drain(&self) -> usize {
+        let mut ring = lock(&self.rx.ring);
+        let Some(ring) = ring.as_mut() else {
+            return 0;
+        };
+        let mut n = 0;
+        let mut entries = Vec::new();
+        while let Some(item) = ring.buf.next() {
+            n += 1;
+            let Some(e) = Record::parse(&item).and_then(|r| record::entry(&r, self.layer)) else {
+                continue;
+            };
+            drop(item);
+            if let Some(filter) = &self.filter
+                && !self.matches(filter, &e, &mut ring.names)
+            {
+                // Sniffed: the packet went on.
+                continue;
+            }
+            entries.push(e);
+        }
+        if !entries.is_empty() {
+            let mut q = lock(&self.rx.queue);
+            for e in entries {
+                q.queue.push(e);
+            }
+            self.rx.update(&mut q);
+        }
+        n
+    }
+
+    fn matches(&self, filter: &Filter, e: &Entry, names: &mut HashMap<u32, String>) -> bool {
+        let link = if self.layer == Layer::Ethernet {
+            Link::Ethernet
+        } else {
+            Link::Ip
+        };
+        let name = names
+            .entry(e.addr.if_idx)
+            .or_insert_with(|| loader::if_name(e.addr.if_idx).unwrap_or_default());
+        let mut meta = e.addr.meta();
+        meta.iface = Some(name);
+        meta.priority = self.priority;
+        meta.hash = record::hash(&e.data);
+        filter.matches(&Packet::parse(&e.data, link), &meta)
+    }
+}
+
+impl Opened for Handle {
+    fn recv(&self, buf: &mut [u8], timeout: Option<Duration>) -> Result<(usize, Address)> {
+        let deadline = timeout.map(|t| Instant::now() + t);
+        loop {
+            let shut = {
+                let mut q = lock(&self.rx.queue);
+                let e = q.queue.pop(sys::now_ns());
+                self.rx.update(&mut q);
+                if let Some(e) = e {
+                    drop(q);
+                    let n = e.data.len();
+                    let dst = buf
+                        .get_mut(..n)
+                        .ok_or(Error::BufferTooSmall { needed: n })?;
+                    dst.copy_from_slice(&e.data);
+                    return Ok((n, e.addr));
+                }
+                q.shut
+            };
+            // After a shutdown, what the ring still holds is delivered first.
+            if self.drain() > 0 {
+                continue;
+            }
+            if shut {
+                return Err(Error::Shutdown);
+            }
+            let wait = match deadline {
+                None => -1,
+                Some(d) => {
+                    let left = d.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(Error::Timeout);
+                    }
+                    left.as_millis().clamp(1, i32::MAX as u128) as i32
+                }
+            };
+            self.rx.epoll.wait(wait)?;
+        }
+    }
+
+    fn send(&self, _packet: &[u8], _addr: &Address) -> Result<usize> {
+        if self.shut_send.load(Ordering::Acquire) {
+            return Err(Error::Shutdown);
+        }
+        Err(Error::Unsupported("sending on Linux (Step 9)"))
+    }
+
+    fn shutdown(&self, how: Shutdown) -> Result<()> {
+        if matches!(how, Shutdown::Recv | Shutdown::Both) {
+            if let Some(beat) = &self.beat {
+                beat.update(|c| c.flags |= abi::CFG_SHUTDOWN)
+                    .map_err(io_error)?;
+            }
+            let mut q = lock(&self.rx.queue);
+            q.shut = true;
+            self.rx.update(&mut q);
+        }
+        if matches!(how, Shutdown::Send | Shutdown::Both) {
+            self.shut_send.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    fn set_param(&self, param: Param, value: u64) -> Result<()> {
+        lock(&self.rx.queue).queue.set(param, value);
+        Ok(())
+    }
+
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.rx.epoll.as_fd()
+    }
+
+    fn close(self: Box<Self>) -> Result<()> {
+        drop(self);
+        Ok(())
+    }
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        // Stop the heartbeat first: if detaching fails, the filters left behind fail open.
+        if let Some(beat) = self.beat.take() {
+            let _ = beat.update(|c| c.flags |= abi::CFG_SHUTDOWN);
+        }
+        // Detach and unregister under the lock, so that no other handle takes the TC priority
+        // before the filters are gone.
+        let registry = self.registered.and_then(|_| Registry::lock().ok());
+        self.classifier = None;
+        if let (Some(registry), Some(key)) = (&registry, self.registered) {
+            let _ = registry.remove(key);
+        }
+        if let Some(p) = self.tc_priority {
+            let mut local = lock(&LOCAL_TC_PRIORITIES);
+            if let Some(i) = local.iter().position(|&q| q == p) {
+                local.swap_remove(i);
+            }
+        }
+    }
+}

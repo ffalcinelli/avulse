@@ -6,7 +6,7 @@ Avulse is a Cargo workspace. Two crates are usable today, and a third holds the 
 | --- | --- |
 | [`avulse-proto`](https://ffalcinelli.github.io/avulse/api/rust/avulse_proto/) | Zero-copy parsing and checksums. `no_std`, no `alloc`. |
 | [`avulse-filter`](https://ffalcinelli.github.io/avulse/api/rust/avulse_filter/) | The filter language. `no_std` with `alloc`. |
-| [`avulse`](https://ffalcinelli.github.io/avulse/api/rust/avulse/) | Handles, flags and addresses ([preview](handles.md): no backend yet). |
+| [`avulse`](https://ffalcinelli.github.io/avulse/api/rust/avulse/) | Handles, flags and addresses ([preview](handles.md): Linux receives; no sending yet). |
 
 None is on crates.io yet (only the `avulse` name is reserved there). Use them from Git:
 

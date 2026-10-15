@@ -1,8 +1,10 @@
 //! Divert, modify and re-inject network packets on Linux, Windows and macOS.
 //!
-//! **Pre-alpha.** This is the API that the backends will implement; no platform has a backend yet,
-//! so [`Handle::open`] returns [`Error::Unsupported`] everywhere. The Linux backend comes next
-//! (see the [implementation plan](https://github.com/ffalcinelli/avulse/blob/main/docs/implementation-plan.md)).
+//! **Pre-alpha.** On Linux, handles receive packets at the NETWORK, NETWORK_FORWARD and ETHERNET
+//! layers (divert, sniff or drop), with eBPF programs on the TC hooks; sending comes next. Opening a
+//! handle needs `CAP_BPF` and `CAP_NET_ADMIN` (or root). Other platforms have no backend yet, so
+//! [`Handle::open`] returns [`Error::Unsupported`] there (see the
+//! [implementation plan](https://github.com/ffalcinelli/avulse/blob/main/docs/implementation-plan.md)).
 //!
 //! The model is WinDivert's, extended. A [`Handle`] is opened at a [`Layer`] with a filter, a
 //! priority and [`Flags`]. It receives the packets or events the filter matches, each with an
@@ -52,6 +54,16 @@ pub const MAX_PACKET_LEN: usize = 65_600;
 /// What the backend of this platform supports, per layer.
 pub fn capabilities() -> Capabilities {
     backend::platform().capabilities()
+}
+
+/// Removes what processes that died without closing their handles left behind, and returns how
+/// many handles that was. Opening a handle does it too.
+///
+/// On Linux, the TC filters of a dead process stay attached (they pass every packet once its
+/// heartbeat stops) until this runs; `avulse cleanup` calls it. It needs the same privileges as
+/// opening a handle. Elsewhere it does nothing.
+pub fn cleanup() -> Result<usize> {
+    backend::platform().cleanup()
 }
 
 #[cfg(doctest)]

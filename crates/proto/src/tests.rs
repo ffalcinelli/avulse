@@ -3,7 +3,7 @@ extern crate std;
 use std::vec;
 use std::vec::Vec;
 
-use crate::checksum::{self, finish, sum};
+use crate::checksum::{self, Updated, finish, sum};
 use crate::*;
 
 const MAC_A: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
@@ -294,6 +294,36 @@ fn recalculate_fixes_every_checksum() {
     let mut pkt = ipv4(ip_proto::ICMP, 0, &[8, 0, 0, 0, 0, 1, 0, 1, 1, 2, 3]);
     assert!(checksum::recalculate(&mut pkt, Link::Ip).icmp);
     assert!(l4_valid(&Packet::parse(&pkt, Link::Ip)));
+}
+
+#[test]
+fn verify_finds_correct_checksums() {
+    let mut frame = eth(
+        ethertype::IPV4,
+        &[],
+        &ipv4(ip_proto::TCP, 0, &tcp(1234, 80, Tcp::ACK, b"GET /")),
+    );
+    assert_eq!(checksum::verify(&frame, Link::Ethernet), Updated::default());
+    let updated = checksum::recalculate(&mut frame, Link::Ethernet);
+    assert_eq!(checksum::verify(&frame, Link::Ethernet), updated);
+    let last = frame.len() - 1;
+    frame[last] ^= 1;
+    let v = checksum::verify(&frame, Link::Ethernet);
+    assert!(v.ipv4 && !v.tcp);
+
+    // A zero UDP checksum means none over IPv4, and is wrong over IPv6.
+    let pkt = ipv4(ip_proto::UDP, 0, &udp(53, 53, b"x"));
+    assert!(checksum::verify(&pkt, Link::Ip).udp);
+    let pkt = ipv6(ip_proto::UDP, &udp(53, 53, b"x"));
+    assert!(!checksum::verify(&pkt, Link::Ip).udp);
+    for mut pkt in [
+        ipv6(ip_proto::ICMPV6, &[128, 0, 0, 0, 0, 1, 0, 2]),
+        ipv4(ip_proto::ICMP, 0, &[8, 0, 0, 0, 0, 1, 0, 1, 1, 2, 3]),
+        ipv6(ip_proto::UDP, &udp(5353, 5353, b"odd")),
+    ] {
+        let updated = checksum::recalculate(&mut pkt, Link::Ip);
+        assert_eq!(checksum::verify(&pkt, Link::Ip), updated);
+    }
 }
 
 #[test]

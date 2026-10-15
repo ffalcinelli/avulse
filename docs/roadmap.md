@@ -234,6 +234,10 @@ and the CLI is usable.
 2. Add the runtime eBPF codegen from the IR, with the superset fallback.
 3. Add ETHERNET: non-IP frames, VLAN tag restore on capture and on reinjection.
 
+Progress (steps in `docs/implementation-plan.md`): the kernel side of capture (Step 7) and the backend's receive
+side (Step 8: open, attach, registry, heartbeat, queue, `avulse cleanup`) are done and tested on both VMs. Next:
+injection (Step 9), matcher coverage and the superset (Step 10), ETHERNET (Step 11), the privileged suite (Step 12).
+
 Exit: privileged tests pass on both Vagrant VMs, covering divert, inject, GSO, forward, ETHERNET/ARP/VLAN, crash
 cleanup, and exact in-kernel match versus interpreter (`BPF_PROG_TEST_RUN`).
 

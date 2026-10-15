@@ -5,8 +5,10 @@
 # it in one VM at a time and destroy the VM when done:
 #
 #   cargo test -p avulse-ebpf --test kernel --no-run      # prints target/debug/deps/kernel-…
+#   cargo test -p avulse --test capture --no-run          # prints target/debug/deps/capture-…
 #   vagrant up default
 #   vagrant ssh default -c "sudo AVULSE_BPF=1 /vagrant/target/debug/deps/kernel-… --nocapture"
+#   vagrant ssh default -c "sudo AVULSE_BPF=1 /vagrant/target/debug/deps/capture-… --test-threads=1"
 #   vagrant destroy -f default
 #
 # "default" is Ubuntu 24.04 (kernel 6.8); "legacy" is Ubuntu 22.04 (kernel 5.15, the oldest

@@ -16,5 +16,10 @@ categories = ["network-programming", "os"]
 avulse-filter = { workspace = true, features = ["regex"] }
 avulse-proto.workspace = true
 
+# The Linux backend: the eBPF programs, their loader and the matcher generator.
+[target.'cfg(target_os = "linux")'.dependencies]
+avulse-ebpf.workspace = true
+libc = "0.2"
+
 [lints]
 workspace = true

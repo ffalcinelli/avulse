@@ -25,6 +25,9 @@ enum Command {
     /// Work with filters.
     #[command(subcommand)]
     Filter(FilterCommand),
+    /// Remove what processes that died without closing their handles left behind (on Linux, their
+    /// TC filters). Needs root.
+    Cleanup,
 }
 
 #[derive(Subcommand)]
@@ -168,7 +171,17 @@ fn compile(src: &str) -> Result<Filter, String> {
 }
 
 fn run(cli: Cli) -> Result<ExitCode, String> {
-    let Command::Filter(cmd) = cli.command;
+    let cmd = match cli.command {
+        Command::Filter(cmd) => cmd,
+        Command::Cleanup => {
+            let n = avulse::cleanup().map_err(|e| format!("cleanup: {e}"))?;
+            out(&format!(
+                "removed {n} handle{} of dead processes\n",
+                if n == 1 { "" } else { "s" }
+            ));
+            return Ok(ExitCode::SUCCESS);
+        }
+    };
     match cmd {
         FilterCommand::Check(src) => {
             compile(&src.read()?)?;

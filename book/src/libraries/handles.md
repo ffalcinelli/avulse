@@ -1,8 +1,8 @@
 # Handles and addresses
 
-> **Preview.** The `avulse` crate defines this API, but no platform has a backend yet:
-> `Handle::open` returns `Error::Unsupported`. The Linux backend is next. The API may still
-> change before version 0.1.
+> **Preview.** Only Linux has a backend so far, and it only receives: handles divert, sniff or
+> drop packets, but `send` returns `Error::Unsupported` until injection lands. Elsewhere,
+> `Handle::open` returns `Error::Unsupported`. The API may still change before version 0.1.
 
 The model is WinDivert's. You open a **handle** at a **layer**, with a filter, a priority and
 flags. It receives the packets or events that the filter matches, each with an **address**. At
@@ -91,3 +91,29 @@ packet against another filter.
 The platforms differ; macOS, for example, cannot modify a packet in place. `avulse::capabilities()`
 says, per layer, whether handles can be opened, divert, drop, inject and modify. `Handle::open`
 refuses what the backend says it cannot do, with `Error::Unsupported`.
+
+## On Linux
+
+The Linux backend runs eBPF programs on the traffic-control (TC) hooks of each interface. Opening
+a handle needs `CAP_BPF` and `CAP_NET_ADMIN`, or root; without them it fails with an `Error::Io`
+of kind `PermissionDenied`. Kernel 5.10 or later with BTF is supported (tested on 5.15 and 6.8).
+
+- **Filters run in the kernel** when the code generator supports them; the others take every
+  packet of the layer to user space, which keeps the matching ones. Until sending exists, such
+  handles must use `SNIFF`. Today that includes every filter with metadata fields, such as
+  `outbound` or `iface`.
+- **Interfaces.** A handle captures on the interfaces it was given (all of them by default) as
+  they are when it opens. Only Ethernet and loopback devices are supported; tun and WireGuard
+  devices are skipped, or refused when named. Loopback traffic is seen once, as outbound.
+- **VLAN tags.** When the network card takes the outer tag off (VLAN offload), the backend puts it
+  back where it was: in the frame at the `Ethernet` layer, and in `vlan`/`vlan_tci` at every
+  layer.
+- **Priorities** become TC priorities: `30001 - priority` (lower runs first). Priority 0 takes the
+  next TC priority after every open handle.
+- **Packet marks.** Packets a handle sends will carry `0x4156____` in `skb->mark` (the low 16 bits
+  are the TC priority), and inbound ones redirected through `lo` carry `0x4157____`. Do not use
+  these values for your own marks; ebpfdivert's `0x4D49____` marks are ignored.
+- **When a process dies** without closing its handles, their programs stay attached but pass
+  every packet within 3 seconds (a heartbeat stops). The next `Handle::open` removes them, and so
+  does `avulse cleanup` (or `avulse::cleanup()`). Open handles are listed in a registry pinned at
+  `/sys/fs/bpf/avulse/`.

@@ -23,6 +23,7 @@ publish = false
 [workspace.dependencies]
 avulse-proto = { path = "crates/proto", version = "0.0.0" }
 avulse-filter = { path = "crates/filter", version = "0.0.0" }
+avulse-ebpf = { path = "crates/ebpf", version = "0.0.0" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

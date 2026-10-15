@@ -5,19 +5,19 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-15, Steps 1 to 7 and Spikes A and B done, Spike C deferred; next: Step 8)
+## Status (2026-10-15, Steps 1 to 8 and Spikes A and B done, Spike C deferred; next: Step 9)
 
 | Area | State |
 | --- | --- |
-| `crates/proto` (`avulse-proto`) | Done for Phase 1. Zero-copy `no_std` parsing: Ethernet, 2 VLAN tags, ARP, IPv4, IPv6 (8 extension headers, fragments), TCP (options: `Tcp::option_iter`, `option`), UDP, ICMP, ICMPv6. Checksum recalculation. 13 tests, including all truncations and random input. |
+| `crates/proto` (`avulse-proto`) | Done for Phase 1. Zero-copy `no_std` parsing: Ethernet, 2 VLAN tags, ARP, IPv4, IPv6 (8 extension headers, fragments), TCP (options: `Tcp::option_iter`, `option`), UDP, ICMP, ICMPv6. Checksum recalculation and verification (`checksum::verify`). 14 tests, including all truncations and random input. |
 | `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. Wireshark 4.6 syntax covered: quantifiers, arithmetic, layers, value labels, `@field`, `&` on bytes, multi-range slices, `upper`/`lower`, and `matches` (optional `regex` feature). Semantics validated against tshark 4.6/4.7 (`src/tests/tshark.rs`, including every field's byte span against PDML). Bytecode, verifier and `no_std` interpreter (`bytecode/`), sharing the value operations in `value.rs` with the IR evaluator. WinDivert 2.2 front-end (`windivert/`), passing WinDivert's 241 vectors through the IR, the bytecode and the native round trip; `ir::Test::native()` prints native syntax. Nesting is bounded (native 64 levels, 4 macro levels; WinDivert 341 parentheses). TCP options: `tcp.options`, `.mss`, `.mss_val`, `.wscale`, `.wscale.shift`, `.wscale.multiplier`, `.sack_perm`, `.timestamp`, `.tsval`, `.tsecr`. 76 unit tests, 9 tshark tests (opt-in) and doctests. |
-| `crates/cli` (`avulse`) | `avulse filter check \| fmt \| explain [--bytecode] \| eval --hex … \| convert [--layer …] \| fields [--format markdown]`. Exit codes: 0 match, 1 no match, 2 error. |
+| `crates/cli` (`avulse`) | `avulse filter check \| fmt \| explain [--bytecode] \| eval --hex … \| convert [--layer …] \| fields [--format markdown]`. Exit codes: 0 match, 1 no match, 2 error. `avulse cleanup` reaps the handles of dead processes (Linux, root). |
 | `fuzz/` | cargo-fuzz targets `bytecode` (verifier and interpreter on arbitrary programs), `filter` (parser, `fmt` round trip, checker, evaluator, bytecode agreement) and `windivert` (front-end, bytecode and native agreement). Outside the workspace. |
 | `crates/wasm` (`avulse-wasm`) | The filter engine for the website's playground (wasm-bindgen, `publish = false`). |
 | Docs and website | README (front page), guide (`book/`, mdBook), `site/` with the playground, rustdoc and pdoc, built by `scripts/build-site.sh` and deployed by `pages.yml` to <https://ffalcinelli.github.io/avulse/>. Every public item is documented (`missing_docs`). |
-| `crates/ebpf` (`avulse-ebpf`) | Step 7: the capture side of the static TC programs (`avulse_ingress`/`avulse_egress` → matcher → `avulse_act`): per-handle configuration, metadata facts, ring buffer records, divert/sniff/drop, marks, loopback, NETWORK/FORWARD/ETHERNET selection, fragments, the forwarding check, fail-open; `abi.rs` mirrors `bpf/abi.h`. Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Needs clang on Linux. |
+| `crates/ebpf` (`avulse-ebpf`) | Step 8: the loader attaches through Netlink (`Classifier::attach`, `Attachment::detach`) and opens raw BPF hash maps (`HashMap`, for the registry). Step 7: the capture side of the static TC programs (`avulse_ingress`/`avulse_egress` → matcher → `avulse_act`): per-handle configuration, metadata facts, ring buffer records, divert/sniff/drop, marks, loopback, NETWORK/FORWARD/ETHERNET selection, fragments, the forwarding check, fail-open; `abi.rs` mirrors `bpf/abi.h`. Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Needs clang on Linux. |
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
-| `crates/avulse` (`avulse`) | Step 6: the handle API with no backend yet. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends will be modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. |
+| `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Step 8: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop; no sending yet). 9 unit tests without privileges; `tests/capture.rs` (10 tests, `AVULSE_BPF=1`, root, in the VMs) on a veth pair. Other platforms: `Error::Unsupported`. |
 | `crates/{capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
 | CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
@@ -60,10 +60,12 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 - **Privileged tests run only in Vagrant VMs.** Run one VM at a time and `vagrant destroy -f` it right
   after, even on failure. Never download big files into `/tmp` (a small tmpfs); use `~/.cache`.
   - `Vagrantfile` (repo root) has `default` (Ubuntu 24.04, 6.8) and `legacy` (22.04, 5.15), with
-    nothing to provision. Build the test binary on the host (`cargo test -p avulse-ebpf --test kernel
-    --no-run`) and run it in the VM: `vagrant ssh default -c "sudo AVULSE_BPF=1
-    /vagrant/target/debug/deps/kernel-<hash> --nocapture --test-threads=1"`. On 22.04 it prints a
-    harmless warning about the weak `GLIBC_2.39` requirement.
+    nothing to provision. Build the test binaries on the host (`cargo test -p avulse-ebpf --test
+    kernel --no-run`, `cargo test -p avulse --test capture --no-run`) and run them in the VM:
+    `vagrant ssh default -c "sudo AVULSE_BPF=1 /vagrant/target/debug/deps/kernel-<hash>
+    --nocapture --test-threads=1"`, and the same for `capture-<hash>` (`--test-threads=1` matters:
+    the capture tests share one veth pair). On 22.04 they print a harmless warning about the weak
+    `GLIBC_2.39` requirement.
   - The 24.04 box sometimes hangs at boot (guest RCU stalls, `vagrant up` times out waiting for
     SSH). Destroy it and run `vagrant up` again.
   - `windows` (Windows 11 24H2) builds and tests the Windows driver: `vagrant up windows && vagrant
@@ -579,7 +581,69 @@ fail-open on a stale heartbeat or an empty slot. Then run both VMs.
 **Acceptance:** the program loads and passes `tests/kernel.rs` on 6.8 and 5.15, and the facts
 still equal `Facts::from_packet` (extended with the metadata) on the whole corpus.
 
-### Step 8: `backend-linux`: open, attach, receive
+### Step 8: `backend-linux`: open, attach, receive (done)
+
+**Outcome.** `crates/avulse/src/backend/linux/` (`mod.rs` the backend and the open handle,
+`record.rs` records to addresses and the reinjection context, `queue.rs`, `registry.rs`,
+`heartbeat.rs`, `sys.rs`), `avulse::cleanup()` and `avulse cleanup`, and in `avulse-ebpf`'s
+loader: `Classifier::attach` (Netlink, `TcHandle::AUTO_ASSIGN`), `Attachment::detach` (for
+reaping other processes' filters), `take_ring`, `config_writer`, and `HashMap` (a raw BPF hash map,
+pinned or not, for the registry). `avulse-proto` gained `checksum::verify` for the address's
+checksum flags. `tests/capture.rs` passes on 6.8 and 5.15: divert, sniff, drop, the user-space
+fallback, shutdown, the pollable fd and timeouts, the ETHERNET layer, TC priorities, and a dead
+owner (filters fail open after 3 s, `cleanup` removes them). `tests/kernel.rs` still passes on
+both.
+
+- **Open:** filter → `codegen::compile`; when it is unsupported or the verifier rejects it, the
+  matcher is `Test::Const(true)` and user space runs `Filter::matches` on each record (with
+  `iface` from the ifindex, the handle's priority, and an FNV-1a hash of the packet for
+  `random*`). Such handles must `SNIFF` until Step 9; otherwise `Error::Unsupported`. Note that
+  every filter with metadata fields (`outbound`, `loopback`, `iface`, …) takes this path until
+  Step 10.
+- **Order of operations:** load, matcher, then under the registry lock: reap, choose the TC
+  priority, write the configuration (a fresh heartbeat), attach, register. The configuration goes
+  before the attachment because the zero configuration means "divert at NETWORK, no heartbeat
+  check". Closing writes `CFG_SHUTDOWN`, then detaches and unregisters under the lock.
+- **Interfaces:** the selected ones (all by default) plus the loopback device, which is attached
+  with `CFG_SKIP_LO` when not selected. Only `ARPHRD_ETHER` and `ARPHRD_LOOPBACK` devices: the
+  programs expect an Ethernet header, so L3 devices (tun, WireGuard, IP tunnels) are skipped, or
+  refused with `Error::Unsupported` when named. Interfaces that appear after the open are not
+  captured.
+- **Registry:** `/sys/fs/bpf/avulse/registry-1` (the suffix is the entry layout's version), a
+  hash map of 1,024 entries keyed by a random u64, changed under `flock` on `/run/avulse.lock`.
+  An entry holds the PID and its start time, the TC priority, flags, layer, priority, up to 128
+  TC filters (ifindex, hook, TC priority, handle) and the filter's text. Reaping skips a TC filter
+  that a live entry also lists. Without a bpffs, handles still open with nothing shared.
+  Processes in other PID namespaces look dead to each other: run all users of one bpffs in one
+  PID namespace.
+- **Priority 0** goes after the highest TC priority of the live handles in the registry and of
+  this process's open handles (a first version remembered closed handles too; the capture test
+  caught it).
+- **Heartbeat:** one thread per process (`avulse-heartbeat`) rewrites every open handle's
+  configuration every 500 ms; the programs pass everything after 3 s.
+- **Receive:** `recv` pops the queue, else drains the ring into it, else waits on the epoll fd
+  (ring buffer + an eventfd set while the queue is non-empty or the handle is shut down). The
+  queue applies `QUEUE_LENGTH`/`QUEUE_SIZE` at push and `QUEUE_TIME` at pop, against the record's
+  `CLOCK_MONOTONIC` timestamp, so packets left in the ring expire too. After `shutdown(Recv)`,
+  queued and ring packets are delivered, then `Error::Shutdown`. A packet larger than the buffer
+  is consumed (`BufferTooSmall`). `close` needs no in-flight tracking: it takes the `Handle` by
+  value, so no call can be in progress.
+- **Address:** direction, loopback, impostor, sniffed and the layer from the record's `M_*`
+  bits; `ipv6` from the facts; checksum flags from `checksum::verify` (outbound packets with
+  offloaded checksums report `false`); the interface; the outer VLAN tag. An offloaded tag
+  (`M_VLAN`) is put back into the frame after the MAC addresses with TPID 0x8100 (the record does
+  not carry `vlan_proto`): into the packet at ETHERNET, into the saved L2 header at NETWORK.
+- **Reinjection context** (64 bytes, host byte order): magic `0xa1`, L2 length, GSO size, capture
+  ifindex, GSO segments, and up to 30 bytes of L2 header (Ethernet and four tags).
+- **Errors** keep the kind of the system error under them (`PermissionDenied` without
+  privileges), through `loader::Error::source`.
+- **Publishing:** `avulse` now depends on `avulse-ebpf` on Linux, which is `publish = false` and
+  needs clang at build time. Before the first crates.io release of the backend, publish
+  `avulse-ebpf` (with a trusted publisher, owner action) and ship `tc.bpf.o` prebuilt in it, so
+  that users do not need clang.
+
+The original plan of the step follows.
+
 
 **Where.** `crates/avulse/src/backend/linux/` (Linux only; `aya` and `libc` as Linux-only
 dependencies of `avulse`), implementing Step 6's `Backend` and `Opened`, and returned by
@@ -679,8 +743,10 @@ match-all fallback, which costs a trip to user space per packet.
 **Where.** `crates/ebpf/bpf/tc.bpf.c`, `crates/avulse/src/backend/linux/`.
 
 - **Capture:** every frame on the selected interfaces, non-IP included (ARP, LLDP, VLAN-tagged).
-  An offloaded VLAN tag is put back into the captured frame, so the bytes match what the filter
-  saw.
+  Step 8 already receives at ETHERNET and puts an offloaded VLAN tag back into the frame in user
+  space (TPID 0x8100). Left: the kernel parser must see that tag too (Step 10's VLAN fields), the
+  TPID (`skb->vlan_proto` in the record), and devices without an Ethernet header (tun,
+  WireGuard), which Step 8 skips.
 - **Injection:**
   - Outbound frames go out through `AF_PACKET` on the interface, tags included. Check that the
     kernel accepts in-band tags, or use `PACKET_AUXDATA`-style metadata.
@@ -699,8 +765,10 @@ MAC, and LLDP sniffing.
 
 ### Step 12: The privileged suite (Phase 2 exit)
 
-**Where.** `crates/avulse/tests/` (root only, `AVULSE_PRIV=1`, network namespaces and veth
+**Where.** `crates/avulse/tests/` (root only, `AVULSE_BPF=1`, network namespaces and veth
 pairs, like `../ebpfdivert/tests/test_integration.c`), run in the VMs like `tests/kernel.rs`.
+Step 8's `tests/capture.rs` is the start: it covers crash cleanup, auto priority, sniff and drop,
+shutdown, and the event fd.
 
 Port the packet-layer scenarios of `test_integration.c`:
 
@@ -747,7 +815,7 @@ what the `avulse` crate and its Linux backend now hold).
 - [x] Step 5: spikes A (go) and B (go, pure Rust); C deferred until a Mac is available
 - [x] Step 6: public API and address (`crates/avulse`)
 - [x] Step 7: kernel side of capture (config, metadata facts, ring buffer, verdicts)
-- [ ] Step 8: Linux backend: open, attach, registry, heartbeat, receive
+- [x] Step 8: Linux backend: open, attach, registry, heartbeat, receive
 - [ ] Step 9: injection
 - [ ] Step 10: matcher coverage and superset fallback
 - [ ] Step 11: ETHERNET layer

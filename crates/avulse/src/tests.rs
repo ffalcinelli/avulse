@@ -447,6 +447,26 @@ fn handles_are_send_and_sync() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn the_linux_backend() {
+    for layer in [Layer::Network, Layer::NetworkForward, Layer::Ethernet] {
+        let s = capabilities().layer(layer);
+        assert!(s.open && s.divert && s.drop && !s.inject, "{layer:?}");
+    }
+    assert_eq!(capabilities().layer(Layer::Flow), LayerSupport::default());
+    // Refused before anything is loaded, so this needs no privileges.
+    assert!(matches!(
+        Handle::open("tcp", Layer::Flow, 0, Flags::SNIFF | Flags::RECV_ONLY),
+        Err(Error::Unsupported(_))
+    ));
+    assert!(matches!(
+        Handle::open("tcp", Layer::Network, 0, Flags::SNIFF | Flags::DROP),
+        Err(Error::InvalidArgument(_))
+    ));
+}
+
+#[test]
+#[cfg(not(target_os = "linux"))]
 fn no_backend_yet() {
     for layer in [Layer::Network, Layer::Ethernet, Layer::Flow] {
         assert_eq!(capabilities().layer(layer), LayerSupport::default());

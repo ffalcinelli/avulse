@@ -12,7 +12,8 @@ WinDivert feature, adds an Ethernet layer, and uses Wireshark display filters.
 > *Avulsion*: a river suddenly abandoning its channel for a new one.
 
 **Status: pre-alpha.** The packet parser, the filter language and the `avulse filter` CLI work.
-Packet capture does not exist yet, and the crates.io and PyPI packages only reserve the name.
+On Linux, the `avulse` crate captures packets (divert, sniff, drop); sending them back is next.
+The crates.io and PyPI packages only reserve the name.
 
 **[Website](https://ffalcinelli.github.io/avulse/)** ·
 **[Filter playground](https://ffalcinelli.github.io/avulse/#playground)** ·
@@ -96,10 +97,10 @@ assert!(filter.matches(&packet, &Meta { outbound: true, ..Meta::default() }));
 | --- | --- |
 | [`avulse-proto`](crates/proto) | Zero-copy parsing of Ethernet, VLAN/QinQ, ARP, IPv4, IPv6, TCP, UDP, ICMP, ICMPv6; checksums. `no_std`. |
 | [`avulse-filter`](crates/filter) | The filter language: parser, type checker, IR, evaluator. `no_std` + `alloc`. |
-| [`avulse-cli`](crates/cli) | The `avulse` command: `filter check`, `fmt`, `explain`, `eval`, `fields`. |
+| [`avulse-cli`](crates/cli) | The `avulse` command: `filter check`, `fmt`, `explain`, `eval`, `fields`; `cleanup`. |
 | [`avulse-wasm`](crates/wasm) | The engine compiled to WebAssembly, for the playground. |
-| [`avulse`](crates/avulse) | The handle API (preview): handles, flags, parameters, the packet address, and the platform backends to come. |
-| `avulse-ebpf` | Prototype of the Linux in-kernel filter (filter IR to eBPF). |
+| [`avulse`](crates/avulse) | The handle API (preview): handles, flags, parameters, the packet address, and the platform backends. Linux receives; sending and the other platforms are to come. |
+| `avulse-ebpf` | The Linux kernel side: TC programs, filter IR to eBPF, the loader. |
 | `avulse-capi`, `avulse-windivert-compat` | Placeholders for the coming phases. |
 | [`bindings/python`](bindings/python) | The `avulse` PyPI package: a placeholder. |
 

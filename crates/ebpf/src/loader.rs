@@ -1,18 +1,22 @@
 //! Loading (Linux only): the static TC programs with `aya`, the generated matcher with the
 //! `bpf()` system call, which `aya` has no public interface for, and `BPF_PROG_TEST_RUN` for
-//! tests. Every function here needs `CAP_BPF` (or root).
+//! tests. Every function here needs `CAP_BPF` and `CAP_NET_ADMIN` (or root).
 //!
-//! Attaching to interfaces is not here yet (Step 8). It must use `TcAttachOptions::Netlink`:
-//! aya's `SchedClassifier::attach` picks TCX on 6.6 and later, which turns `TC_ACT_STOLEN` into
-//! "next".
+//! [`Classifier::attach`] attaches classic cls_bpf filters through Netlink
+//! (`TcAttachOptions::Netlink`), never TCX: aya's `SchedClassifier::attach` picks TCX on 6.6 and
+//! later, which turns `TC_ACT_STOLEN` into "next".
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::fmt;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 use aya::maps::{Array, Map, MapData, PerCpuArray, RingBuf};
-use aya::programs::SchedClassifier;
+use aya::programs::links::Link as _;
+use aya::programs::tc::{self, NlOptions, SchedClassifierLink, TcAttachOptions, TcHandle};
+use aya::programs::{SchedClassifier, TcAttachType};
 use aya::{Ebpf, EbpfError, EbpfLoader, Pod};
 
 use crate::abi::{self, Config};
@@ -29,12 +33,21 @@ unsafe impl Pod for Facts {}
 // SAFETY: as for `Facts`: integers and explicit padding, 40 bytes (asserted in `bpf/abi.h`).
 unsafe impl Pod for Config {}
 
+/// A classifier's ring buffer ([`Classifier::take_ring`]). Its items are records
+/// ([`abi::Record::parse`]).
+pub type Ring = RingBuf<MapData>;
+
 /// The ring buffer's size when none is given: 4 MiB.
 pub const DEFAULT_RING_BYTES: u32 = 1 << 22;
 
+const BPF_MAP_CREATE: libc::c_long = 0;
+const BPF_MAP_LOOKUP_ELEM: libc::c_long = 1;
 const BPF_MAP_UPDATE_ELEM: libc::c_long = 2;
 const BPF_MAP_DELETE_ELEM: libc::c_long = 3;
+const BPF_MAP_GET_NEXT_KEY: libc::c_long = 4;
 const BPF_PROG_LOAD: libc::c_long = 5;
+const BPF_OBJ_PIN: libc::c_long = 6;
+const BPF_OBJ_GET: libc::c_long = 7;
 const BPF_PROG_TEST_RUN: libc::c_long = 10;
 const BPF_PROG_TYPE_SCHED_CLS: u32 = 3;
 /// `BPF_LOG_STATS`: only the verifier's statistics.
@@ -72,21 +85,33 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Ebpf(e) => Some(e.as_ref()),
+            Error::Sys(_, e) | Error::Rejected { error: e, .. } => Some(e),
+            Error::Aya(_) => None,
+        }
+    }
+}
 
 fn aya<E: fmt::Display>(what: &str) -> impl FnOnce(E) -> Error + '_ {
     move |e| Error::Aya(format!("{what}: {e}"))
 }
 
-/// The static TC programs of one handle, its maps, and a generated matcher in its program array.
+/// The static TC programs of one handle, its maps, a generated matcher in its program array, and
+/// the TC filters that run them. Dropping it detaches the filters.
 pub struct Classifier {
     ebpf: Ebpf,
-    ring: RingBuf<MapData>,
+    /// `None` once [`take_ring`](Classifier::take_ring) took it.
+    ring: Option<RingBuf<MapData>>,
     matcher: Option<OwnedFd>,
+    /// Detached when dropped.
+    links: Vec<SchedClassifierLink>,
 }
 
-/// Which entry program a test run goes through.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// An entry program: which hook of an interface it runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Hook {
     /// `avulse_ingress`: packets arriving.
     Ingress,
@@ -101,6 +126,57 @@ impl Hook {
             Hook::Egress => "avulse_egress",
         }
     }
+
+    fn attach_type(self) -> TcAttachType {
+        match self {
+            Hook::Ingress => TcAttachType::Ingress,
+            Hook::Egress => TcAttachType::Egress,
+        }
+    }
+}
+
+/// A TC filter that runs an entry program: what it takes to detach it, from any process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Attachment {
+    /// The interface.
+    pub ifindex: u32,
+    /// Its ingress or egress hook.
+    pub hook: Hook,
+    /// The filter's TC priority.
+    pub priority: u16,
+    /// The filter's handle, which the kernel picked.
+    pub handle: u32,
+}
+
+impl Attachment {
+    /// Removes the filter, such as one a dead process left. It does nothing if the interface is
+    /// gone (its filters went with it).
+    pub fn detach(&self) -> Result<(), Error> {
+        let Some(name) = if_name(self.ifindex) else {
+            return Ok(());
+        };
+        let link = SchedClassifierLink::attached(
+            &name,
+            self.hook.attach_type(),
+            self.priority,
+            TcHandle::from(self.handle),
+            None,
+        )
+        .map_err(|e| Error::Sys("if_nametoindex", e))?;
+        link.detach().map_err(aya("detaching"))
+    }
+}
+
+/// The name of interface `ifindex`, if it exists.
+pub fn if_name(ifindex: u32) -> Option<String> {
+    let mut buf = [0u8; libc::IF_NAMESIZE];
+    // SAFETY: `buf` has room for IF_NAMESIZE bytes, as `if_indextoname` requires.
+    let p = unsafe { libc::if_indextoname(ifindex, buf.as_mut_ptr().cast()) };
+    if p.is_null() {
+        return None;
+    }
+    let name = CStr::from_bytes_until_nul(&buf).ok()?;
+    Some(name.to_string_lossy().into_owned())
 }
 
 /// The `__sk_buff` fields a test run sets (the ones `BPF_PROG_TEST_RUN` accepts).
@@ -173,8 +249,9 @@ impl Classifier {
         let ring = RingBuf::try_from(ring).map_err(aya("avulse_ring"))?;
         let c = Classifier {
             ebpf,
-            ring,
+            ring: Some(ring),
             matcher: None,
+            links: Vec::new(),
         };
         let act = c.prog_fd("avulse_act")?;
         update(c.map_fd("avulse_progs")?, SLOT_ACTION, act)?;
@@ -230,6 +307,58 @@ impl Classifier {
         Ok(())
     }
 
+    /// Attaches an entry program to interface `ifname` as a cls_bpf filter at TC priority
+    /// `priority` (lower runs first), adding the `clsact` qdisc if it is missing. The filter stays
+    /// until the classifier is dropped, or until [`Attachment::detach`].
+    pub fn attach(&mut self, ifname: &str, hook: Hook, priority: u16) -> Result<Attachment, Error> {
+        let ifindex = if_index(ifname)?;
+        // It fails when the qdisc exists, which is fine; attaching reports any other problem.
+        let _ = tc::qdisc_add_clsact(ifname);
+        let prog: &mut SchedClassifier = self
+            .ebpf
+            .program_mut(hook.program())
+            .ok_or_else(|| Error::Aya(format!("no program {}", hook.program())))?
+            .try_into()
+            .map_err(aya(hook.program()))?;
+        let options = TcAttachOptions::Netlink(NlOptions {
+            priority,
+            handle: TcHandle::AUTO_ASSIGN,
+            classid: None,
+        });
+        let what = || format!("attaching to {ifname}");
+        let id = prog
+            .attach_with_options(ifname, hook.attach_type(), options)
+            .map_err(|e| Error::Aya(format!("{}: {e}", what())))?;
+        let link = prog
+            .take_link(id)
+            .map_err(|e| Error::Aya(format!("{}: {e}", what())))?;
+        let attachment = Attachment {
+            ifindex,
+            hook,
+            priority: link.priority().map_err(aya("TC priority"))?,
+            handle: link.handle().map_err(aya("TC handle"))?.into(),
+        };
+        self.links.push(link);
+        Ok(attachment)
+    }
+
+    /// Takes the ring buffer, for a reader of its own. [`records`](Classifier::records) is empty
+    /// after.
+    pub fn take_ring(&mut self) -> Option<Ring> {
+        self.ring.take()
+    }
+
+    /// A writer of the configuration that does not borrow the classifier, for a heartbeat thread.
+    pub fn config_writer(&self) -> Result<ConfigWriter, Error> {
+        let fd = self
+            .map_data("avulse_config")?
+            .fd()
+            .as_fd()
+            .try_clone_to_owned()
+            .map_err(|e| Error::Sys("dup", e))?;
+        Ok(ConfigWriter(fd))
+    }
+
     /// Writes the handle's configuration.
     pub fn set_config(&mut self, config: &Config) -> Result<(), Error> {
         let map = self
@@ -259,8 +388,10 @@ impl Classifier {
     /// Takes every record in the ring buffer (see [`abi::Record::parse`]).
     pub fn records(&mut self) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
-        while let Some(item) = self.ring.next() {
-            out.push(item.to_vec());
+        if let Some(ring) = &mut self.ring {
+            while let Some(item) = ring.next() {
+                out.push(item.to_vec());
+            }
         }
         out
     }
@@ -297,6 +428,246 @@ impl Classifier {
             .copied()
             .ok_or_else(|| Error::Aya(format!("no CPU {cpu}")))
     }
+}
+
+fn if_index(ifname: &str) -> Result<u32, Error> {
+    let name = CString::new(ifname)
+        .map_err(|_| Error::Sys("if_nametoindex", io::ErrorKind::InvalidInput.into()))?;
+    // SAFETY: `name` is a valid C string.
+    match unsafe { libc::if_nametoindex(name.as_ptr()) } {
+        0 => Err(Error::Sys("if_nametoindex", io::Error::last_os_error())),
+        i => Ok(i),
+    }
+}
+
+/// Writes a classifier's configuration ([`Classifier::config_writer`]).
+pub struct ConfigWriter(OwnedFd);
+
+impl ConfigWriter {
+    /// Writes the configuration.
+    pub fn set(&self, config: &Config) -> Result<(), Error> {
+        let key = 0u32;
+        let mut attr = MapElemAttr {
+            map_fd: self.0.as_raw_fd() as u32,
+            pad: 0,
+            key: &key as *const u32 as u64,
+            value: config as *const Config as u64,
+            flags: 0,
+        };
+        sys_bpf(BPF_MAP_UPDATE_ELEM, &mut attr)
+            .map(drop)
+            .map_err(|e| Error::Sys("BPF_MAP_UPDATE_ELEM", e))
+    }
+}
+
+/// A BPF hash map that is not part of the TC object, such as the pinned registry of handles, with
+/// fixed-size keys and values as bytes.
+pub struct HashMap {
+    fd: OwnedFd,
+    key_size: usize,
+    value_size: usize,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct MapCreateAttr {
+    map_type: u32,
+    key_size: u32,
+    value_size: u32,
+    max_entries: u32,
+    map_flags: u32,
+    inner_map_fd: u32,
+    numa_node: u32,
+    map_name: [u8; 16],
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct ObjAttr {
+    pathname: u64,
+    bpf_fd: u32,
+    file_flags: u32,
+}
+
+const BPF_MAP_TYPE_HASH: u32 = 1;
+const BPF_F_NO_PREALLOC: u32 = 1;
+
+impl HashMap {
+    /// Creates a map (entries allocated as they are added). `name` is at most 15 bytes.
+    pub fn create(
+        name: &str,
+        key_size: usize,
+        value_size: usize,
+        max_entries: u32,
+    ) -> Result<Self, Error> {
+        let mut map_name = [0u8; 16];
+        let n = name.len().min(15);
+        map_name[..n].copy_from_slice(&name.as_bytes()[..n]);
+        let mut attr = MapCreateAttr {
+            map_type: BPF_MAP_TYPE_HASH,
+            key_size: key_size as u32,
+            value_size: value_size as u32,
+            max_entries,
+            map_flags: BPF_F_NO_PREALLOC,
+            map_name,
+            ..Default::default()
+        };
+        let fd = sys_bpf(BPF_MAP_CREATE, &mut attr).map_err(|e| Error::Sys("BPF_MAP_CREATE", e))?;
+        Ok(HashMap {
+            // SAFETY: the kernel returned a new file descriptor that nothing else owns.
+            fd: unsafe { OwnedFd::from_raw_fd(fd as RawFd) },
+            key_size,
+            value_size,
+        })
+    }
+
+    /// Opens the map pinned at `path` (on a bpffs), which must have these key and value sizes.
+    /// The error is `Sys` with `NotFound` when nothing is pinned there.
+    pub fn open_pinned(path: &Path, key_size: usize, value_size: usize) -> Result<Self, Error> {
+        let path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| Error::Sys("BPF_OBJ_GET", io::ErrorKind::InvalidInput.into()))?;
+        let mut attr = ObjAttr {
+            pathname: path.as_ptr() as u64,
+            ..Default::default()
+        };
+        let fd = sys_bpf(BPF_OBJ_GET, &mut attr).map_err(|e| Error::Sys("BPF_OBJ_GET", e))?;
+        let map = HashMap {
+            // SAFETY: the kernel returned a new file descriptor that nothing else owns.
+            fd: unsafe { OwnedFd::from_raw_fd(fd as RawFd) },
+            key_size,
+            value_size,
+        };
+        // A lookup with the wrong sizes would read or write out of bounds: check them.
+        let info = map.info()?;
+        if (info.key_size as usize, info.value_size as usize) != (key_size, value_size) {
+            return Err(Error::Sys(
+                "BPF_OBJ_GET",
+                io::Error::new(io::ErrorKind::InvalidData, "the pinned map has other sizes"),
+            ));
+        }
+        Ok(map)
+    }
+
+    fn info(&self) -> Result<MapInfo, Error> {
+        let mut info = MapInfo::default();
+        let mut attr = InfoAttr {
+            bpf_fd: self.fd.as_raw_fd() as u32,
+            info_len: size_of::<MapInfo>() as u32,
+            info: &mut info as *mut MapInfo as u64,
+        };
+        sys_bpf(BPF_OBJ_GET_INFO_BY_FD, &mut attr)
+            .map_err(|e| Error::Sys("BPF_OBJ_GET_INFO_BY_FD", e))?;
+        Ok(info)
+    }
+
+    /// Pins the map at `path`. The error is `Sys` with `AlreadyExists` when something is pinned
+    /// there.
+    pub fn pin(&self, path: &Path) -> Result<(), Error> {
+        let path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| Error::Sys("BPF_OBJ_PIN", io::ErrorKind::InvalidInput.into()))?;
+        let mut attr = ObjAttr {
+            pathname: path.as_ptr() as u64,
+            bpf_fd: self.fd.as_raw_fd() as u32,
+            file_flags: 0,
+        };
+        sys_bpf(BPF_OBJ_PIN, &mut attr)
+            .map(drop)
+            .map_err(|e| Error::Sys("BPF_OBJ_PIN", e))
+    }
+
+    fn elem(&self, cmd: libc::c_long, key: &[u8], value: u64, flags: u64) -> io::Result<()> {
+        assert_eq!(key.len(), self.key_size, "the map's key size");
+        let mut attr = MapElemAttr {
+            map_fd: self.fd.as_raw_fd() as u32,
+            pad: 0,
+            key: key.as_ptr() as u64,
+            value,
+            flags,
+        };
+        sys_bpf(cmd, &mut attr).map(drop)
+    }
+
+    /// The value of `key`, if there is one.
+    ///
+    /// # Panics
+    ///
+    /// If `key` is not of the map's key size.
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        let mut value = vec![0u8; self.value_size];
+        match self.elem(BPF_MAP_LOOKUP_ELEM, key, value.as_mut_ptr() as u64, 0) {
+            Ok(()) => Ok(Some(value)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(Error::Sys("BPF_MAP_LOOKUP_ELEM", e)),
+        }
+    }
+
+    /// Adds `key`, which must not be in the map yet (`Sys` with `AlreadyExists` otherwise).
+    ///
+    /// # Panics
+    ///
+    /// If `key` or `value` is not of the map's size.
+    pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), Error> {
+        assert_eq!(value.len(), self.value_size, "the map's value size");
+        const BPF_NOEXIST: u64 = 1;
+        self.elem(BPF_MAP_UPDATE_ELEM, key, value.as_ptr() as u64, BPF_NOEXIST)
+            .map_err(|e| Error::Sys("BPF_MAP_UPDATE_ELEM", e))
+    }
+
+    /// Removes `key`; it is not an error if it is missing.
+    ///
+    /// # Panics
+    ///
+    /// If `key` is not of the map's key size.
+    pub fn remove(&self, key: &[u8]) -> Result<(), Error> {
+        match self.elem(BPF_MAP_DELETE_ELEM, key, 0, 0) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                Err(Error::Sys("BPF_MAP_DELETE_ELEM", e))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Every key, in the map's order.
+    pub fn keys(&self) -> Result<Vec<Vec<u8>>, Error> {
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        loop {
+            let mut next = vec![0u8; self.key_size];
+            let mut attr = MapElemAttr {
+                map_fd: self.fd.as_raw_fd() as u32,
+                pad: 0,
+                // No key (0) asks for the first one.
+                key: keys.last().map_or(0, |k| k.as_ptr() as u64),
+                value: next.as_mut_ptr() as u64,
+                flags: 0,
+            };
+            match sys_bpf(BPF_MAP_GET_NEXT_KEY, &mut attr) {
+                Ok(_) => keys.push(next),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(keys),
+                Err(e) => return Err(Error::Sys("BPF_MAP_GET_NEXT_KEY", e)),
+            }
+        }
+    }
+}
+
+const BPF_OBJ_GET_INFO_BY_FD: libc::c_long = 15;
+
+#[repr(C)]
+struct InfoAttr {
+    bpf_fd: u32,
+    info_len: u32,
+    info: u64,
+}
+
+/// The start of `struct bpf_map_info`.
+#[repr(C)]
+#[derive(Default)]
+struct MapInfo {
+    map_type: u32,
+    id: u32,
+    key_size: u32,
+    value_size: u32,
+    max_entries: u32,
+    map_flags: u32,
 }
 
 fn sys_bpf<T>(cmd: libc::c_long, attr: &mut T) -> io::Result<libc::c_long> {
