@@ -1,0 +1,39 @@
+# Spike B: a Rust Windows driver with one WFP callout and one NDIS lightweight filter, running
+# avulse's bytecode verifier and interpreter in the kernel. Windows only; outside the workspace.
+[package]
+name = "avulse-spike"
+description = "Spike B: WFP callout and NDIS LWF in Rust, with the avulse bytecode interpreter."
+version = "0.0.0"
+edition = "2024"
+license = "LGPL-3.0-or-later OR GPL-2.0-or-later"
+publish = false
+
+[package.metadata.wdk.driver-model]
+driver-type = "WDM"
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+
+[build-dependencies]
+avulse-filter = { path = "../../crates/filter" }
+bindgen = "0.71"
+wdk-build = "0.5.1"
+
+[dependencies]
+avulse-filter = { path = "../../crates/filter" }
+avulse-proto = { path = "../../crates/proto" }
+wdk = "0.4.1"
+wdk-alloc = "0.4.1"
+wdk-panic = "0.4.1"
+wdk-sys = "0.5.1"
+
+[profile.dev]
+panic = "abort"
+lto = true
+
+[profile.release]
+panic = "abort"
+lto = true
+
+[workspace]

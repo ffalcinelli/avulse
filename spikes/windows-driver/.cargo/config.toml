@@ -1,0 +1,3 @@
+# wdk-build requires the static CRT (as the windows-drivers-rs samples set it).
+[build]
+rustflags = ["-C", "target-feature=+crt-static"]

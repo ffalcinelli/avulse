@@ -204,9 +204,10 @@ The phases run in order. Each has an exit criterion.
    and get it through the verifier on 5.15 and 6.8. Done: go (`docs/spikes/ebpf-codegen.md`).
 3. **Spike B, Windows Rust driver.** Build a `windows-drivers-rs` KMDF driver that registers one WFP callout and
    one NDIS LWF, test-signed, loaded in a Windows VM. Decide whether pure Rust is viable or whether a thin C shim is
-   needed.
+   needed. Done: go, pure Rust, with our own bindgen for NDIS and WFP (`docs/spikes/windows-driver.md`).
 4. **Spike C, macOS.** Find out whether `NEFilterPacketProvider` exposes Ethernet frames, measure its throughput
-   and delay semantics, and test reinjection through `/dev/bpf`.
+   and delay semantics, and test reinjection through `/dev/bpf`. Deferred until a Mac is available; it must be done
+   before Phase 6.
 
 Exit: a written go/no-go note for each spike, and the capability matrix above confirmed or corrected.
 
@@ -317,8 +318,11 @@ Exit: a macOS test suite passes on real hardware, and the capability matrix is p
 
 ## Main risks
 
-- **Rust in the Windows kernel.** `wdk-sys` may lack WFP/NDIS bindings. Mitigation: our own bindgen, or the thin C
-  shim. Spike B decides.
+- **Rust in the Windows kernel.** `wdk-sys` lacks WFP/NDIS bindings; Spike B generated its own with bindgen, so no
+  C shim is needed.
+- **Kernel stack depth on Windows.** NDIS and WFP leave about 12 KiB of the 24 KiB kernel stack to a filter, and a
+  debug build of the interpreter overflowed it. Mitigation: release builds, a stack check with
+  `KeExpandKernelStackAndCalloutEx`, and a caller-provided register file for the interpreter (Spike B).
 - **macOS fidelity.** There is no in-place modify and only a weak forward layer. Mitigation: the drop+reinject
   emulation, the `capabilities()` API, and setting expectations early.
 - **Driver signing.** The EV certificate and Partner Center enrollment are unavoidable for the kernel driver, and

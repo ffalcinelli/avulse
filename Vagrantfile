@@ -12,6 +12,15 @@
 # "default" is Ubuntu 24.04 (kernel 6.8); "legacy" is Ubuntu 22.04 (kernel 5.15, the oldest
 # kernel the Linux backend supports, with the strictest verifier). The binaries need nothing
 # installed in the VM.
+#
+# "windows" (Windows 11 24H2) builds and loads the Windows driver (spikes/windows-driver). Its
+# provisioning installs the driver toolchain and turns on test signing, which takes effect after
+# a reboot:
+#
+#   vagrant up windows && vagrant reload windows
+#   vagrant winrm windows -e -c "C:\avulse\spikes\windows-driver\scripts\build.ps1"
+#   vagrant winrm windows -e -c "C:\avulse\spikes\windows-driver\scripts\test.ps1"
+#   vagrant destroy -f windows
 
 Vagrant.configure("2") do |config|
   config.vm.provider "virtualbox" do |vb|
@@ -27,5 +36,20 @@ Vagrant.configure("2") do |config|
   config.vm.define "legacy", autostart: false do |m|
     m.vm.box = "bento/ubuntu-22.04"
     m.vm.hostname = "avulse-legacy"
+  end
+
+  config.vm.define "windows", autostart: false do |m|
+    m.vm.box = "gusztavvargadr/windows-11-24h2-enterprise"
+    m.vm.communicator = "winrm"
+    m.vm.boot_timeout = 900
+    m.winrm.timeout = 3600
+    m.vm.synced_folder ".", "/vagrant", disabled: true
+    m.vm.synced_folder ".", "C:/avulse"
+    m.vm.provider "virtualbox" do |vb|
+      vb.memory = "6144"
+      vb.cpus = 4
+      vb.customize ["modifyvm", :id, "--vram", "128"]
+    end
+    m.vm.provision "toolchain", type: "shell", path: "spikes/windows-driver/scripts/toolchain.ps1"
   end
 end

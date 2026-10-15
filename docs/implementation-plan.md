@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-14, Steps 1 to 4 and Spike A done; next: Spikes B and C)
+## Status (2026-10-15, Steps 1 to 4 and Spikes A and B done, Spike C deferred; next: Phase 2)
 
 | Area | State |
 | --- | --- |
@@ -16,6 +16,7 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `crates/wasm` (`avulse-wasm`) | The filter engine for the website's playground (wasm-bindgen, `publish = false`). |
 | Docs and website | README (front page), guide (`book/`, mdBook), `site/` with the playground, rustdoc and pdoc, built by `scripts/build-site.sh` and deployed by `pages.yml` to <https://ffalcinelli.github.io/avulse/>. Every public item is documented (`missing_docs`). |
 | `crates/ebpf` (`avulse-ebpf`) | Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Needs clang on Linux. |
+| `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
 | `crates/{backend-linux,avulse,capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
 | CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
@@ -64,6 +65,13 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
     harmless warning about the weak `GLIBC_2.39` requirement.
   - The 24.04 box sometimes hangs at boot (guest RCU stalls, `vagrant up` times out waiting for
     SSH). Destroy it and run `vagrant up` again.
+  - `windows` (Windows 11 24H2) builds and tests the Windows driver: `vagrant up windows && vagrant
+    reload windows` (the provisioning, `spikes/windows-driver/scripts/toolchain.ps1`, downloads
+    several GB and needs the reboot for test signing, Driver Verifier and kernel dumps), then
+    `vagrant winrm windows -e -c "C:\avulse\spikes\windows-driver\scripts\build.ps1"` and
+    `…\test.ps1`. After a crash, the reboot can leave `C:\avulse` unmounted: `vagrant reload
+    windows` mounts it again. Read dumps with the WDK's `kd -z` and frame sizes with `dumpbin
+    /disasm` (commands in the spike note). Give it 6 GB and nothing else running.
 - **Fuzzing:** `cargo-fuzz` is installed in `~/.cargo/bin`. Without a nightly toolchain, run it
   with `RUSTC_BOOTSTRAP=1` (Arch's rustc ships the ASan runtime):
   `cd fuzz && RUSTC_BOOTSTRAP=1 cargo fuzz run filter -- -max_total_time=600`. Seed the `filter`
@@ -404,11 +412,15 @@ equivalent on the vector packets.
      `../ebpfdivert/Vagrantfile`.
 
   Exit: the verifier accepts the program on both kernels. Write a go/no-go note in `docs/spikes/`.
-- **Spike B: Windows Rust driver.** Use `windows-drivers-rs`: one WFP callout and one NDIS LWF,
-  test-signed, loaded in a Windows Vagrant VM (see pydivert's or jdivert's Vagrantfile). Decide pure
-  Rust or a thin C shim.
-- **Spike C: macOS.** Check `NEFilterPacketProvider` frame level, throughput and delay semantics,
-  and `/dev/bpf` reinjection. This needs a real Mac, so ask the owner.
+- [x] **Spike B: Windows Rust driver.** Done 2026-10-15, verdict go in pure Rust; see
+  `docs/spikes/windows-driver.md`. The kernel stack (24 KiB, about 12 KiB left when NDIS or WFP
+  call the filter) is the constraint Phase 5 must design for: release builds, a stack check with
+  `KeExpandKernelStackAndCalloutEx`, and a caller-provided register file for the interpreter. Use
+  `windows-drivers-rs`: one WFP callout and one NDIS LWF, test-signed, loaded in a Windows Vagrant
+  VM. Decide pure Rust or a thin C shim.
+- [ ] **Spike C: macOS.** Deferred: no Mac is available (owner decision, 2026-10-15). Check
+  `NEFilterPacketProvider` frame level, throughput and delay semantics, and `/dev/bpf`
+  reinjection. Do it before Phase 6.
 
 ### After that
 
@@ -427,5 +439,5 @@ starting each phase, expand it into steps in this file, in the same format as ab
 - [x] Step 2: bytecode + verifier + interpreter
 - [x] Step 3: WinDivert front-end + 241 vectors + `filter convert`
 - [x] Step 4: TCP options, fuzz targets
-- [ ] Step 5: spikes A (done, go), B, C
+- [x] Step 5: spikes A (go) and B (go, pure Rust); C deferred until a Mac is available
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement
