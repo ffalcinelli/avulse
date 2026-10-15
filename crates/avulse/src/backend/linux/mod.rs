@@ -3,14 +3,16 @@
 //! Each handle loads its own instance of the static programs, with its own maps, and its filter
 //! compiled to an eBPF matcher. When the code generator cannot compile the filter, or the
 //! verifier rejects it, the matcher takes every packet of the layer and user space evaluates the
-//! filter on each record; until injection exists, such handles must sniff. The programs are
-//! attached as classic cls_bpf filters at TC priority `30001 - priority`, on the selected
-//! interfaces and on `lo`. Matching packets go to a ring buffer, which `recv` drains into a queue.
+//! filter on each record, reinjecting what does not match. The programs are attached as classic
+//! cls_bpf filters at TC priority `30001 - priority`, on the selected interfaces and on `lo`.
+//! Matching packets go to a ring buffer, which `recv` drains into a queue; `send` injects
+//! packets through raw and `AF_PACKET` sockets (`send.rs`).
 
 mod heartbeat;
 mod queue;
 mod record;
 mod registry;
+mod send;
 mod sys;
 #[cfg(test)]
 mod tests;
@@ -33,6 +35,7 @@ use self::heartbeat::Beat;
 use self::queue::Queue;
 use self::record::Entry;
 use self::registry::Registry;
+use self::send::Tx;
 use super::{Backend, Capabilities, LayerSupport, Opened, Spec};
 use crate::{Address, Error, Flags, Param, Result, Shutdown};
 
@@ -44,13 +47,12 @@ pub(crate) struct Linux;
 
 impl Backend for Linux {
     fn capabilities(&self) -> Capabilities {
-        // Receiving works at the packet layers; injection comes with Step 9.
         let packets = LayerSupport {
             open: true,
             divert: true,
             drop: true,
-            inject: false,
-            modify: false,
+            inject: true,
+            modify: true,
         };
         let mut c = Capabilities::NONE;
         for layer in [Layer::Network, Layer::NetworkForward, Layer::Ethernet] {
@@ -103,15 +105,20 @@ struct Handle {
     priority: i16,
     /// The filter, when user space must evaluate it (the kernel matcher is not exact).
     filter: Option<Filter>,
+    /// User space drops what `filter` matches (`DROP` with an inexact matcher).
+    drop: bool,
     rx: Rx,
+    tx: Tx,
     shut_send: AtomicBool,
-    /// The heartbeat and configuration; `None` for `SEND_ONLY` handles, which capture nothing.
+    /// The heartbeat and configuration. `SEND_ONLY` handles capture nothing (their programs are
+    /// shut down, on `lo`'s ingress only, for the redirect of inbound packets) and need no
+    /// heartbeat.
     beat: Option<Arc<Beat>>,
     /// The programs and their TC filters, detached when dropped.
     classifier: Option<Classifier>,
     /// The registry key.
     registered: Option<u64>,
-    /// The TC priority, while it is in [`LOCAL_TC_PRIORITIES`].
+    /// The TC priority, while it is in [`LOCAL_TC_PRIORITIES`]; its packets carry it in their mark.
     tc_priority: Option<u16>,
 }
 
@@ -144,58 +151,77 @@ impl Handle {
             .into_iter()
             .find(|i| i.kind == sys::ARPHRD_LOOPBACK)
             .map_or(1, |i| i.index);
+        let send_only = spec.flags.contains(Flags::SEND_ONLY);
         let rx = Rx::new(spec.params)?;
         let mut handle = Handle {
             layer: spec.layer,
             priority: spec.priority,
             filter: None,
+            drop: false,
             rx,
+            tx: Tx::new(lo),
             shut_send: AtomicBool::new(false),
             beat: None,
             classifier: None,
             registered: None,
             tc_priority: None,
         };
-        if spec.flags.contains(Flags::SEND_ONLY) {
-            return Ok(handle);
-        }
-        let targets = targets(spec.interfaces)?;
+        // A SEND_ONLY handle attaches to lo's ingress only, which redirects the inbound packets it
+        // injects; it receives nothing.
+        let (targets, ring_bytes) = if send_only {
+            let lo = sys::interfaces()?
+                .into_iter()
+                .filter(|i| i.kind == sys::ARPHRD_LOOPBACK)
+                .collect();
+            let page = u32::try_from(sys::page_size()).unwrap_or(4096);
+            (
+                Targets {
+                    list: lo,
+                    lo_selected: false,
+                },
+                page,
+            )
+        } else {
+            (targets(spec.interfaces)?, loader::DEFAULT_RING_BYTES)
+        };
 
-        let mut classifier =
-            Classifier::load_with_ring(loader::DEFAULT_RING_BYTES).map_err(io_error)?;
-        let exact = set_matcher(&mut classifier, spec.filter)?;
-        if !exact {
-            if !spec.flags.contains(Flags::SNIFF) {
-                return Err(Error::Unsupported(
-                    "this filter runs in user space, which needs SNIFF until injection exists",
-                ));
-            }
-            handle.filter = Some(spec.filter.clone());
-        }
-        let ring = classifier
-            .take_ring()
-            .ok_or_else(|| Error::Io(io::Error::other("the classifier has no ring buffer")))?;
-        handle.rx.epoll.add(ring.as_fd())?;
-        *lock(&handle.rx.ring) = Some(Ring {
-            buf: ring,
-            names: HashMap::new(),
-        });
-
+        let mut classifier = Classifier::load_with_ring(ring_bytes).map_err(io_error)?;
         let mut flags = 0;
-        if spec.flags.contains(Flags::SNIFF) {
-            flags |= abi::CFG_SNIFF;
-        }
-        if spec.flags.contains(Flags::DROP) {
-            flags |= abi::CFG_DROP;
-        }
-        if spec.flags.contains(Flags::FRAGMENTS) {
-            flags |= abi::CFG_FRAGMENTS;
-        }
-        if sys::sysctl_on("net/ipv4/ip_forward") || sys::sysctl_on("net/ipv6/conf/all/forwarding") {
-            flags |= abi::CFG_FWD_CHECK;
-        }
-        if !targets.lo_selected {
-            flags |= abi::CFG_SKIP_LO;
+        if send_only {
+            flags |= abi::CFG_SHUTDOWN;
+        } else {
+            let exact = set_matcher(&mut classifier, spec.filter)?;
+            if !exact {
+                // The kernel diverts (or copies) every packet of the layer; user space reinjects
+                // (or ignores) what the filter does not match, and drops what it matches.
+                handle.filter = Some(spec.filter.clone());
+                handle.drop = spec.flags.contains(Flags::DROP);
+            }
+            let ring = classifier
+                .take_ring()
+                .ok_or_else(|| Error::Io(io::Error::other("the classifier has no ring buffer")))?;
+            handle.rx.epoll.add(ring.as_fd())?;
+            *lock(&handle.rx.ring) = Some(Ring {
+                buf: ring,
+                names: HashMap::new(),
+            });
+            if spec.flags.contains(Flags::SNIFF) {
+                flags |= abi::CFG_SNIFF;
+            }
+            if spec.flags.contains(Flags::DROP) && exact {
+                flags |= abi::CFG_DROP;
+            }
+            if spec.flags.contains(Flags::FRAGMENTS) {
+                flags |= abi::CFG_FRAGMENTS;
+            }
+            if sys::sysctl_on("net/ipv4/ip_forward")
+                || sys::sysctl_on("net/ipv6/conf/all/forwarding")
+            {
+                flags |= abi::CFG_FWD_CHECK;
+            }
+            if !targets.lo_selected {
+                flags |= abi::CFG_SKIP_LO;
+            }
         }
 
         // Under the lock: the TC priority depends on the other handles, and must be registered
@@ -217,9 +243,14 @@ impl Handle {
             classifier.config_writer().map_err(io_error)?,
         ));
         beat.update(|_| {}).map_err(io_error)?;
+        let hooks: &[Hook] = if send_only {
+            &[Hook::Ingress]
+        } else {
+            &[Hook::Ingress, Hook::Egress]
+        };
         let mut attachments = Vec::new();
         for iface in &targets.list {
-            for hook in [Hook::Ingress, Hook::Egress] {
+            for &hook in hooks {
                 // Dropping the classifier detaches what is attached so far.
                 attachments.push(
                     classifier
@@ -243,9 +274,16 @@ impl Handle {
         lock(&LOCAL_TC_PRIORITIES).push(tc_priority);
         handle.tc_priority = Some(tc_priority);
         drop(registry);
-        heartbeat::add(&beat);
+        if !send_only {
+            heartbeat::add(&beat);
+        }
         handle.beat = Some(beat);
         Ok(handle)
+    }
+
+    /// The TC priority its packets carry in their mark.
+    fn mark_priority(&self) -> u16 {
+        self.tc_priority.unwrap_or(TC_PRIORITY_BASE as u16)
     }
 }
 
@@ -371,11 +409,20 @@ impl Handle {
                 continue;
             };
             drop(item);
-            if let Some(filter) = &self.filter
-                && !self.matches(filter, &e, &mut ring.names)
-            {
-                // Sniffed: the packet went on.
-                continue;
+            if let Some(filter) = &self.filter {
+                if !self.matches(filter, &e, &mut ring.names) {
+                    // Not for this handle: a copy is ignored, a diverted packet goes back. A
+                    // failure loses the packet, as a full queue does.
+                    if !e.addr.sniffed {
+                        let _ =
+                            self.tx
+                                .send(&e.data, &e.addr, self.layer, self.mark_priority(), false);
+                    }
+                    continue;
+                }
+                if self.drop {
+                    continue;
+                }
             }
             entries.push(e);
         }
@@ -446,11 +493,13 @@ impl Opened for Handle {
         }
     }
 
-    fn send(&self, _packet: &[u8], _addr: &Address) -> Result<usize> {
+    fn send(&self, packet: &[u8], addr: &Address) -> Result<usize> {
         if self.shut_send.load(Ordering::Acquire) {
             return Err(Error::Shutdown);
         }
-        Err(Error::Unsupported("sending on Linux (Step 9)"))
+        self.tx
+            .send(packet, addr, self.layer, self.mark_priority(), true)?;
+        Ok(packet.len())
     }
 
     fn shutdown(&self, how: Shutdown) -> Result<()> {

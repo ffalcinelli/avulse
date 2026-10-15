@@ -1,8 +1,8 @@
 # Handles and addresses
 
-> **Preview.** Only Linux has a backend so far, and it only receives: handles divert, sniff or
-> drop packets, but `send` returns `Error::Unsupported` until injection lands. Elsewhere,
-> `Handle::open` returns `Error::Unsupported`. The API may still change before version 0.1.
+> **Preview.** Only Linux has a backend so far, for the packet layers (`Network`,
+> `NetworkForward` and `Ethernet`). Elsewhere, `Handle::open` returns `Error::Unsupported`. The API
+> may still change before version 0.1.
 
 The model is WinDivert's. You open a **handle** at a **layer**, with a filter, a priority and
 flags. It receives the packets or events that the filter matches, each with an **address**. At
@@ -83,6 +83,15 @@ To send a packet back, use the address it was received with: its direction, inte
 `context` decide where it goes. To inject a new packet, start from `Address::new(layer)` and set
 the direction and the interface; with an empty `context`, the backend routes it.
 
+Sending follows WinDivert's rules:
+
+- **Checksums.** The IPv4 header, TCP and UDP checksums whose flag is `false` are computed;
+  `Address::new` clears them all. ICMP and ICMPv6 checksums are sent as they are: after changing
+  such a packet, call `avulse::proto::checksum::recalculate`.
+- **Impostors.** A packet sent with `impostor` set loses one hop of TTL (IPv4) or hop limit
+  (IPv6), and `send` fails with an `Error::Io` of kind `HostUnreachable` when none is left. Two
+  handles that keep reinjecting each other's packets cannot loop forever.
+
 `Address::meta()` gives the metadata a filter sees, so `Filter::matches` can check a received
 packet against another filter.
 
@@ -99,9 +108,19 @@ a handle needs `CAP_BPF` and `CAP_NET_ADMIN`, or root; without them it fails wit
 of kind `PermissionDenied`. Kernel 5.10 or later with BTF is supported (tested on 5.15 and 6.8).
 
 - **Filters run in the kernel** when the code generator supports them; the others take every
-  packet of the layer to user space, which keeps the matching ones. Until sending exists, such
-  handles must use `SNIFF`. Today that includes every filter with metadata fields, such as
-  `outbound` or `iface`.
+  packet of the layer to user space, which keeps the matching ones and sends the others back at
+  once (with `DROP`, it drops the matching ones). That costs a trip to user space per packet.
+  Today it includes every filter with metadata fields, such as `outbound` or `iface`.
+- **Sending** needs `CAP_NET_RAW` as well. Loopback packets, and new packets with an empty
+  `context`, go through a raw IP socket and are routed like local traffic. A packet received
+  outbound (or forwarded) goes back out of the interface it was captured on, behind the Ethernet
+  header it had; an inbound one goes to that interface's ingress through `lo`, where the handles'
+  programs redirect it. Change `if_idx` and the saved header no longer applies: an outbound
+  packet is then routed, and an inbound one gets an Ethernet header to the interface's address.
+  At the `Ethernet` layer, frames go out of `if_idx` as they are, or in through `lo`; `if_idx`
+  must be set. A packet larger than the interface's MTU, such as the large TCP segments the stack
+  hands to the network card (GSO), is segmented by the kernel. A `SEND_ONLY` handle still loads
+  programs, on `lo`'s ingress only, for inbound injection.
 - **Interfaces.** A handle captures on the interfaces it was given (all of them by default) as
   they are when it opens. Only Ethernet and loopback devices are supported; tun and WireGuard
   devices are skipped, or refused when named. Loopback traffic is seen once, as outbound.
@@ -110,9 +129,11 @@ of kind `PermissionDenied`. Kernel 5.10 or later with BTF is supported (tested o
   layer.
 - **Priorities** become TC priorities: `30001 - priority` (lower runs first). Priority 0 takes the
   next TC priority after every open handle.
-- **Packet marks.** Packets a handle sends will carry `0x4156____` in `skb->mark` (the low 16 bits
-  are the TC priority), and inbound ones redirected through `lo` carry `0x4157____`. Do not use
-  these values for your own marks; ebpfdivert's `0x4D49____` marks are ignored.
+- **Packet marks.** Packets a handle sends carry `0x4156____` in `skb->mark` (the low 16 bits are
+  its TC priority): handles at the same or a higher priority skip them, and lower ones see
+  impostors. Inbound ones on their way through `lo` carry `0x4157____`, with `0x4158____` in
+  `skb->priority`. Do not use these values for your own marks; ebpfdivert's `0x4D49____` marks
+  are ignored.
 - **When a process dies** without closing its handles, their programs stay attached but pass
   every packet within 3 seconds (a heartbeat stops). The next `Handle::open` removes them, and so
   does `avulse cleanup` (or `avulse::cleanup()`). Open handles are listed in a registry pinned at

@@ -179,11 +179,17 @@ pub fn if_name(ifindex: u32) -> Option<String> {
     Some(name.to_string_lossy().into_owned())
 }
 
+/// Room for the context a test run returns: the kernel's `struct __sk_buff`, which grows with
+/// its version (a smaller buffer fails with `ENOSPC`).
+const CTX_OUT: usize = 512;
+
 /// The `__sk_buff` fields a test run sets (the ones `BPF_PROG_TEST_RUN` accepts).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SkbCtx {
     /// `skb->mark`.
     pub mark: u32,
+    /// `skb->priority`.
+    pub priority: u32,
     /// `skb->ingress_ifindex`.
     pub ingress_ifindex: u32,
     /// The device: 0 or 1 is the loopback device.
@@ -200,6 +206,7 @@ impl SkbCtx {
         let mut b = [0; 184];
         for (at, v) in [
             (8, self.mark),
+            (32, self.priority),
             (36, self.ingress_ifindex),
             (40, self.ifindex),
             (164, self.gso_segs),
@@ -208,6 +215,18 @@ impl SkbCtx {
             b[at..at + 4].copy_from_slice(&v.to_ne_bytes());
         }
         b
+    }
+
+    fn from_bytes(b: &[u8; CTX_OUT]) -> SkbCtx {
+        let at = |i: usize| u32::from_ne_bytes(b[i..i + 4].try_into().unwrap());
+        SkbCtx {
+            mark: at(8),
+            priority: at(32),
+            ingress_ifindex: at(36),
+            ifindex: at(40),
+            gso_segs: at(164),
+            gso_size: at(176),
+        }
     }
 }
 
@@ -406,13 +425,28 @@ impl Classifier {
     /// `TC_ACT_UNSPEC` (-1) when the packet passes, `TC_ACT_SHOT` (2) when it is dropped,
     /// `TC_ACT_STOLEN` (4) when it is diverted.
     pub fn run_on(&self, hook: Hook, frame: &[u8], ctx: &SkbCtx) -> Result<i32, Error> {
-        Ok(test_run(self.prog_fd(hook.program())?, frame, Some(ctx), 1)?.0)
+        Ok(self.run_ctx(hook, frame, ctx)?.0)
+    }
+
+    /// [`run_on`](Classifier::run_on), which also returns the context as the program left it
+    /// (the mark and priority it wrote). `TC_ACT_REDIRECT` (7) means the program redirected the
+    /// packet; a test run does not deliver it.
+    pub fn run_ctx(&self, hook: Hook, frame: &[u8], ctx: &SkbCtx) -> Result<(i32, SkbCtx), Error> {
+        let mut out = [0u8; CTX_OUT];
+        let (verdict, _) = test_run(
+            self.prog_fd(hook.program())?,
+            frame,
+            Some(ctx),
+            Some(&mut out),
+            1,
+        )?;
+        Ok((verdict, SkbCtx::from_bytes(&out)))
     }
 
     /// Runs the ingress program `repeat` times on `frame` and returns the verdict and the
     /// kernel's average time per run, in nanoseconds.
     pub fn time(&self, frame: &[u8], repeat: u32) -> Result<(i32, u32), Error> {
-        test_run(self.prog_fd("avulse_ingress")?, frame, None, repeat)
+        test_run(self.prog_fd("avulse_ingress")?, frame, None, None, repeat)
     }
 
     /// The facts the last run on CPU `cpu` left.
@@ -790,9 +824,12 @@ fn test_run(
     prog: RawFd,
     frame: &[u8],
     ctx: Option<&SkbCtx>,
+    ctx_out: Option<&mut [u8; CTX_OUT]>,
     repeat: u32,
 ) -> Result<(i32, u32), Error> {
     let ctx = ctx.map(|c| c.to_bytes());
+    let (ctx_size_out, ctx_out) =
+        ctx_out.map_or((0, 0), |c| (c.len() as u32, c.as_mut_ptr() as u64));
     let mut attr = TestRunAttr {
         prog_fd: prog as u32,
         data_size_in: frame.len() as u32,
@@ -800,6 +837,8 @@ fn test_run(
         repeat,
         ctx_size_in: ctx.as_ref().map_or(0, |c| c.len() as u32),
         ctx_in: ctx.as_ref().map_or(0, |c| c.as_ptr() as u64),
+        ctx_size_out,
+        ctx_out,
         ..Default::default()
     };
     sys_bpf(BPF_PROG_TEST_RUN, &mut attr).map_err(|e| Error::Sys("BPF_PROG_TEST_RUN", e))?;

@@ -1,8 +1,8 @@
 //! Divert, modify and re-inject network packets on Linux, Windows and macOS.
 //!
-//! **Pre-alpha.** On Linux, handles receive packets at the NETWORK, NETWORK_FORWARD and ETHERNET
-//! layers (divert, sniff or drop), with eBPF programs on the TC hooks; sending comes next. Opening a
-//! handle needs `CAP_BPF` and `CAP_NET_ADMIN` (or root). Other platforms have no backend yet, so
+//! **Pre-alpha.** On Linux, handles divert, sniff, drop and send packets at the NETWORK,
+//! NETWORK_FORWARD and ETHERNET layers, with eBPF programs on the TC hooks. Opening a handle needs
+//! `CAP_BPF`, `CAP_NET_ADMIN` and `CAP_NET_RAW` (or root). Other platforms have no backend yet, so
 //! [`Handle::open`] returns [`Error::Unsupported`] there (see the
 //! [implementation plan](https://github.com/ffalcinelli/avulse/blob/main/docs/implementation-plan.md)).
 //!

@@ -1,5 +1,6 @@
 //! What the Linux backend does without privileges: records to addresses, the queue's limits, the
-//! registry's entries, and the TC priorities. `tests/capture.rs` runs the rest, as root, in a VM.
+//! registry's entries, the TC priorities, and how packets are sent back. `tests/capture.rs` runs
+//! the rest, as root, in a VM.
 
 use avulse_ebpf::abi::{RECORD_HEADER, Record};
 use avulse_ebpf::facts::{
@@ -12,6 +13,7 @@ use avulse_proto::{Link, checksum};
 use super::queue::Queue;
 use super::record::{self, Ctx, Entry};
 use super::registry;
+use super::send::{self, Path};
 use super::{after, sys, targets};
 use crate::{Address, Context, Error, Param};
 
@@ -285,4 +287,187 @@ fn interfaces() {
         Err(Error::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
         r => panic!("{:?}", r.map(|t| t.list)),
     }
+}
+
+/// A TCP segment over IPv4 (or IPv6) with `payload` bytes of data, checksums right.
+fn tcp_packet(v6: bool, payload: usize) -> Vec<u8> {
+    let mut tcp = vec![
+        0x30, 0x39, 0, 80, 0, 0, 0, 1, 0, 0, 0, 0, 0x50, 0x18, 0xff, 0xff,
+    ];
+    tcp.extend([0; 4]);
+    tcp.extend((0..payload).map(|i| i as u8));
+    let mut p = if v6 {
+        let mut h = vec![0x60, 0, 0, 0];
+        h.extend((tcp.len() as u16).to_be_bytes());
+        h.extend([6, 64]);
+        h.extend([0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        h.extend([0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        h
+    } else {
+        let mut h = vec![0x45, 0];
+        h.extend(((20 + tcp.len()) as u16).to_be_bytes());
+        h.extend([0, 1, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2]);
+        h
+    };
+    p.extend(tcp);
+    checksum::recalculate(&mut p, Link::Ip);
+    p
+}
+
+#[test]
+fn send_checks_packets() {
+    assert_eq!(send::ip_offset(&ping(), Layer::Network).unwrap(), Some(0));
+    assert_eq!(
+        send::ip_offset(&tcp_packet(true, 3), Layer::Network).unwrap(),
+        Some(0)
+    );
+    for bad in [&ping()[..19], &[0x60; 39], &[0x25; 40]] {
+        assert!(matches!(
+            send::ip_offset(bad, Layer::NetworkForward),
+            Err(Error::InvalidArgument(_))
+        ));
+    }
+    let tagged = frame(&[[0x81, 0, 0, 5]], [8, 0], &ping());
+    assert_eq!(send::ip_offset(&tagged, Layer::Ethernet).unwrap(), Some(18));
+    let arp = frame(&[], [8, 6], &[0, 1, 8, 0, 6, 4, 0, 1]);
+    assert_eq!(send::ip_offset(&arp, Layer::Ethernet).unwrap(), None);
+    assert!(send::ip_offset(&MAC, Layer::Ethernet).is_err());
+}
+
+#[test]
+fn send_paths() {
+    let lo = 1;
+    let flags = (F_ETH | F_IPV4 | F_ICMP) as u16;
+    let eth = frame(&[], [8, 0], &ping());
+    let path = |addr: &Address, pkt: &[u8], layer| send::path(layer, addr, pkt, lo).unwrap();
+
+    // Captured inbound: through lo to the interface, behind the header it came with.
+    let inbound = entry(&record(&eth, 14, 0, flags, 0), Layer::Network).unwrap();
+    let saved = Some(eth[..14].to_vec());
+    assert_eq!(
+        path(&inbound.addr, &inbound.data, Layer::Network),
+        Path::In {
+            ifindex: 7,
+            l2: saved.clone()
+        }
+    );
+    // Sent to another interface, the header does not apply.
+    let mut moved = inbound.addr;
+    moved.if_idx = 8;
+    assert_eq!(
+        path(&moved, &inbound.data, Layer::Network),
+        Path::In {
+            ifindex: 8,
+            l2: None
+        }
+    );
+    // An IPv6 packet behind an IPv4 header: the EtherType follows the packet.
+    let v6 = tcp_packet(true, 3);
+    let mut l2 = eth[..14].to_vec();
+    l2[12..].copy_from_slice(&[0x86, 0xdd]);
+    assert_eq!(
+        path(&inbound.addr, &v6, Layer::Network),
+        Path::In {
+            ifindex: 7,
+            l2: Some(l2)
+        }
+    );
+
+    // Captured outbound or forwarded: out of the interface; without its context, routed.
+    let outbound = entry(&record(&eth, 14, M_OUTBOUND, flags, 0), Layer::Network).unwrap();
+    let out = Path::Out {
+        ifindex: 7,
+        l2: eth[..14].to_vec(),
+    };
+    assert_eq!(path(&outbound.addr, &outbound.data, Layer::Network), out);
+    let mut forward = inbound.addr;
+    forward.layer = Layer::NetworkForward;
+    assert_eq!(path(&forward, &inbound.data, Layer::NetworkForward), out);
+    let mut built = Address::new(Layer::Network);
+    built.outbound = true;
+    built.if_idx = 7;
+    assert_eq!(path(&built, &ping(), Layer::Network), Path::Raw);
+
+    // Loopback, and inbound to no interface: routed.
+    let mut a = outbound.addr;
+    a.loopback = true;
+    assert_eq!(path(&a, &ping(), Layer::Network), Path::Raw);
+    a = Address::new(Layer::Network);
+    a.if_idx = lo;
+    assert_eq!(path(&a, &ping(), Layer::Network), Path::Raw);
+    assert_eq!(
+        path(&Address::new(Layer::Network), &ping(), Layer::Network),
+        Path::Raw
+    );
+
+    // ETHERNET: the frame as it is, out or in.
+    let mut a = Address::new(Layer::Ethernet);
+    assert!(send::path(Layer::Ethernet, &a, &eth, lo).is_err());
+    a.if_idx = 7;
+    assert_eq!(
+        path(&a, &eth, Layer::Ethernet),
+        Path::In {
+            ifindex: 7,
+            l2: Some(Vec::new())
+        }
+    );
+    a.outbound = true;
+    assert_eq!(
+        path(&a, &eth, Layer::Ethernet),
+        Path::Out {
+            ifindex: 7,
+            l2: Vec::new()
+        }
+    );
+}
+
+#[test]
+fn impostors_lose_a_hop() {
+    let mut p = ping();
+    send::decrement_ttl(&mut p).unwrap();
+    assert_eq!(p[8], 63);
+    assert!(checksum::verify(&p, Link::Ip).ipv4);
+    p[8] = 1;
+    match send::decrement_ttl(&mut p) {
+        Err(Error::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::HostUnreachable),
+        r => panic!("{r:?}"),
+    }
+    let mut p = tcp_packet(true, 3);
+    send::decrement_ttl(&mut p).unwrap();
+    assert_eq!(p[7], 63);
+}
+
+fn ne16(h: &[u8], at: usize) -> u16 {
+    u16::from_ne_bytes([h[at], h[at + 1]])
+}
+
+#[test]
+fn gso_headers() {
+    for v6 in [false, true] {
+        let pkt = tcp_packet(v6, 4000);
+        let ip_len = if v6 { 40 } else { 20 };
+        let mut f = frame(&[], if v6 { [0x86, 0xdd] } else { [8, 0] }, &pkt);
+        let h = send::gso(&mut f, 14, 1500, 0).unwrap();
+        assert_eq!(h[..2], [1, if v6 { 4 } else { 1 }]);
+        assert_eq!(ne16(&h, 2), (14 + ip_len + 20) as u16);
+        assert_eq!(ne16(&h, 4), (1500 - ip_len - 20) as u16);
+        assert_eq!((ne16(&h, 6), ne16(&h, 8)), ((14 + ip_len) as u16, 16));
+        // The checksum field holds the pseudo-header's sum, which the kernel completes.
+        let seg = &f[14 + ip_len..];
+        let addrs = if v6 { &pkt[8..40] } else { &pkt[12..20] };
+        let pseudo = checksum::sum(addrs, 6 + seg.len() as u64);
+        assert_eq!(
+            u16::from_be_bytes([seg[16], seg[17]]),
+            !checksum::finish(pseudo)
+        );
+        // The segment size it was captured with wins.
+        let h = send::gso(&mut f, 14, 1500, 1000).unwrap();
+        assert_eq!(ne16(&h, 4), 1000);
+    }
+    // Neither TCP nor UDP, or a fragment: no GSO.
+    let mut f = frame(&[], [8, 0], &ping());
+    assert_eq!(send::gso(&mut f, 14, 1500, 0), None);
+    let mut frag = tcp_packet(false, 100);
+    frag[6] = 0x20;
+    assert_eq!(send::gso(&mut frag, 0, 1500, 0), None);
 }

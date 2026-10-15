@@ -4,7 +4,8 @@
 //! - the verifier accepts every generated matcher, and the verdicts agree with the IR evaluator,
 //!   at the ETHERNET and NETWORK layers;
 //! - capture: records in the ring buffer, divert, sniff and drop, marks and priorities,
-//!   loopback, the NETWORK_FORWARD split, fragments, and failing open.
+//!   loopback, the NETWORK_FORWARD split, fragments, and failing open;
+//! - the redirect of inbound packets injected through `lo`.
 //!
 //! It needs root, so it runs only with `AVULSE_BPF=1`, in the Vagrant VMs:
 //!
@@ -30,6 +31,7 @@ use avulse_proto::{Link, Packet};
 
 const TC_ACT_SHOT: i32 = 2;
 const TC_ACT_STOLEN: i32 = 4;
+const TC_ACT_REDIRECT: i32 = 7;
 const TC_ACT_UNSPEC: i32 = -1;
 
 /// The device `BPF_PROG_TEST_RUN` uses when the context names none: the loopback device.
@@ -341,8 +343,7 @@ fn marks_and_priorities() {
     // Injected by a handle of the same or a lower priority (TC priority 100 or more): skipped.
     assert_eq!(run(&tc, abi::MARK_INJECTED | 100), TC_ACT_UNSPEC);
     assert_eq!(run(&tc, abi::MARK_INJECTED | 150), TC_ACT_UNSPEC);
-    // Inbound injections on their way through lo: skipped by everyone.
-    assert_eq!(run(&tc, abi::MARK_REDIRECT | 3), TC_ACT_UNSPEC);
+    // Inbound injections on their way through lo are redirected (`injected_inbound_is_redirected`).
     assert!(tc.records().is_empty());
     // Injected by a higher-priority handle: seen, as an impostor.
     assert_eq!(run(&tc, abi::MARK_INJECTED | 50), TC_ACT_STOLEN);
@@ -353,6 +354,50 @@ fn marks_and_priorities() {
     assert_eq!(run(&tc, 0x4d49_0064), TC_ACT_STOLEN);
     let records = tc.records();
     assert_eq!(Record::parse(&records[0]).unwrap().meta, 0);
+}
+
+#[test]
+fn injected_inbound_is_redirected() {
+    if !enabled() {
+        return;
+    }
+    let mut tc = classifier("udp", &config(Layer::Network, 0));
+    let frame = dns();
+    let sent = SkbCtx {
+        mark: abi::MARK_REDIRECT | 7,
+        priority: abi::PRIO_INJECTED | 120,
+        ..SkbCtx::default()
+    };
+    // On lo's ingress: to interface 7, as a packet injected at TC priority 120.
+    let (verdict, out) = tc.run_ctx(Hook::Ingress, &frame, &sent).unwrap();
+    assert_eq!(verdict, TC_ACT_REDIRECT);
+    assert_eq!((out.mark, out.priority), (abi::MARK_INJECTED | 120, 0));
+    // A priority that is not ours: injected at TC priority 0, an impostor to every handle.
+    let (verdict, out) = tc
+        .run_ctx(
+            Hook::Ingress,
+            &frame,
+            &SkbCtx {
+                priority: 6,
+                ..sent
+            },
+        )
+        .unwrap();
+    assert_eq!((verdict, out.mark), (TC_ACT_REDIRECT, abi::MARK_INJECTED));
+    // Whatever the handle's configuration.
+    tc.set_config(&config(Layer::Network, abi::CFG_SHUTDOWN))
+        .unwrap();
+    assert_eq!(
+        tc.run_ctx(Hook::Ingress, &frame, &sent).unwrap().0,
+        TC_ACT_REDIRECT
+    );
+    // On lo's egress, on its way there: skipped.
+    tc.set_config(&config(Layer::Network, 0)).unwrap();
+    assert_eq!(
+        tc.run_on(Hook::Egress, &frame, &sent).unwrap(),
+        TC_ACT_UNSPEC
+    );
+    assert!(tc.records().is_empty());
 }
 
 #[test]

@@ -1,9 +1,10 @@
-//! The system calls the backend makes directly: the clock, `eventfd`, `epoll`, `flock`, and what
-//! `/proc` and `/sys` say about processes and interfaces.
+//! The system calls the backend makes directly: the clock, `eventfd`, `epoll`, `flock`, the
+//! sockets that inject packets, and what `/proc` and `/sys` say about processes and interfaces.
 
 use std::ffi::CStr;
 use std::fs;
 use std::io;
+use std::net::IpAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::path::Path;
 
@@ -215,4 +216,160 @@ pub fn interfaces() -> io::Result<Vec<Interface>> {
         libc::if_freenameindex(list);
     }
     Ok(out)
+}
+
+/// The memory page size.
+pub fn page_size() -> usize {
+    // SAFETY: no pointers.
+    let n = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if n > 0 { n as usize } else { 4096 }
+}
+
+/// What a sysfs attribute of interface `name` holds, trimmed.
+fn net_attr(name: &str, attr: &str) -> Option<String> {
+    let s = fs::read_to_string(format!("/sys/class/net/{name}/{attr}")).ok()?;
+    Some(s.trim().to_owned())
+}
+
+/// The MTU of interface `name`.
+pub fn mtu(name: &str) -> Option<u32> {
+    net_attr(name, "mtu")?.parse().ok()
+}
+
+/// The hardware address of interface `name`, if it is a 6-byte (Ethernet) one.
+pub fn mac(name: &str) -> Option<[u8; 6]> {
+    let s = net_attr(name, "address")?;
+    let mut mac = [0; 6];
+    let mut parts = s.split(':');
+    for b in &mut mac {
+        *b = u8::from_str_radix(parts.next()?, 16).ok()?;
+    }
+    parts.next().is_none().then_some(mac)
+}
+
+fn set_option(fd: &OwnedFd, level: libc::c_int, name: libc::c_int, v: u32) -> io::Result<()> {
+    // SAFETY: passes a valid u32 and its size.
+    check(unsafe {
+        libc::setsockopt(
+            fd.as_raw_fd(),
+            level,
+            name,
+            (&v as *const u32).cast(),
+            size_of::<u32>() as libc::socklen_t,
+        )
+    })
+    .map(drop)
+}
+
+/// A raw IP socket (`IPPROTO_RAW`: the packets carry their IP header) whose packets carry `mark`.
+pub fn raw_socket(v6: bool, mark: u32) -> io::Result<OwnedFd> {
+    let domain = if v6 { libc::AF_INET6 } else { libc::AF_INET };
+    // SAFETY: no pointers.
+    let fd = owned(unsafe {
+        libc::socket(
+            domain,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            libc::IPPROTO_RAW,
+        )
+    })?;
+    set_option(&fd, libc::SOL_SOCKET, libc::SO_MARK, mark)?;
+    Ok(fd)
+}
+
+/// An `AF_PACKET` socket that only sends: frames start with a `virtio_net_hdr`
+/// (`PACKET_VNET_HDR`), and carry `mark`, and `priority` when given.
+pub fn packet_socket(mark: u32, priority: Option<u32>) -> io::Result<OwnedFd> {
+    // Protocol 0: it receives nothing.
+    // SAFETY: no pointers.
+    let fd =
+        owned(unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW | libc::SOCK_CLOEXEC, 0) })?;
+    set_option(&fd, libc::SOL_SOCKET, libc::SO_MARK, mark)?;
+    set_option(&fd, libc::SOL_PACKET, libc::PACKET_VNET_HDR, 1)?;
+    if let Some(p) = priority {
+        set_option(&fd, libc::SOL_SOCKET, libc::SO_PRIORITY, p)?;
+    }
+    Ok(fd)
+}
+
+fn sent(n: isize, len: usize) -> io::Result<()> {
+    if n < 0 {
+        Err(io::Error::last_os_error())
+    } else if n as usize != len {
+        Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "the packet was sent in part",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Sends an IP packet on a raw socket, to `dst` (its destination) in `scope` (an interface
+/// index, for IPv6 link-local and loopback destinations).
+pub fn send_ip(fd: BorrowedFd<'_>, packet: &[u8], dst: IpAddr, scope: u32) -> io::Result<()> {
+    let n = match dst {
+        IpAddr::V4(a) => {
+            // SAFETY: all zeros is a valid sockaddr_in.
+            let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            sa.sin_family = libc::AF_INET as libc::sa_family_t;
+            sa.sin_addr.s_addr = u32::from_ne_bytes(a.octets());
+            // SAFETY: `packet` and `sa` are valid for the call.
+            unsafe {
+                libc::sendto(
+                    fd.as_raw_fd(),
+                    packet.as_ptr().cast(),
+                    packet.len(),
+                    0,
+                    (&sa as *const libc::sockaddr_in).cast(),
+                    size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                )
+            }
+        }
+        IpAddr::V6(a) => {
+            // SAFETY: all zeros is a valid sockaddr_in6.
+            let mut sa: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+            sa.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            sa.sin6_addr.s6_addr = a.octets();
+            sa.sin6_scope_id = scope;
+            // SAFETY: `packet` and `sa` are valid for the call.
+            unsafe {
+                libc::sendto(
+                    fd.as_raw_fd(),
+                    packet.as_ptr().cast(),
+                    packet.len(),
+                    0,
+                    (&sa as *const libc::sockaddr_in6).cast(),
+                    size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+                )
+            }
+        }
+    };
+    sent(n, packet.len())
+}
+
+/// Sends a frame (a `virtio_net_hdr`, then the link-layer header) on an `AF_PACKET` socket,
+/// through interface `ifindex`. `ethertype` is the frame's outer EtherType.
+pub fn send_frame(
+    fd: BorrowedFd<'_>,
+    frame: &[u8],
+    ifindex: u32,
+    ethertype: u16,
+) -> io::Result<()> {
+    // SAFETY: all zeros is a valid sockaddr_ll.
+    let mut sa: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
+    sa.sll_family = libc::AF_PACKET as u16;
+    sa.sll_protocol = ethertype.to_be();
+    sa.sll_ifindex = ifindex as libc::c_int;
+    // SAFETY: `frame` and `sa` are valid for the call.
+    let n = unsafe {
+        libc::sendto(
+            fd.as_raw_fd(),
+            frame.as_ptr().cast(),
+            frame.len(),
+            0,
+            (&sa as *const libc::sockaddr_ll).cast(),
+            size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+        )
+    };
+    sent(n, frame.len())
 }

@@ -125,9 +125,14 @@ pub const MARK_MASK: u32 = 0xffff_0000;
 /// `MARK_INJECTED | tc_priority` marks an injected packet. Handles of the same or a higher
 /// priority skip it; lower ones see an impostor.
 pub const MARK_INJECTED: u32 = 0x4156_0000;
-/// `MARK_REDIRECT | ifindex` marks an inbound packet sent through `lo`, for the `lo` ingress
-/// hook to redirect. Every handle skips it.
+/// `MARK_REDIRECT | ifindex` marks an inbound packet sent through `lo`, with `skb->priority` set
+/// to [`PRIO_INJECTED`]` | tc_priority`. Every handle skips it on `lo`'s egress; on `lo`'s ingress,
+/// the first handle's program marks it `MARK_INJECTED | tc_priority` and redirects it to the
+/// ingress of interface `ifindex`.
 pub const MARK_REDIRECT: u32 = 0x4157_0000;
+/// The upper half of `skb->priority` of an inbound packet sent through `lo` ([`MARK_REDIRECT`]);
+/// the lower half is the TC priority of the handle that sent it.
+pub const PRIO_INJECTED: u32 = 0x4158_0000;
 
 #[cfg(test)]
 mod tests {

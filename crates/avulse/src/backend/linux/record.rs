@@ -43,8 +43,6 @@ impl Ctx {
     const L2_AT: usize = 12;
 
     /// The saved link-layer header (empty at the ETHERNET layer, whose packets carry theirs).
-    // Step 9 (injection) reads it.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn l2(&self) -> &[u8] {
         &self.l2[..self.l2_len as usize]
     }
@@ -62,8 +60,6 @@ impl Ctx {
 
     /// The context of a captured packet; `None` for an empty one (a packet the application
     /// built), or one this backend did not make.
-    // Step 9 (injection) reads it.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn decode(c: &Context) -> Option<Ctx> {
         let b = c.as_bytes();
         if b[0] != Self::MAGIC || b[1] as usize > Self::L2_MAX {

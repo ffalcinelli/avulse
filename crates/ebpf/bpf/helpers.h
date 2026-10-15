@@ -26,6 +26,7 @@ static void *(*bpf_ringbuf_reserve)(void *ringbuf, __u64 size,
                                     __u64 flags) = (void *)BPF_FUNC_ringbuf_reserve;
 static void (*bpf_ringbuf_submit)(void *data, __u64 flags) = (void *)BPF_FUNC_ringbuf_submit;
 static void (*bpf_ringbuf_discard)(void *data, __u64 flags) = (void *)BPF_FUNC_ringbuf_discard;
+static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *)BPF_FUNC_redirect;
 static long (*bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params, int plen,
                               __u32 flags) = (void *)BPF_FUNC_fib_lookup;
 

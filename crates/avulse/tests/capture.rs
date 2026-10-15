@@ -1,5 +1,6 @@
-//! The Linux backend on real traffic: a veth pair with one end in a network namespace, and
-//! `ping` across it.
+//! The Linux backend on real traffic: a veth pair with one end in a network namespace, `ping`
+//! across it, and a UDP and TCP server in the namespace (the [`peer_server`] test, in a child
+//! process).
 //!
 //! It needs root and changes the network configuration, so it runs only with `AVULSE_BPF=1`, in
 //! the Vagrant VMs, one test at a time:
@@ -13,9 +14,11 @@
 
 #![cfg(target_os = "linux")]
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Shutdown as NetShutdown, TcpListener, TcpStream, UdpSocket};
 use std::os::fd::AsRawFd;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,6 +33,9 @@ const HOST: &str = "10.199.0.1";
 const PEER: &str = "10.199.0.2";
 /// What the tests divert or copy: pings between the two ends.
 const PINGS: &str = "icmp and ip.addr == 10.199.0.2";
+/// The peer server's UDP echo port and TCP sink port.
+const ECHO_PORT: u16 = 9001;
+const SINK_PORT: u16 = 9002;
 
 fn enabled() -> bool {
     if std::env::var_os("AVULSE_BPF").is_some() {
@@ -200,7 +206,7 @@ fn sniff_pings() {
 }
 
 /// Filters the code generator cannot compile take every packet of the layer in the kernel, and
-/// user space keeps the matching ones.
+/// user space keeps the matching ones; it reinjects the others when the handle diverts.
 #[test]
 fn user_space_filters() {
     if !enabled() {
@@ -209,17 +215,38 @@ fn user_space_filters() {
     let _veth = Veth::new();
     let filter = format!("{PINGS} and outbound");
     assert!(!exact(&filter));
-    assert!(matches!(
-        OpenOptions::new()
-            .interfaces([HOST_IF])
-            .open(&filter, Layer::Network),
-        Err(Error::Unsupported(_))
-    ));
     let h = open(&filter, Layer::Network, 0, Flags::SNIFF);
     assert!(ping(3));
     let got = drain(&h);
     assert_eq!(got.len(), 3, "{got:?}");
     assert!(got.iter().all(|(p, a)| a.outbound && icmp(p).0 == 8));
+    drop(h);
+
+    // Diverting: the replies do not match and go back at once; the requests come to the handle.
+    let h = open(&filter, Layer::Network, 0, Flags::NONE);
+    let (ok, got) = forwarding(&h, |_, _| {}, || ping(3));
+    assert!(ok);
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert!(got.iter().all(|(p, a)| a.outbound && icmp(p).0 == 8));
+    drop(h);
+
+    // Dropping the matching packets only: the requests go out, and the peer replies (as a handle
+    // that runs before sees), but the replies are dropped.
+    let h = open(
+        &format!("{PINGS} and inbound"),
+        Layer::Network,
+        0,
+        Flags::DROP,
+    );
+    let before = open(PINGS, Layer::Network, 100, Flags::SNIFF);
+    before.set_param(Param::QueueTime, 16_000).unwrap();
+    assert!(!ping(2));
+    assert!(drain(&h).is_empty());
+    let seen = drain(&before);
+    assert_eq!(seen.len(), 4, "{seen:?}");
+    assert!(seen.iter().any(|(p, a)| icmp(p).0 == 0 && !a.outbound));
+    drop(h);
+    assert!(ping(1));
 }
 
 #[test]
@@ -352,6 +379,343 @@ fn priorities() {
     assert!(ping(1));
     for h in [&a, &b, &c, &d, &e] {
         assert_eq!(drain(h).len(), 2);
+    }
+}
+
+/// Runs `f` while a thread receives every packet of `h`, passes it to `edit`, and sends it back.
+/// Returns what `f` returns, and what the thread received (before `edit`).
+fn forwarding<R>(
+    h: &Handle,
+    edit: impl Fn(&mut Vec<u8>, &mut Address) + Sync,
+    f: impl FnOnce() -> R,
+) -> (R, Vec<(Vec<u8>, Address)>) {
+    let stop = AtomicBool::new(false);
+    thread::scope(|s| {
+        let t = s.spawn(|| {
+            let mut buf = vec![0; MAX_PACKET_LEN];
+            let mut seen = Vec::new();
+            while !stop.load(Ordering::Relaxed) {
+                match h.recv_timeout(&mut buf, Duration::from_millis(100)) {
+                    Ok((n, addr)) => {
+                        seen.push((buf[..n].to_vec(), addr));
+                        let (mut p, mut a) = (buf[..n].to_vec(), addr);
+                        edit(&mut p, &mut a);
+                        h.send(&p, &a).unwrap_or_else(|e| panic!("send: {e}"));
+                    }
+                    Err(Error::Timeout) => {}
+                    Err(e) => panic!("recv: {e}"),
+                }
+            }
+            seen
+        });
+        let r = f();
+        // What is still on its way.
+        thread::sleep(Duration::from_millis(300));
+        stop.store(true, Ordering::Relaxed);
+        (r, t.join().unwrap())
+    })
+}
+
+/// An IPv4 UDP datagram, its checksums left to compute.
+fn udp_packet(src: &str, sport: u16, dst: &str, dport: u16, payload: &[u8]) -> Vec<u8> {
+    let ip = |a: &str| a.parse::<std::net::Ipv4Addr>().unwrap().octets();
+    let len = 28 + payload.len();
+    let mut p = vec![0x45, 0];
+    p.extend((len as u16).to_be_bytes());
+    p.extend([0, 0, 0x40, 0, 64, 17, 0, 0]);
+    p.extend(ip(src));
+    p.extend(ip(dst));
+    p.extend(sport.to_be_bytes());
+    p.extend(dport.to_be_bytes());
+    p.extend(((8 + payload.len()) as u16).to_be_bytes());
+    p.extend([0, 0]);
+    p.extend(payload);
+    p
+}
+
+fn udp_socket(addr: &str) -> UdpSocket {
+    let s = UdpSocket::bind(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    s
+}
+
+/// Diverted and sent back unchanged, pings work, in both directions: the requests go out of the
+/// interface behind their saved Ethernet header, the replies come in through `lo`'s redirect.
+#[test]
+fn reinject_pings() {
+    if !enabled() {
+        return;
+    }
+    let _veth = Veth::new();
+    let h = open(PINGS, Layer::Network, 0, Flags::NONE);
+    let (ok, got) = forwarding(&h, |_, _| {}, || ping(3));
+    assert!(ok);
+    // Each packet once: the handle does not see what it sends.
+    let requests = got.iter().filter(|(p, _)| icmp(p).0 == 8).count();
+    let replies: Vec<_> = got.iter().filter(|(p, _)| icmp(p).0 == 0).collect();
+    assert_eq!((requests, replies.len()), (3, 3), "{got:?}");
+    assert!(got.iter().all(|(_, a)| !a.impostor && !a.sniffed));
+    assert!(replies.iter().all(|(_, a)| !a.outbound));
+}
+
+/// The ETHERNET layer sends frames back as they are.
+#[test]
+fn reinject_frames() {
+    if !enabled() {
+        return;
+    }
+    let _veth = Veth::new();
+    let h = open(PINGS, Layer::Ethernet, 0, Flags::NONE);
+    let (ok, got) = forwarding(&h, |_, _| {}, || ping(3));
+    assert!(ok);
+    assert_eq!(got.len(), 6, "{got:?}");
+}
+
+/// A diverted datagram is sent on to another port: the peer answers from that port.
+#[test]
+fn modify_outbound() {
+    if !enabled() {
+        return;
+    }
+    let _veth = Veth::new();
+    let _peer = PeerServer::start();
+    let h = open(
+        &format!("udp.dstport == 9000 and ip.dst == {PEER}"),
+        Layer::Network,
+        0,
+        Flags::NONE,
+    );
+    let edit = |p: &mut Vec<u8>, a: &mut Address| {
+        p[22..24].copy_from_slice(&ECHO_PORT.to_be_bytes());
+        a.udp_checksum = false;
+    };
+    let ((n, from, data), got) = forwarding(&h, edit, || {
+        let s = udp_socket(&format!("{HOST}:0"));
+        s.send_to(b"hello", format!("{PEER}:9000")).unwrap();
+        let mut buf = [0; 64];
+        let (n, from) = s.recv_from(&mut buf).expect("the echo");
+        (n, from, buf)
+    });
+    assert_eq!(&data[..n], b"hello");
+    assert_eq!(from.to_string(), format!("{PEER}:{ECHO_PORT}"));
+    assert_eq!(got.len(), 1);
+}
+
+/// A SEND_ONLY handle injects a datagram the application built: inbound (through `lo`, to the
+/// veth's address), and outbound (routed).
+#[test]
+fn inject_built_packets() {
+    if !enabled() {
+        return;
+    }
+    let _veth = Veth::new();
+    let _peer = PeerServer::start();
+    let h = open("ip", Layer::Network, 0, Flags::SEND_ONLY);
+    // On lo's ingress only, for the redirect.
+    let lo = output("tc filter show dev lo ingress");
+    assert!(lo.contains("avulse_ingress"), "{lo}");
+    assert!(tc_priorities().is_empty());
+
+    let host = udp_socket(&format!("{HOST}:7000"));
+    let mut addr = Address::new(Layer::Network);
+    addr.if_idx = Veth::ifindex();
+    let pkt = udp_packet(PEER, 5555, HOST, 7000, b"inbound");
+    assert_eq!(h.send(&pkt, &addr).unwrap(), pkt.len());
+    let mut buf = [0; 64];
+    let (n, from) = host.recv_from(&mut buf).expect("the inbound datagram");
+    assert_eq!(
+        (&buf[..n], from.to_string()),
+        (&b"inbound"[..], format!("{PEER}:5555"))
+    );
+
+    let mut addr = Address::new(Layer::Network);
+    addr.outbound = true;
+    let pkt = udp_packet(HOST, 7000, PEER, ECHO_PORT, b"outbound");
+    h.send(&pkt, &addr).unwrap();
+    let (n, from) = host.recv_from(&mut buf).expect("the echo");
+    assert_eq!(
+        (&buf[..n], from.to_string()),
+        (&b"outbound"[..], format!("{PEER}:{ECHO_PORT}"))
+    );
+
+    // Not a packet.
+    assert!(matches!(
+        h.send(&[0x45; 10], &addr),
+        Err(Error::InvalidArgument(_))
+    ));
+    drop(h);
+    assert!(!output("tc filter show dev lo ingress").contains("avulse"));
+}
+
+/// Loopback packets, IPv4 and IPv6, are seen once and go back through raw sockets.
+#[test]
+fn loopback() {
+    if !enabled() {
+        return;
+    }
+    let h = OpenOptions::new()
+        .interfaces(["lo"])
+        .open("udp.dstport == 7002", Layer::Network)
+        .unwrap();
+    let v4 = udp_socket("127.0.0.1:7002");
+    let v6 = udp_socket("[::1]:7002");
+    let (_, got) = forwarding(
+        &h,
+        |_, _| {},
+        || {
+            let mut buf = [0; 64];
+            for (server, to) in [(&v4, "127.0.0.1:7002"), (&v6, "[::1]:7002")] {
+                let c = udp_socket(if to.starts_with('[') {
+                    "[::1]:0"
+                } else {
+                    "127.0.0.1:0"
+                });
+                c.send_to(b"lo", to).unwrap();
+                let (n, _) = server.recv_from(&mut buf).expect("the datagram");
+                assert_eq!(&buf[..n], b"lo");
+            }
+        },
+    );
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(got.iter().all(|(_, a)| a.loopback && a.outbound));
+    assert_eq!(got.iter().filter(|(_, a)| a.ipv6).count(), 1);
+}
+
+/// A bulk TCP transfer through a diverting handle: the stack hands it packets larger than the
+/// MTU (GSO), which go back out as GSO packets.
+#[test]
+fn bulk_tcp() {
+    if !enabled() {
+        return;
+    }
+    let _veth = Veth::new();
+    let _peer = PeerServer::start();
+    let h = open(
+        &format!("tcp.port == {SINK_PORT}"),
+        Layer::Network,
+        0,
+        Flags::NONE,
+    );
+    const BYTES: usize = 8 << 20;
+    let (reply, got) = forwarding(
+        &h,
+        |_, _| {},
+        || {
+            let mut s = TcpStream::connect((PEER, SINK_PORT)).unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+            let chunk = vec![0x5a; 1 << 16];
+            for _ in 0..BYTES / chunk.len() {
+                s.write_all(&chunk).unwrap();
+            }
+            s.shutdown(NetShutdown::Write).unwrap();
+            let mut reply = String::new();
+            s.read_to_string(&mut reply).unwrap();
+            reply
+        },
+    );
+    assert_eq!(reply, BYTES.to_string());
+    let big = got.iter().filter(|(p, _)| p.len() > 1500).count();
+    assert!(big > 0, "no GSO packet among {}", got.len());
+}
+
+/// Two diverting handles: the higher-priority one sees each packet first, and what it sends
+/// back reaches the other as an impostor, once.
+#[test]
+fn priority_chaining() {
+    if !enabled() {
+        return;
+    }
+    let _veth = Veth::new();
+    let first = open(PINGS, Layer::Network, 100, Flags::NONE);
+    let second = open(PINGS, Layer::Network, -100, Flags::NONE);
+    let last = open(PINGS, Layer::Network, -200, Flags::SNIFF);
+    last.set_param(Param::QueueTime, 16_000).unwrap();
+    let ((ok, a), b) = forwarding(
+        &second,
+        |_, _| {},
+        || forwarding(&first, |_, _| {}, || ping(2)),
+    );
+    assert!(ok);
+    assert_eq!((a.len(), b.len()), (4, 4), "{a:?} {b:?}");
+    assert!(a.iter().all(|(_, a)| !a.impostor));
+    assert!(b.iter().all(|(_, a)| a.impostor));
+    // The last handle sees what the second sent: impostors, with one hop less.
+    let c = drain(&last);
+    assert_eq!(c.len(), 4, "{c:?}");
+    for ((p, _), (q, a)) in b.iter().zip(&c) {
+        assert!(a.impostor);
+        assert_eq!(q[8], p[8] - 1);
+    }
+}
+
+/// The UDP echo and TCP sink of the peer, in the network namespace, killed when dropped.
+struct PeerServer(Child);
+
+impl PeerServer {
+    fn start() -> PeerServer {
+        let exe = std::env::current_exe().unwrap();
+        let mut child = Command::new("ip")
+            .args(["netns", "exec", NETNS])
+            .arg(exe)
+            .args(["--exact", "peer_server", "--nocapture", "--test-threads=1"])
+            .env("AVULSE_PEER", "1")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let out = BufReader::new(child.stdout.take().unwrap());
+        for line in out.lines() {
+            if line.unwrap().ends_with("peer ready") {
+                return PeerServer(child);
+            }
+        }
+        let status = child.wait().unwrap();
+        panic!("the peer server ended: {status}");
+    }
+}
+
+impl Drop for PeerServer {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The child process of [`PeerServer`], in the namespace: echoes UDP datagrams on
+/// [`ECHO_PORT`], and answers each TCP connection on [`SINK_PORT`] with the number of bytes it
+/// received.
+#[test]
+fn peer_server() {
+    if std::env::var_os("AVULSE_PEER").is_none() {
+        return;
+    }
+    let udp = UdpSocket::bind(("0.0.0.0", ECHO_PORT)).unwrap();
+    let tcp = TcpListener::bind(("0.0.0.0", SINK_PORT)).unwrap();
+    thread::spawn(move || {
+        let mut buf = [0; 2048];
+        loop {
+            let (n, from) = udp.recv_from(&mut buf).unwrap();
+            udp.send_to(&buf[..n], from).unwrap();
+        }
+    });
+    thread::spawn(move || {
+        for s in tcp.incoming() {
+            let mut s = s.unwrap();
+            thread::spawn(move || {
+                let mut buf = vec![0; 1 << 16];
+                let mut total = 0;
+                loop {
+                    match s.read(&mut buf).unwrap() {
+                        0 => break,
+                        n => total += n,
+                    }
+                }
+                s.write_all(total.to_string().as_bytes()).unwrap();
+            });
+        }
+    });
+    println!("peer ready");
+    loop {
+        thread::sleep(Duration::from_secs(60));
     }
 }
 

@@ -451,7 +451,10 @@ fn handles_are_send_and_sync() {
 fn the_linux_backend() {
     for layer in [Layer::Network, Layer::NetworkForward, Layer::Ethernet] {
         let s = capabilities().layer(layer);
-        assert!(s.open && s.divert && s.drop && !s.inject, "{layer:?}");
+        assert!(
+            s.open && s.divert && s.drop && s.inject && s.modify,
+            "{layer:?}"
+        );
     }
     assert_eq!(capabilities().layer(Layer::Flow), LayerSupport::default());
     // Refused before anything is loaded, so this needs no privileges.

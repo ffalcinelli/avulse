@@ -327,6 +327,34 @@ fn verify_finds_correct_checksums() {
 }
 
 #[test]
+fn recalculate_only_what_is_asked() {
+    let tcp_pkt = ipv4(ip_proto::TCP, 0, &tcp(1234, 80, Tcp::ACK, b"GET /"));
+    let mut pkt = tcp_pkt.clone();
+    let none = checksum::recalculate_only(&mut pkt, Link::Ip, Updated::default());
+    assert_eq!((none, &pkt), (Updated::default(), &tcp_pkt));
+    let tcp_only = Updated {
+        tcp: true,
+        ..Updated::default()
+    };
+    assert_eq!(
+        checksum::recalculate_only(&mut pkt, Link::Ip, tcp_only),
+        tcp_only
+    );
+    assert_eq!(checksum::verify(&pkt, Link::Ip), tcp_only);
+    // Asking for another protocol's checksum changes nothing.
+    let mut pkt = tcp_pkt.clone();
+    let udp_only = Updated {
+        udp: true,
+        ..Updated::default()
+    };
+    assert_eq!(
+        checksum::recalculate_only(&mut pkt, Link::Ip, udp_only),
+        Updated::default()
+    );
+    assert_eq!(pkt, tcp_pkt);
+}
+
+#[test]
 fn recalculate_skips_fragments() {
     let mut pkt = ipv4(ip_proto::UDP, 0x2000, &udp(1, 2, &[0; 8]));
     let u = checksum::recalculate(&mut pkt, Link::Ip);

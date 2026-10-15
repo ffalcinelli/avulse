@@ -10,6 +10,8 @@
  * Everything fails open: without a configuration, a matcher or room in the ring, or once the
  * owner's heartbeat is stale, packets pass (TC_ACT_UNSPEC, so the next classifier runs).
  *
+ * `avulse_ingress` also redirects the inbound packets that user space injects through lo.
+ *
  * Headers are read with bpf_skb_load_bytes, which also reads paged (non-linear) data. The
  * programs are in "classifier" sections, the name aya knows for cls_bpf programs.
  */
@@ -348,9 +350,30 @@ static __always_inline int classify(struct __sk_buff *skb, int outbound)
     return TC_ACT_UNSPEC;
 }
 
+/*
+ * Inbound injection: user space sends the frame through lo with MARK_REDIRECT | target ifindex
+ * and skb->priority PRIO_INJECTED | tc_priority (AF_PACKET can only transmit). On lo's ingress
+ * the first handle's program, whatever its configuration, moves the TC priority into the mark
+ * (the redirect clears skb->priority) and hands the frame to the target's ingress, where every
+ * handle sees an injected packet.
+ */
+static __always_inline int redirect_injected(struct __sk_buff *skb, __u32 mark)
+{
+    __u32 prio = skb->priority;
+
+    prio = (prio & MARK_MASK) == PRIO_INJECTED ? prio & 0xffff : 0;
+    skb->mark = MARK_INJECTED | prio;
+    skb->priority = 0;
+    return bpf_redirect(mark & 0xffff, BPF_F_INGRESS);
+}
+
 SEC("classifier")
 int avulse_ingress(struct __sk_buff *skb)
 {
+    __u32 mark = skb->mark;
+
+    if ((mark & MARK_MASK) == MARK_REDIRECT)
+        return redirect_injected(skb, mark);
     return classify(skb, 0);
 }
 

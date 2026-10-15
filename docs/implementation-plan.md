@@ -5,19 +5,19 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-15, Steps 1 to 8 and Spikes A and B done, Spike C deferred; next: Step 9)
+## Status (2026-10-15, Steps 1 to 9 and Spikes A and B done, Spike C deferred; next: Step 10)
 
 | Area | State |
 | --- | --- |
-| `crates/proto` (`avulse-proto`) | Done for Phase 1. Zero-copy `no_std` parsing: Ethernet, 2 VLAN tags, ARP, IPv4, IPv6 (8 extension headers, fragments), TCP (options: `Tcp::option_iter`, `option`), UDP, ICMP, ICMPv6. Checksum recalculation and verification (`checksum::verify`). 14 tests, including all truncations and random input. |
+| `crates/proto` (`avulse-proto`) | Done for Phase 1. Zero-copy `no_std` parsing: Ethernet, 2 VLAN tags, ARP, IPv4, IPv6 (8 extension headers, fragments), TCP (options: `Tcp::option_iter`, `option`), UDP, ICMP, ICMPv6. Checksum recalculation (all, or `checksum::recalculate_only`) and verification (`checksum::verify`). 15 tests, including all truncations and random input. |
 | `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. Wireshark 4.6 syntax covered: quantifiers, arithmetic, layers, value labels, `@field`, `&` on bytes, multi-range slices, `upper`/`lower`, and `matches` (optional `regex` feature). Semantics validated against tshark 4.6/4.7 (`src/tests/tshark.rs`, including every field's byte span against PDML). Bytecode, verifier and `no_std` interpreter (`bytecode/`), sharing the value operations in `value.rs` with the IR evaluator. WinDivert 2.2 front-end (`windivert/`), passing WinDivert's 241 vectors through the IR, the bytecode and the native round trip; `ir::Test::native()` prints native syntax. Nesting is bounded (native 64 levels, 4 macro levels; WinDivert 341 parentheses). TCP options: `tcp.options`, `.mss`, `.mss_val`, `.wscale`, `.wscale.shift`, `.wscale.multiplier`, `.sack_perm`, `.timestamp`, `.tsval`, `.tsecr`. 76 unit tests, 9 tshark tests (opt-in) and doctests. |
 | `crates/cli` (`avulse`) | `avulse filter check \| fmt \| explain [--bytecode] \| eval --hex … \| convert [--layer …] \| fields [--format markdown]`. Exit codes: 0 match, 1 no match, 2 error. `avulse cleanup` reaps the handles of dead processes (Linux, root). |
 | `fuzz/` | cargo-fuzz targets `bytecode` (verifier and interpreter on arbitrary programs), `filter` (parser, `fmt` round trip, checker, evaluator, bytecode agreement) and `windivert` (front-end, bytecode and native agreement). Outside the workspace. |
 | `crates/wasm` (`avulse-wasm`) | The filter engine for the website's playground (wasm-bindgen, `publish = false`). |
 | Docs and website | README (front page), guide (`book/`, mdBook), `site/` with the playground, rustdoc and pdoc, built by `scripts/build-site.sh` and deployed by `pages.yml` to <https://ffalcinelli.github.io/avulse/>. Every public item is documented (`missing_docs`). |
-| `crates/ebpf` (`avulse-ebpf`) | Step 8: the loader attaches through Netlink (`Classifier::attach`, `Attachment::detach`) and opens raw BPF hash maps (`HashMap`, for the registry). Step 7: the capture side of the static TC programs (`avulse_ingress`/`avulse_egress` → matcher → `avulse_act`): per-handle configuration, metadata facts, ring buffer records, divert/sniff/drop, marks, loopback, NETWORK/FORWARD/ETHERNET selection, fragments, the forwarding check, fail-open; `abi.rs` mirrors `bpf/abi.h`. Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Needs clang on Linux. |
+| `crates/ebpf` (`avulse-ebpf`) | Step 9: `avulse_ingress` redirects the inbound packets user space injects through `lo` (`MARK_REDIRECT`, `PRIO_INJECTED`); test runs return the context (`Classifier::run_ctx`). Step 8: the loader attaches through Netlink (`Classifier::attach`, `Attachment::detach`) and opens raw BPF hash maps (`HashMap`, for the registry). Step 7: the capture side of the static TC programs (`avulse_ingress`/`avulse_egress` → matcher → `avulse_act`): per-handle configuration, metadata facts, ring buffer records, divert/sniff/drop, marks, loopback, NETWORK/FORWARD/ETHERNET selection, fragments, the forwarding check, fail-open; `abi.rs` mirrors `bpf/abi.h`. Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Needs clang on Linux. |
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
-| `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Step 8: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop; no sending yet). 9 unit tests without privileges; `tests/capture.rs` (10 tests, `AVULSE_BPF=1`, root, in the VMs) on a veth pair. Other platforms: `Error::Unsupported`. |
+| `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. 13 unit tests without privileges; `tests/capture.rs` (18 tests, `AVULSE_BPF=1`, root, in the VMs) on a veth pair. Other platforms: `Error::Unsupported`. |
 | `crates/{capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
 | CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
@@ -677,7 +677,58 @@ receive an echo request with the right address).
 **Acceptance:** a handle with `icmp` diverts pings on a veth in both VMs (with no reply, since
 nothing reinjects yet), and a `SNIFF` handle receives them while the pings still get replies.
 
-### Step 9: Injection
+### Step 9: Injection (done)
+
+**Outcome.** `crates/avulse/src/backend/linux/send.rs` (the paths, GSO, the impostor rule), the
+socket calls in `sys.rs`, and in `tc.bpf.c` the `lo` ingress redirect. `tests/capture.rs` passes
+on 6.8 and 5.15 (18 tests), and `tests/kernel.rs` (13) too: reinjected pings both ways (each packet
+seen once), the ETHERNET layer sending frames back, an outbound datagram sent to another port (the
+peer answers from it), built packets injected inbound and outbound by a `SEND_ONLY` handle,
+loopback over IPv4 and IPv6, an 8 MiB TCP transfer through a diverting handle (GSO packets go back
+out as GSO), priority chaining with impostors, and a user-space filter that reinjects what it does
+not match (and drops what it matches, with `DROP`).
+
+- **Paths** (ebpfdivert's table): loopback → raw IP socket; outbound or forwarded with a context
+  that names the same interface as `if_idx` → `AF_PACKET` out of it behind the saved L2 header
+  (its last EtherType set for the packet's IP version); outbound without one → raw IP socket;
+  inbound to no interface → raw IP socket; inbound → `AF_PACKET` on `lo` behind the saved header,
+  or one to the interface's MAC address (from sysfs). ETHERNET: the frame out of `if_idx`, or in
+  through `lo`; `if_idx` is required.
+- **The `lo` redirect.** The `AF_PACKET` socket sets `SO_MARK = MARK_REDIRECT | ifindex` and
+  `SO_PRIORITY = PRIO_INJECTED | tc_priority` (`0x4158____`). On `lo`'s egress every handle skips
+  it; on `lo`'s ingress the first handle's program, before any configuration check, sets the mark
+  to `MARK_INJECTED | tc_priority`, clears the priority and `bpf_redirect`s it to the target's
+  ingress (`BPF_F_INGRESS`), where it is an injected packet like any other. ebpfdivert used an
+  extra stage (`REDIRECTED_MARK`, then `bpf_skb_change_type(PACKET_HOST)` on the target) for L3
+  targets; with Ethernet targets the redirect's `eth_type_trans` sets the packet type from the
+  destination MAC, so one stage is enough. Revisit it with L3 devices (Step 11). Only interfaces
+  with an index below 65536 can receive injected inbound packets.
+- **`SEND_ONLY` handles** load the programs too, shut down (`CFG_SHUTDOWN`), on `lo`'s ingress
+  only, so that inbound injection works when no other handle is attached to `lo`. They are
+  registered (reaped like any other) but have no heartbeat. Their TC priority is chosen like any
+  handle's, since their packets carry it.
+- **Checksums** follow WinDivert's driver: those whose flag is clear (IPv4 header, TCP, UDP) are
+  computed; ICMP and ICMPv6 checksums are sent as they are. Packets captured with partial
+  (offloaded) checksums fail `verify`, so reinjecting them unchanged computes them. With GSO, the
+  TCP/UDP checksum is left to the kernel (`VIRTIO_NET_HDR_F_NEEDS_CSUM` with the pseudo-header
+  sum in the field).
+- **GSO.** An IP packet larger than 576 bytes and than the target's MTU (sysfs, cached for 1 s)
+  goes out with a `virtio_net_hdr` (`PACKET_VNET_HDR`, host byte order): TCPv4/TCPv6, or UDP_L4,
+  which kernels before 6.2 refuse; the segment size is the captured one, or the MTU minus the
+  headers. Fragments and other protocols get no header (and may then fail with `EMSGSIZE`).
+- **Impostors** (WinDivert's rule): a packet the application sends with `impostor` set loses one
+  TTL or hop limit (the IPv4 checksum updated incrementally), and fails with `HostUnreachable` at
+  1. Packets the backend reinjects on its own are left alone.
+- **User-space filters** no longer need `SNIFF`: non-matching records are reinjected at once
+  (unless they were copies), and with `DROP` the kernel diverts and user space drops the matches.
+  A failed reinjection loses the packet, as a full queue does.
+- **Sockets** are made on first use and kept by the handle: one raw socket per IP version, one
+  `AF_PACKET` socket per mark (the redirect mark names the target). Sending needs
+  `CAP_NET_RAW` and `CAP_NET_ADMIN` (for `SO_MARK`).
+- `BPF_PROG_TEST_RUN` fails with `ENOSPC` when `ctx_size_out` is smaller than the kernel's
+  `__sk_buff`, which is larger on 6.8 than on 5.15: `run_ctx` passes 512 bytes.
+
+The original plan of the step follows.
 
 **Where.** `crates/avulse/src/backend/linux/` (`send`), plus the `lo` ingress redirect in the
 static program.
@@ -747,12 +798,15 @@ match-all fallback, which costs a trip to user space per packet.
   space (TPID 0x8100). Left: the kernel parser must see that tag too (Step 10's VLAN fields), the
   TPID (`skb->vlan_proto` in the record), and devices without an Ethernet header (tun,
   WireGuard), which Step 8 skips.
-- **Injection:**
-  - Outbound frames go out through `AF_PACKET` on the interface, tags included. Check that the
-    kernel accepts in-band tags, or use `PACKET_AUXDATA`-style metadata.
-  - Inbound frames need a design: the `lo` redirect carries IP only, and a non-IP frame on `lo`
-    is not delivered. Candidates are a `bpf_redirect(…, BPF_F_INGRESS)` from an egress hook on
-    the target interface, or a tap device. Try them in a VM, and write the decision here.
+- **Injection:** Step 9 sends frames at ETHERNET: out of `if_idx` through `AF_PACKET`, and in
+  through `lo`, whose TC ingress program redirects them before any protocol handling
+  (`reinject_frames` covers IPv4 pings both ways). Left:
+  - Outbound frames with tags: check that the kernel accepts in-band tags, or use
+    `PACKET_AUXDATA`-style metadata.
+  - Inbound non-IP frames (ARP): the redirect should carry them too, since it happens at `lo`'s
+    TC ingress; check it in a VM. If it does not, the candidates are a
+    `bpf_redirect(…, BPF_F_INGRESS)` from an egress hook on the target interface, or a tap
+    device. Write the decision here.
 - **Loop prevention and priorities** as for the NETWORK layers. ETHERNET and NETWORK handles on
   the same interface are ordered by TC priority like any two handles.
 
@@ -816,7 +870,7 @@ what the `avulse` crate and its Linux backend now hold).
 - [x] Step 6: public API and address (`crates/avulse`)
 - [x] Step 7: kernel side of capture (config, metadata facts, ring buffer, verdicts)
 - [x] Step 8: Linux backend: open, attach, registry, heartbeat, receive
-- [ ] Step 9: injection
+- [x] Step 9: injection
 - [ ] Step 10: matcher coverage and superset fallback
 - [ ] Step 11: ETHERNET layer
 - [ ] Step 12: privileged suite on both VMs (Phase 2 exit)

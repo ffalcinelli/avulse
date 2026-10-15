@@ -138,6 +138,15 @@ fn segment_sum(proto: u8, seg: &[u8], pseudo: &Pseudo) -> u64 {
 }
 
 impl Updated {
+    /// Every checksum.
+    pub const ALL: Updated = Updated {
+        ipv4: true,
+        tcp: true,
+        udp: true,
+        icmp: true,
+        icmpv6: true,
+    };
+
     fn set(&mut self, proto: u8) {
         match proto {
             ip_proto::TCP => self.tcp = true,
@@ -154,14 +163,43 @@ impl Updated {
 /// IPv6 routing headers are not followed: the pseudo-header uses the destination in the fixed
 /// header.
 pub fn recalculate(buf: &mut [u8], link: Link) -> Updated {
+    recalculate_only(buf, link, Updated::ALL)
+}
+
+/// [`recalculate`], for the checksums set in `which` only; the others are left as they are.
+///
+/// ```
+/// use avulse_proto::checksum::{self, Updated};
+/// use avulse_proto::Link;
+///
+/// let mut bytes = [
+///     0x45, 0, 0, 28, 0, 0, 0x40, 0, 64, 1, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2, //
+///     8, 0, 0, 0, 0, 1, 0, 1, // ICMP echo request
+/// ];
+/// let ip = Updated { ipv4: true, ..Updated::default() };
+/// assert_eq!(checksum::recalculate_only(&mut bytes, Link::Ip, ip), ip);
+/// let valid = checksum::verify(&bytes, Link::Ip);
+/// assert!(valid.ipv4 && !valid.icmp);
+/// ```
+pub fn recalculate_only(buf: &mut [u8], link: Link, which: Updated) -> Updated {
     let mut updated = Updated::default();
     let Located { ipv4, l4 } = locate(buf, link);
-    if let Some((off, hl)) = ipv4 {
+    if let Some((off, hl)) = ipv4.filter(|_| which.ipv4) {
         let hdr = &mut buf[off..off + hl];
         let c = ipv4_header(hdr);
         hdr[10..12].copy_from_slice(&c.to_be_bytes());
         updated.ipv4 = true;
     }
+    let mut wanted = Updated::default();
+    if let Some((proto, ..)) = &l4 {
+        wanted.set(*proto);
+    }
+    let l4 = l4.filter(|_| {
+        (wanted.tcp && which.tcp)
+            || (wanted.udp && which.udp)
+            || (wanted.icmp && which.icmp)
+            || (wanted.icmpv6 && which.icmpv6)
+    });
     if let Some((proto, field, range, pseudo)) = l4 {
         let seg = &mut buf[range];
         seg[field..field + 2].fill(0);

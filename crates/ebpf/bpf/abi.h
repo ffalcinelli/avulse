@@ -76,11 +76,14 @@ _Static_assert(sizeof(struct avulse_record) == 40, "abi.rs");
  * two never take each other's packets for their own.
  *  - MARK_INJECTED | tc_priority: an injected packet. Handles of the same or a higher priority
  *    (lower or equal TC priority) skip it; lower ones see an impostor.
- *  - MARK_REDIRECT | ifindex: an inbound packet sent through lo, for the lo ingress hook to
- *    redirect (Step 9). Every handle skips it.
+ *  - MARK_REDIRECT | ifindex: an inbound packet sent through lo, with skb->priority set to
+ *    PRIO_INJECTED | tc_priority. Every handle skips it on lo's egress; on lo's ingress, the
+ *    first handle's program marks it MARK_INJECTED | tc_priority (the redirect clears
+ *    skb->priority) and redirects it to the ingress of the interface `ifindex`.
  */
 #define MARK_MASK     0xffff0000u
 #define MARK_INJECTED 0x41560000u /* "AV" */
 #define MARK_REDIRECT 0x41570000u
+#define PRIO_INJECTED 0x41580000u
 
 #endif
