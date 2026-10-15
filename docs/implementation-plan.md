@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-15, Steps 1 to 4 and Spikes A and B done, Spike C deferred; next: Phase 2)
+## Status (2026-10-15, Steps 1 to 4 and Spikes A and B done, Spike C deferred; next: Step 6)
 
 | Area | State |
 | --- | --- |
@@ -424,9 +424,255 @@ equivalent on the vector packets.
 
 ### After that
 
-Follow the roadmap: Phase 2 (Linux packet layers) → 3 (events, API v0.1, crates.io release job) → 4
-(compat shim + pydivert/jdivert suites) → 5 (Windows driver) → 6 (macOS) → 7 (bindings, 1.0). Before
-starting each phase, expand it into steps in this file, in the same format as above.
+Phase 2 is expanded below. Then follow the roadmap: Phase 3 (events, API v0.1, crates.io release
+job) → 4 (compat shim + pydivert/jdivert suites) → 5 (Windows driver; read the Spike B note's
+requirements first) → 6 (macOS, after Spike C) → 7 (bindings, 1.0). Before starting each phase,
+expand it into steps in this file, in the same format as above.
+
+## Phase 2: Linux packet layers (NETWORK, NETWORK_FORWARD, ETHERNET)
+
+**Goal** (roadmap, Phase 2): open a handle on Linux with a native or WinDivert filter, receive the
+packets that match it, exactly, and send packets back, at the NETWORK, NETWORK_FORWARD and ETHERNET
+layers. **Exit:** the privileged suite (Step 12) passes on both VMs.
+
+**What to port.** The behaviour comes from ebpfdivert (`../ebpfdivert/docs/architecture.md`
+explains it; `src/ebpfdivert.bpf.c` is the TC program, `src/handle.c` the user-space handle).
+Port its logic, not its code layout. The kernel side keeps Spike A's split: the static parser
+writes facts, tail-calls the generated matcher, and the matcher tail-calls the static action
+program (`docs/spikes/ebpf-codegen.md`).
+
+**Decisions made for this phase** (change them here, with a reason, if the work proves them
+wrong):
+
+- **One program instance per handle**, as in ebpfdivert. Each handle has its own maps (facts,
+  program array, config, ring buffer), its own matcher, and its own TC filter on each interface.
+  Handles share nothing but the registry.
+- **Attach with classic cls_bpf on clsact, never TCX.** aya 0.14's `SchedClassifier::attach`
+  picks TCX on kernels 6.6 and later (`programs/tc.rs`), so always call `attach_with_options` with
+  `TcAttachOptions::Netlink(NlOptions { priority, handle })`. TCX turns `TC_ACT_STOLEN` into
+  "next".
+- **Priority and marks.** TC priority = `30001 - priority`. Priority 0 means after every existing
+  handle. Use a mark prefix of our own (not ebpfdivert's `0x4D49…`), so the two never mistake
+  each other's packets. Document it in the guide.
+- **Fail-open everywhere.** A full ring, an empty program-array slot, a stale heartbeat, or a
+  shut-down handle all pass the packet.
+- **Kernel baseline:** 5.10 with BTF. Test on 6.8 (`default`) and 5.15 (`legacy`).
+- **The NETWORK layers see IP packets** (`Link::Ip`). The matcher's `frame` base is the L3
+  offset, and a captured NETWORK packet starts at the IP header. The L2 header goes in the
+  address's reinjection blob.
+
+### Step 6: The public API and the address, without a backend
+
+**Why.** Every later step needs the types. They are not frozen until Phase 3, but should be close.
+
+**Where.** `crates/avulse` (the facade, now a real crate): `Handle`, `Layer` (reuse
+`avulse_filter::Layer`), `Flags` (`SNIFF`, `DROP`, `RECV_ONLY`, `SEND_ONLY`, `FRAGMENTS`),
+`Param` (`QueueLength`, `QueueTime`, `QueueSize`), `Shutdown`, `Error`, `Address`, and a
+`Backend` trait that `backend-linux` implements. `Handle::open(filter: &str, layer, priority,
+flags)` takes a native filter; `Handle::open_windivert` takes a WinDivert one
+(`Filter::compile_windivert`). Calls: `recv(&mut [u8]) -> (len, Address)`, `send(&[u8],
+&Address)`, batch variants later, `shutdown`, `close` (on `Drop` too), and `AsFd` for
+`poll`/`epoll`. Add `capabilities()` per layer.
+
+**Address** (roadmap, "Public model"): a versioned, `#[repr(C)]` struct with explicit fields:
+timestamp, layer, event, ifindex/subifindex, direction, loopback, impostor, IPv6, checksum-valid
+flags, VLAN TCI and ethertype, and the flow/socket part (empty until Phase 3). It also has an
+opaque, fixed-size reinjection blob (L2 header, GSO size and type, capture ifindex). Size the
+blob for the ETHERNET layer: a 14-byte header plus two VLAN tags.
+
+**Tests:** unit tests of the address layout (`size_of`, offsets, version) and of argument
+checking (bad priority, flags that do not apply to the layer, a bad filter with its diagnostic).
+Use a fake backend; nothing needs root.
+
+**Acceptance:** done-criteria 1 and 4 hold; the guide gets an "API" page stub with the address
+fields.
+
+### Step 7: The kernel side of capture
+
+**Where.** `crates/ebpf/bpf/tc.bpf.c` (plus `facts.h`/`facts.rs`), and maps declared there.
+
+- **Per-handle config map:** layer, flags, TC priority, heartbeat timestamp, shutdown bits, and
+  the capture-interface set.
+- **Facts gain metadata** for the matcher: direction, ifindex, loopback, impostor, layer, VLAN TCI
+  from `skb->vlan_tci` (offload), and the L3 base for the NETWORK layers.
+- **The parser accounts for VLAN offload.** On a real hook, the outer tag is usually in
+  `skb->vlan_tci`, not in the data. Spike A's `BPF_PROG_TEST_RUN` tests keep it in the data, so
+  test both.
+- **The action program diverts.** Copy the whole skb to a ring buffer in three size classes (2 KB,
+  16 KB, 64 KB, as ebpfdivert), with a record header the address is built from. The verdict is
+  `TC_ACT_STOLEN` to divert, the packet passes for `SNIFF`, and `TC_ACT_SHOT` for `DROP`.
+  Statistics go to a per-CPU array (diverted, passed, ring full, owner gone, marked).
+- **Layer selection:**
+  - Loopback packets are seen once: egress on `lo`, reported outbound with loopback set.
+  - NETWORK_FORWARD is egress with `skb->ingress_ifindex != 0`. When forwarding is on, ingress
+    packets are checked with `bpf_fib_lookup`, so that NETWORK sees only local traffic.
+  - Fragments are captured only with `FRAGMENTS`.
+  - The NETWORK layers ignore non-IP frames.
+- **Loop prevention:** skip packets marked at the same or a higher priority, and set impostor on
+  lower ones.
+
+Keep ebpfdivert's verifier tricks for 5.15: global functions for the large parts, the inline-asm
+length bound before `bpf_skb_load_bytes` into the ring buffer, and `barrier_var` on context
+arrays.
+
+**Tests:** extend `tests/kernel.rs` (`BPF_PROG_TEST_RUN`): config and metadata in the facts,
+verdicts for each flag, ring-buffer records (size class, header, bytes), marks and impostor,
+fail-open on a stale heartbeat or an empty slot. Then run both VMs.
+
+**Acceptance:** the program loads and passes `tests/kernel.rs` on 6.8 and 5.15, and the facts
+still equal `Facts::from_packet` (extended with the metadata) on the whole corpus.
+
+### Step 8: `backend-linux`: open, attach, receive
+
+**Where.** `crates/backend-linux` (Linux only, `aya` plus `libc`), implementing Step 6's
+`Backend`.
+
+- **Open:**
+  - compile the filter;
+  - generate the matcher with `codegen::compile`, or use the fallback (below) when it returns
+    `Unsupported`, or when the verifier rejects it;
+  - load an instance of the static programs and set the program-array slots;
+  - attach to the selected interfaces plus `lo` (Netlink options, see the decisions);
+  - register the handle.
+- **Superset fallback, first version:** a matcher that matches everything at the layer. User space
+  then runs `Filter::matches` on every record and reinjects what does not match (Step 9 adds
+  sending; until then, such handles are `SNIFF` only). Step 10 makes the superset tight.
+- **Registry:** a pinned hash map under `/sys/fs/bpf/avulse/`, updated under a `flock`. Each entry
+  holds the PID with its start time, the TC priority, the attachments and the filter. Entries of
+  dead processes are reaped, and their TC filters detached, at every open and by
+  `avulse cleanup` (a CLI subcommand).
+- **Heartbeat:** a thread refreshes the config map every 500 ms; the programs pass everything
+  when it is over 3 s old.
+- **Receive:** drain the ring into a queue bounded by `QUEUE_LENGTH`/`QUEUE_SIZE`, drop entries
+  older than `QUEUE_TIME`, and count the drops. Build the `Address` from the record. The pollable
+  fd is an epoll fd that is readable when `recv` would not block. After `shutdown(RECV)`, return
+  what is queued, then an error. `close` waits for calls in progress.
+
+**Tests:** unit tests that need no root (record decoding, queue limits with a fake clock); the
+privileged part waits for Step 12, but add a `capture` smoke test now (veth pair in a netns, ping,
+receive an echo request with the right address).
+
+**Acceptance:** a handle with `icmp` diverts pings on a veth in both VMs (with no reply, since
+nothing reinjects yet), and a `SNIFF` handle receives them while the pings still get replies.
+
+### Step 9: Injection
+
+**Where.** `crates/backend-linux` (`send`), plus the `lo` ingress redirect in the static program.
+
+Port ebpfdivert's path table:
+
+| Packet | Path |
+| --- | --- |
+| Loopback | Raw IP socket (`IPPROTO_RAW`), so 127/8 and `::1` are not dropped as martians. |
+| Outbound or forward, with its reinjection blob | `AF_PACKET` on the capture interface, with the saved L2 header. |
+| Outbound, built by the user (no blob) | Raw IP socket: routed like any packet. |
+| Inbound | `AF_PACKET` on `lo`, carrying a redirect mark and the target ifindex. The `lo` ingress hook `bpf_redirect`s it to the target's ingress. The redirect clears `skb->priority`, so use `SO_PRIORITY` and move the priority into the mark first. |
+
+- **GSO.** Packets above the MTU go out with `PACKET_VNET_HDR` and a `virtio_net_hdr` that
+  describes the segmentation.
+- **Checksums.** Recalculate them with `avulse_proto::checksum` when the address flags ask for it.
+  Captured packets often carry partial checksums from offload.
+- **Marks.** Every injected packet carries the handle's mark (loop prevention).
+- **Fallback handles** now reinject the non-matching records.
+
+**Tests:** outbound modify (rewrite a port, the peer sees it), inbound inject on a veth, crafted
+outbound, loopback (IPv4 and IPv6), GSO (a bulk TCP transfer through a diverting handle),
+priority chaining (two handles, marks, impostor), and auto-reinjection by a fallback handle.
+
+**Acceptance:** those scenarios pass on both VMs.
+
+### Step 10: Matcher coverage and a tight superset
+
+**Why.** Spike A's code generator covers a subset. Everything else currently takes the
+match-all fallback, which costs a trip to user space per packet.
+
+**Where.** `crates/ebpf/src/codegen.rs`, with tests in `tests/emu.rs` and `tests/kernel.rs`.
+
+1. **Coverage,** in this order, from the spike note's "Left for Phase 2":
+   - metadata fields (direction, interface, loopback, impostor, layer);
+   - IPv6 addresses;
+   - `eth.addr`, VLAN fields, TCP option fields;
+   - `len`/`count`, `contains`, arithmetic.
+2. **Sets:** sorted ranges searched by a binary tree of jumps. Above a few dozen items, use a
+   hash or LPM-trie map lookup.
+3. **`xor`:** keep each operand's result in a stack slot instead of compiling it twice.
+4. **Superset lowering:** `compile_superset(ir) -> (Matcher, exact: bool)`. It replaces each
+   unsupported subtree by `true` or `false` depending on its polarity under `not`/`xor`, as
+   ebpfdivert's `prefilter.c` widens rules. Use it when the exact matcher is unsupported,
+   rejected or over the size limit. Only inexact handles evaluate in user space.
+   `avulse filter explain` reports what runs in the kernel.
+
+**Tests:**
+- The emulator differential test covers every new feature (the `SUPPORTED` corpus must both match
+  and miss).
+- A proptest of superset soundness: the IR evaluator matches ⇒ the superset matches. The test
+  also checks that `exact` implies equality.
+- The kernel test runs on both VMs, with the largest programs on 5.15.
+
+**Acceptance:**
+- the WinDivert vectors and the tshark-table filters compile either exactly, or to a sound
+  superset;
+- `filter explain` shows which;
+- the 241 WinDivert vectors run through the kernel matcher agree with the evaluator.
+
+### Step 11: The ETHERNET layer
+
+**Where.** `crates/ebpf/bpf/tc.bpf.c`, `crates/backend-linux`.
+
+- **Capture:** every frame on the selected interfaces, non-IP included (ARP, LLDP, VLAN-tagged).
+  An offloaded VLAN tag is put back into the captured frame, so the bytes match what the filter
+  saw.
+- **Injection:**
+  - Outbound frames go out through `AF_PACKET` on the interface, tags included. Check that the
+    kernel accepts in-band tags, or use `PACKET_AUXDATA`-style metadata.
+  - Inbound frames need a design: the `lo` redirect carries IP only, and a non-IP frame on `lo`
+    is not delivered. Candidates are a `bpf_redirect(…, BPF_F_INGRESS)` from an egress hook on
+    the target interface, or a tap device. Try them in a VM, and write the decision here.
+- **Loop prevention and priorities** as for the NETWORK layers. ETHERNET and NETWORK handles on
+  the same interface are ordered by TC priority like any two handles.
+
+**Tests:** ARP request/reply diverted and reinjected (a ping across a veth still works), VLAN
+capture with offload on and off (`ethtool -K … rxvlan off`), QinQ, modifying a frame's source
+MAC, and LLDP sniffing.
+
+**Acceptance:** those pass on both VMs. The guide documents the layer: what the filter sees
+(`Link::Ethernet`), and how tags are restored.
+
+### Step 12: The privileged suite (Phase 2 exit)
+
+**Where.** `crates/backend-linux/tests/` (root only, `AVULSE_PRIV=1`, network namespaces and veth
+pairs, like `../ebpfdivert/tests/test_integration.c`), run in the VMs like `tests/kernel.rs`.
+
+Port the packet-layer scenarios of `test_integration.c`:
+
+- loopback single sighting;
+- `tcp.port` in both directions;
+- inbound on a veth;
+- outbound modify;
+- send crafted;
+- inexact filter auto-reinjection;
+- priority chaining;
+- auto priority;
+- sniff and drop;
+- queue parameters and shutdown;
+- bulk TCP (GSO);
+- the forward layer;
+- crash cleanup (kill -9 a capturing child; traffic must flow within 3 s, and the next open
+  reaps it);
+- IPv6 loopback;
+- the event fd;
+- bad arguments;
+- close while receiving.
+
+Add Step 11's ETHERNET/ARP/VLAN cases, and the in-kernel versus interpreter agreement from Step
+10.
+
+Consider a CI job that runs the suite with `sudo` on a GitHub Ubuntu runner (passwordless sudo,
+a 6.x kernel). It does not replace the 5.15 VM run.
+
+**Acceptance (Phase 2 exit):** the whole suite passes on both VMs, run one at a time, and each VM
+is destroyed afterwards. Then update `docs/roadmap.md` (Phase 2 done) and `CLAUDE.md` (what
+`backend-linux` and `avulse` now hold).
 
 ## Checklist
 
@@ -440,4 +686,11 @@ starting each phase, expand it into steps in this file, in the same format as ab
 - [x] Step 3: WinDivert front-end + 241 vectors + `filter convert`
 - [x] Step 4: TCP options, fuzz targets
 - [x] Step 5: spikes A (go) and B (go, pure Rust); C deferred until a Mac is available
+- [ ] Step 6: public API and address (`crates/avulse`)
+- [ ] Step 7: kernel side of capture (config, metadata facts, ring buffer, verdicts)
+- [ ] Step 8: `backend-linux` open, attach, registry, heartbeat, receive
+- [ ] Step 9: injection
+- [ ] Step 10: matcher coverage and superset fallback
+- [ ] Step 11: ETHERNET layer
+- [ ] Step 12: privileged suite on both VMs (Phase 2 exit)
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement
