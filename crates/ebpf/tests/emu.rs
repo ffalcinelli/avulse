@@ -5,7 +5,7 @@
 mod common;
 
 use avulse_ebpf::codegen::{self, Error};
-use avulse_ebpf::facts::Facts;
+use avulse_ebpf::facts::{F_IPV4, F_IPV6, Facts};
 use avulse_filter::{Filter, Meta};
 use avulse_proto::{Link, Packet};
 use common::emu::{self, FACTS_FD, Outcome, PROGS_FD};
@@ -32,7 +32,47 @@ fn check(src: &str, frames: &[Vec<u8>]) {
             "{src} on {frame:02x?}\nfacts {:?}",
             Facts::from_packet(&pkt)
         );
+        // At the NETWORK layers the filter sees the IP packet alone.
+        let facts = Facts::from_packet(&pkt);
+        if facts.flags & (F_IPV4 | F_IPV6) != 0 {
+            let ip = Packet::parse(&frame[facts.l3 as usize..], Link::Ip);
+            let want = filter.matches(&ip, &Meta::default());
+            let got = emu::run(&insns, &facts.at_network(), frame);
+            assert_eq!(
+                got,
+                Outcome::Verdict(want),
+                "{src} at NETWORK on {frame:02x?}"
+            );
+        }
     }
+}
+
+/// `Facts::at_network` is what parsing the IP packet alone gives, offsets apart.
+#[test]
+fn network_facts_are_those_of_the_ip_packet() {
+    let mut checked = 0;
+    for frame in common::corpus(6, 2000, 0) {
+        let eth = Facts::from_packet(&Packet::parse(&frame, Link::Ethernet));
+        if eth.flags & (F_IPV4 | F_IPV6) == 0 {
+            continue;
+        }
+        let net = eth.at_network();
+        let base = net.base;
+        let ip = Facts::from_packet(&Packet::parse(&frame[base as usize..], Link::Ip));
+        let shift = |v: u32| if v == 0 { 0 } else { v + base };
+        let want = Facts {
+            len: ip.len + base,
+            l3: base,
+            l4: shift(ip.l4),
+            pay: ip.pay + base,
+            pay_end: ip.pay_end + base,
+            base,
+            ..ip
+        };
+        assert_eq!(net, want, "{frame:02x?}");
+        checked += 1;
+    }
+    assert!(checked > 1000, "{checked}");
 }
 
 #[test]

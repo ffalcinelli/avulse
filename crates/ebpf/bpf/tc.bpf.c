@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR GPL-2.0-or-later
 /*
- * The static TC program (Spike A). `avulse_tc` parses the headers the way `avulse_proto::Packet`
- * does, writes the result to the per-CPU facts, and tail-calls the matcher generated from the
- * filter (slot SLOT_MATCHER). The matcher writes its verdict to the facts and tail-calls
- * `avulse_act` (slot SLOT_ACTION). A tail call does not return, so the action is a program of its
- * own. Without a matcher, the packet passes (fail-open).
+ * The static TC programs of a handle. `avulse_ingress` and `avulse_egress` run on the clsact
+ * hooks of each interface. They check the handle's configuration (shutdown, heartbeat, marks,
+ * layer), parse the headers the way `avulse_proto::Packet` does into the per-CPU facts, and
+ * tail-call the matcher generated from the filter (slot SLOT_MATCHER). The matcher writes its
+ * verdict to the facts and tail-calls `avulse_act` (slot SLOT_ACTION), which diverts, copies or
+ * drops the packet. A tail call does not return, so the action is a program of its own.
+ *
+ * Everything fails open: without a configuration, a matcher or room in the ring, or once the
+ * owner's heartbeat is stale, packets pass (TC_ACT_UNSPEC, so the next classifier runs).
  *
  * Headers are read with bpf_skb_load_bytes, which also reads paged (non-linear) data. The
  * programs are in "classifier" sections, the name aya knows for cls_bpf programs.
@@ -14,12 +18,15 @@
 
 #include "helpers.h"
 #include "facts.h"
+#include "abi.h"
 
 #define ETH_LEN 14
 #define MAX_VLANS 2
 #define MAX_IPV6_EXT 8
 
-char LICENSE[] SEC("license") = "Dual LGPL/GPL";
+/* The code is LGPL-3.0-or-later OR GPL-2.0-or-later; the kernel knows only its own list of
+ * license strings, and the GPL-only helpers (bpf_fib_lookup) need one it counts as GPL. */
+char LICENSE[] SEC("license") = "GPL";
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -34,6 +41,34 @@ struct {
     __uint(key_size, sizeof(__u32));
     __uint(value_size, sizeof(__u32));
 } avulse_progs SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct avulse_config);
+} avulse_config SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, STATS);
+    __type(key, __u32);
+    __type(value, __u64);
+} avulse_stats SEC(".maps");
+
+/* The loader sets the size (`Classifier::load`). */
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 1 << 22);
+} avulse_ring SEC(".maps");
+
+static __always_inline void count(__u32 key)
+{
+    __u64 *v = bpf_map_lookup_elem(&avulse_stats, &key);
+
+    if (v)
+        *v += 1;
+}
 
 static __always_inline int ld8(struct __sk_buff *skb, __u32 off, __u32 *v)
 {
@@ -214,28 +249,216 @@ static __always_inline void parse(struct __sk_buff *skb, struct avulse_facts *f)
         parse_ipv6(skb, f, off);
 }
 
-SEC("classifier")
-int avulse_tc(struct __sk_buff *skb)
+/* Is an ingress packet about to be forwarded, rather than delivered to this host? */
+static __always_inline int forwarded(struct __sk_buff *skb, struct avulse_facts *f)
 {
-    __u32 zero = 0;
-    struct avulse_facts *f = bpf_map_lookup_elem(&avulse_facts, &zero);
+    struct bpf_fib_lookup p = {};
+    __u16 ports[2];
+    long r;
 
-    if (!f)
-        return TC_ACT_OK;
-    parse(skb, f);
-    bpf_tail_call(skb, &avulse_progs, SLOT_MATCHER);
-    return TC_ACT_OK;
+    p.ifindex = skb->ifindex;
+    p.l4_protocol = f->proto;
+    p.tot_len = f->pay_end - f->l3;
+    if ((f->flags & (F_TCP | F_UDP)) && !bpf_skb_load_bytes(skb, f->l4, ports, 4)) {
+        p.sport = ports[0];
+        p.dport = ports[1];
+    }
+    if (f->flags & F_IPV4) {
+        p.family = 2; /* AF_INET */
+        if (bpf_skb_load_bytes(skb, f->l3 + 12, &p.ipv4_src, 4) ||
+            bpf_skb_load_bytes(skb, f->l3 + 16, &p.ipv4_dst, 4))
+            return 0;
+    } else {
+        p.family = 10; /* AF_INET6 */
+        if (bpf_skb_load_bytes(skb, f->l3 + 8, p.ipv6_src, 16) ||
+            bpf_skb_load_bytes(skb, f->l3 + 24, p.ipv6_dst, 16))
+            return 0;
+    }
+    r = bpf_fib_lookup(skb, &p, sizeof(p), 0);
+    return r == BPF_FIB_LKUP_RET_SUCCESS || r == BPF_FIB_LKUP_RET_NO_NEIGH ||
+           r == BPF_FIB_LKUP_RET_FRAG_NEEDED;
 }
 
-/* The action, after the matcher. For the spike: drop what matches, leave the rest to the next
- * classifier. Phase 2 diverts instead. */
+/* Everything before the matcher: is the packet for this handle, and what are its facts. */
+static __always_inline int classify(struct __sk_buff *skb, int outbound)
+{
+    __u32 zero = 0, mark = skb->mark, meta = outbound ? M_OUTBOUND : 0, vlan_tci = 0, layer;
+    struct avulse_config *cfg = bpf_map_lookup_elem(&avulse_config, &zero);
+    struct avulse_facts *f = bpf_map_lookup_elem(&avulse_facts, &zero);
+    int network;
+    __u64 timeout;
+
+    if (!cfg || !f || (cfg->flags & CFG_SHUTDOWN))
+        return TC_ACT_UNSPEC;
+    timeout = cfg->heartbeat_timeout_ns;
+    if (timeout && bpf_ktime_get_ns() - cfg->heartbeat_ns > timeout) {
+        count(S_OWNER_GONE);
+        return TC_ACT_UNSPEC;
+    }
+    if ((mark & MARK_MASK) == MARK_REDIRECT)
+        return TC_ACT_UNSPEC;
+    if ((mark & MARK_MASK) == MARK_INJECTED) {
+        if (cfg->priority <= (mark & 0xffff))
+            return TC_ACT_UNSPEC;
+        meta |= M_IMPOSTOR;
+        count(S_IMPOSTOR);
+    }
+    /* Loopback packets cross lo twice, egress then ingress: like WinDivert, report them once,
+     * as outbound. */
+    if (skb->ifindex == cfg->lo_ifindex) {
+        if (!outbound || (cfg->flags & CFG_SKIP_LO))
+            return TC_ACT_UNSPEC;
+        meta |= M_LOOPBACK;
+    }
+    layer = cfg->layer;
+    network = layer == LAYER_NETWORK || layer == LAYER_FORWARD;
+    if (network) {
+        /* A forwarded packet leaves through egress with the ingress device set. */
+        int fwd = outbound && !(meta & M_LOOPBACK) && skb->ingress_ifindex != 0;
+
+        if (fwd != (layer == LAYER_FORWARD))
+            return TC_ACT_UNSPEC;
+        if (fwd)
+            meta |= M_FORWARD;
+    }
+    if (skb->vlan_present) {
+        meta |= M_VLAN;
+        vlan_tci = skb->vlan_tci;
+    }
+
+    parse(skb, f);
+    f->layer = layer;
+    f->ifindex = skb->ifindex;
+    f->vlan_tci = vlan_tci;
+    f->meta = meta;
+    if (network) {
+        /* The NETWORK layers see IP packets, from the IP header on. */
+        if (!(f->flags & (F_IPV4 | F_IPV6)))
+            return TC_ACT_UNSPEC;
+        f->flags &= ~F_ETH;
+        f->base = f->l3;
+        if ((f->flags & F_FRAG) && !outbound && !(cfg->flags & CFG_FRAGMENTS))
+            return TC_ACT_UNSPEC;
+        if (!outbound && layer == LAYER_NETWORK && (cfg->flags & CFG_FWD_CHECK) &&
+            forwarded(skb, f))
+            return TC_ACT_UNSPEC;
+    }
+    bpf_tail_call(skb, &avulse_progs, SLOT_MATCHER);
+    count(S_NO_MATCHER);
+    return TC_ACT_UNSPEC;
+}
+
+SEC("classifier")
+int avulse_ingress(struct __sk_buff *skb)
+{
+    return classify(skb, 0);
+}
+
+SEC("classifier")
+int avulse_egress(struct __sk_buff *skb)
+{
+    return classify(skb, 1);
+}
+
+/*
+ * Copies the first `len` bytes of the packet to the ring. bpf_ringbuf_reserve needs a constant
+ * size, so records come in three size classes.
+ */
+#define EMIT(SIZE)                                                                            \
+    do {                                                                                      \
+        struct avulse_record *r =                                                             \
+            bpf_ringbuf_reserve(&avulse_ring, sizeof(struct avulse_record) + (SIZE), 0);      \
+        __u64 n = len;                                                                        \
+                                                                                              \
+        if (!r) {                                                                             \
+            count(S_RING_FULL);                                                               \
+            return -1;                                                                        \
+        }                                                                                     \
+        /* len is in [1, SIZE]; prove it with instructions no compiler rewrites and every     \
+         * verifier tracks: n = ((len - 1) & (SIZE - 1)) + 1. */                              \
+        asm volatile("%[n] += -1\n\t%[n] &= %[m]\n\t%[n] += 1" : [n] "+r"(n)                  \
+                     : [m] "i"((SIZE) - 1));                                                  \
+        if (bpf_skb_load_bytes(skb, 0, (void *)(r + 1), n)) {                                 \
+            bpf_ringbuf_discard(r, 0);                                                        \
+            count(S_LOAD_ERR);                                                                \
+            return -1;                                                                        \
+        }                                                                                     \
+        r->timestamp = bpf_ktime_get_ns();                                                    \
+        r->len = s->len;                                                                      \
+        r->cap_len = n;                                                                       \
+        r->ifindex = f->ifindex;                                                              \
+        r->ingress_ifindex = s->ingress_ifindex;                                              \
+        r->gso_size = s->gso_size;                                                            \
+        r->gso_segs = s->gso_segs;                                                            \
+        r->vlan_tci = f->vlan_tci;                                                            \
+        r->l3 = f->l3;                                                                        \
+        r->meta = f->meta | (sniffed ? M_SNIFFED : 0);                                        \
+        r->layer = f->layer;                                                                  \
+        r->flags = f->flags;                                                                  \
+        r->reserved = 0;                                                                      \
+        bpf_ringbuf_submit(r, 0);                                                             \
+        return 0;                                                                             \
+    } while (0)
+
+/* The __sk_buff fields a record needs, read up front: the verifier allows context loads at
+ * constant offsets only. */
+struct skb_fields {
+    __u32 len;
+    __u32 ingress_ifindex;
+    __u32 gso_size;
+    __u32 gso_segs;
+};
+
+static __always_inline int emit(struct __sk_buff *skb, struct avulse_facts *f, __u32 len,
+                                int sniffed)
+{
+    struct skb_fields fields, *s = &fields;
+
+    fields.len = skb->len;
+    fields.ingress_ifindex = skb->ingress_ifindex;
+    fields.gso_size = skb->gso_size;
+    fields.gso_segs = skb->gso_segs;
+    barrier_var(s);
+    if (len <= 2048)
+        EMIT(2048);
+    else if (len <= 16384)
+        EMIT(16384);
+    else
+        EMIT(MAX_RECORD_DATA);
+}
+
+/* After the matcher: divert, copy or drop what matched. */
 SEC("classifier")
 int avulse_act(struct __sk_buff *skb)
 {
-    __u32 zero = 0;
+    __u32 zero = 0, len = skb->len;
+    struct avulse_config *cfg = bpf_map_lookup_elem(&avulse_config, &zero);
     struct avulse_facts *f = bpf_map_lookup_elem(&avulse_facts, &zero);
+    int sniff;
 
-    if (!f)
-        return TC_ACT_OK;
-    return f->verdict ? TC_ACT_SHOT : TC_ACT_UNSPEC;
+    if (!cfg || !f || !f->verdict)
+        return TC_ACT_UNSPEC;
+    if (cfg->flags & CFG_DROP) {
+        count(S_DROPPED);
+        return TC_ACT_SHOT;
+    }
+    sniff = !!(cfg->flags & CFG_SNIFF);
+    if (len > MAX_RECORD_DATA) {
+        /* A diverted packet must be copied whole, or it cannot be sent back. */
+        if (!sniff) {
+            count(S_TOO_BIG);
+            return TC_ACT_UNSPEC;
+        }
+        len = MAX_RECORD_DATA;
+    }
+    if (sniff && cfg->snaplen && len > cfg->snaplen)
+        len = cfg->snaplen;
+    if (len == 0 || emit(skb, f, len, sniff))
+        return TC_ACT_UNSPEC;
+    if (sniff) {
+        count(S_SNIFFED);
+        return TC_ACT_UNSPEC;
+    }
+    count(S_DIVERTED);
+    return TC_ACT_STOLEN;
 }

@@ -1,16 +1,21 @@
 //! Loading (Linux only): the static TC programs with `aya`, the generated matcher with the
 //! `bpf()` system call, which `aya` has no public interface for, and `BPF_PROG_TEST_RUN` for
 //! tests. Every function here needs `CAP_BPF` (or root).
+//!
+//! Attaching to interfaces is not here yet (Step 8). It must use `TcAttachOptions::Netlink`:
+//! aya's `SchedClassifier::attach` picks TCX on 6.6 and later, which turns `TC_ACT_STOLEN` into
+//! "next".
 
 use std::ffi::CStr;
 use std::fmt;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 
-use aya::maps::{Map, MapData, PerCpuArray};
+use aya::maps::{Array, Map, MapData, PerCpuArray, RingBuf};
 use aya::programs::SchedClassifier;
-use aya::{Ebpf, EbpfError, Pod};
+use aya::{Ebpf, EbpfError, EbpfLoader, Pod};
 
+use crate::abi::{self, Config};
 use crate::codegen::Matcher;
 use crate::facts::{Facts, SLOT_ACTION, SLOT_MATCHER};
 
@@ -21,7 +26,14 @@ pub static TC_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tc.bpf.o
 // `bpf/facts.h`), so every bit pattern is valid.
 unsafe impl Pod for Facts {}
 
+// SAFETY: as for `Facts`: integers and explicit padding, 40 bytes (asserted in `bpf/abi.h`).
+unsafe impl Pod for Config {}
+
+/// The ring buffer's size when none is given: 4 MiB.
+pub const DEFAULT_RING_BYTES: u32 = 1 << 22;
+
 const BPF_MAP_UPDATE_ELEM: libc::c_long = 2;
+const BPF_MAP_DELETE_ELEM: libc::c_long = 3;
 const BPF_PROG_LOAD: libc::c_long = 5;
 const BPF_PROG_TEST_RUN: libc::c_long = 10;
 const BPF_PROG_TYPE_SCHED_CLS: u32 = 3;
@@ -66,10 +78,61 @@ fn aya<E: fmt::Display>(what: &str) -> impl FnOnce(E) -> Error + '_ {
     move |e| Error::Aya(format!("{what}: {e}"))
 }
 
-/// The static TC program, its action, and a generated matcher in its program array.
+/// The static TC programs of one handle, its maps, and a generated matcher in its program array.
 pub struct Classifier {
     ebpf: Ebpf,
+    ring: RingBuf<MapData>,
     matcher: Option<OwnedFd>,
+}
+
+/// Which entry program a test run goes through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hook {
+    /// `avulse_ingress`: packets arriving.
+    Ingress,
+    /// `avulse_egress`: packets leaving.
+    Egress,
+}
+
+impl Hook {
+    fn program(self) -> &'static str {
+        match self {
+            Hook::Ingress => "avulse_ingress",
+            Hook::Egress => "avulse_egress",
+        }
+    }
+}
+
+/// The `__sk_buff` fields a test run sets (the ones `BPF_PROG_TEST_RUN` accepts).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SkbCtx {
+    /// `skb->mark`.
+    pub mark: u32,
+    /// `skb->ingress_ifindex`.
+    pub ingress_ifindex: u32,
+    /// The device: 0 or 1 is the loopback device.
+    pub ifindex: u32,
+    /// `skb->gso_segs`.
+    pub gso_segs: u32,
+    /// `skb->gso_size`.
+    pub gso_size: u32,
+}
+
+impl SkbCtx {
+    /// The context as `struct __sk_buff` (the 5.15 layout, which ends after `gso_size`).
+    fn to_bytes(self) -> [u8; 184] {
+        let mut b = [0; 184];
+        for (at, v) in [
+            (8, self.mark),
+            (36, self.ingress_ifindex),
+            (40, self.ifindex),
+            (164, self.gso_segs),
+            (176, self.gso_size),
+        ] {
+            b[at..at + 4].copy_from_slice(&v.to_ne_bytes());
+        }
+        b
+    }
 }
 
 /// What the verifier reported about a matcher it accepted.
@@ -82,11 +145,21 @@ pub struct Stats {
 }
 
 impl Classifier {
-    /// Loads the static programs and puts the action program in its slot. The program array
-    /// has no matcher yet, so every packet passes.
+    /// Loads the static programs with a ring buffer of [`DEFAULT_RING_BYTES`]. See
+    /// [`load_with_ring`](Classifier::load_with_ring).
     pub fn load() -> Result<Self, Error> {
-        let mut ebpf = Ebpf::load(TC_OBJECT).map_err(|e| Error::Ebpf(Box::new(e)))?;
-        for name in ["avulse_tc", "avulse_act"] {
+        Self::load_with_ring(DEFAULT_RING_BYTES)
+    }
+
+    /// Loads the static programs and puts the action program in its slot. The configuration is
+    /// all zeros (NETWORK layer, divert, no heartbeat) and there is no matcher, so every packet
+    /// passes. `ring_bytes` must be a power of two and a multiple of the page size.
+    pub fn load_with_ring(ring_bytes: u32) -> Result<Self, Error> {
+        let mut ebpf = EbpfLoader::new()
+            .map_max_entries("avulse_ring", ring_bytes)
+            .load(TC_OBJECT)
+            .map_err(|e| Error::Ebpf(Box::new(e)))?;
+        for name in ["avulse_ingress", "avulse_egress", "avulse_act"] {
             let prog: &mut SchedClassifier = ebpf
                 .program_mut(name)
                 .ok_or_else(|| Error::Aya(format!("no program {name}")))?
@@ -94,8 +167,13 @@ impl Classifier {
                 .map_err(aya(name))?;
             prog.load().map_err(aya(name))?;
         }
+        let ring = ebpf
+            .take_map("avulse_ring")
+            .ok_or_else(|| Error::Aya("no map avulse_ring".into()))?;
+        let ring = RingBuf::try_from(ring).map_err(aya("avulse_ring"))?;
         let c = Classifier {
             ebpf,
+            ring,
             matcher: None,
         };
         let act = c.prog_fd("avulse_act")?;
@@ -115,7 +193,7 @@ impl Classifier {
 
     fn map_data(&self, name: &str) -> Result<&MapData, Error> {
         match self.ebpf.map(name) {
-            Some(Map::PerCpuArray(d) | Map::ProgramArray(d)) => Ok(d),
+            Some(Map::PerCpuArray(d) | Map::ProgramArray(d) | Map::Array(d)) => Ok(d),
             _ => Err(Error::Aya(format!("no map {name}"))),
         }
     }
@@ -136,17 +214,74 @@ impl Classifier {
         })
     }
 
-    /// Runs the TC program on `frame` (an Ethernet frame of at least 14 bytes) with
-    /// `BPF_PROG_TEST_RUN`, and returns its verdict: `TC_ACT_SHOT` (2) if the filter matches,
-    /// `TC_ACT_UNSPEC` (-1) if not, `TC_ACT_OK` (0) without a matcher.
-    pub fn run(&self, frame: &[u8]) -> Result<i32, Error> {
-        Ok(test_run(self.prog_fd("avulse_tc")?, frame, 1)?.0)
+    /// Empties the matcher slot: every packet passes again.
+    pub fn clear_matcher(&mut self) -> Result<(), Error> {
+        let key = SLOT_MATCHER;
+        let mut attr = MapElemAttr {
+            map_fd: self.map_fd("avulse_progs")? as u32,
+            pad: 0,
+            key: &key as *const u32 as u64,
+            value: 0,
+            flags: 0,
+        };
+        sys_bpf(BPF_MAP_DELETE_ELEM, &mut attr)
+            .map_err(|e| Error::Sys("BPF_MAP_DELETE_ELEM", e))?;
+        self.matcher = None;
+        Ok(())
     }
 
-    /// Runs the TC program `repeat` times on `frame` and returns the verdict and the kernel's
-    /// average time per run, in nanoseconds.
+    /// Writes the handle's configuration.
+    pub fn set_config(&mut self, config: &Config) -> Result<(), Error> {
+        let map = self
+            .ebpf
+            .map_mut("avulse_config")
+            .ok_or_else(|| Error::Aya("no map avulse_config".into()))?;
+        let mut array: Array<&mut MapData, Config> =
+            map.try_into().map_err(aya("avulse_config"))?;
+        array.set(0, config, 0).map_err(aya("avulse_config"))
+    }
+
+    /// The statistics, summed over the CPUs, indexed by [`abi::stat`].
+    pub fn stats(&self) -> Result<[u64; abi::stat::COUNT], Error> {
+        let map = self
+            .ebpf
+            .map("avulse_stats")
+            .ok_or_else(|| Error::Aya("no map avulse_stats".into()))?;
+        let map: PerCpuArray<&MapData, u64> = map.try_into().map_err(aya("avulse_stats"))?;
+        let mut out = [0; abi::stat::COUNT];
+        for (i, total) in out.iter_mut().enumerate() {
+            let values = map.get(&(i as u32), 0).map_err(aya("avulse_stats"))?;
+            *total = values.iter().sum();
+        }
+        Ok(out)
+    }
+
+    /// Takes every record in the ring buffer (see [`abi::Record::parse`]).
+    pub fn records(&mut self) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        while let Some(item) = self.ring.next() {
+            out.push(item.to_vec());
+        }
+        out
+    }
+
+    /// Runs the ingress program on `frame` (an Ethernet frame of at least 14 bytes) with
+    /// `BPF_PROG_TEST_RUN` and a default context, and returns its verdict.
+    pub fn run(&self, frame: &[u8]) -> Result<i32, Error> {
+        self.run_on(Hook::Ingress, frame, &SkbCtx::default())
+    }
+
+    /// Runs an entry program on `frame` with the context `ctx`, and returns its verdict:
+    /// `TC_ACT_UNSPEC` (-1) when the packet passes, `TC_ACT_SHOT` (2) when it is dropped,
+    /// `TC_ACT_STOLEN` (4) when it is diverted.
+    pub fn run_on(&self, hook: Hook, frame: &[u8], ctx: &SkbCtx) -> Result<i32, Error> {
+        Ok(test_run(self.prog_fd(hook.program())?, frame, Some(ctx), 1)?.0)
+    }
+
+    /// Runs the ingress program `repeat` times on `frame` and returns the verdict and the
+    /// kernel's average time per run, in nanoseconds.
     pub fn time(&self, frame: &[u8], repeat: u32) -> Result<(i32, u32), Error> {
-        test_run(self.prog_fd("avulse_tc")?, frame, repeat)
+        test_run(self.prog_fd("avulse_ingress")?, frame, None, repeat)
     }
 
     /// The facts the last run on CPU `cpu` left.
@@ -280,12 +415,20 @@ struct TestRunAttr {
     cpu: u32,
 }
 
-fn test_run(prog: RawFd, frame: &[u8], repeat: u32) -> Result<(i32, u32), Error> {
+fn test_run(
+    prog: RawFd,
+    frame: &[u8],
+    ctx: Option<&SkbCtx>,
+    repeat: u32,
+) -> Result<(i32, u32), Error> {
+    let ctx = ctx.map(|c| c.to_bytes());
     let mut attr = TestRunAttr {
         prog_fd: prog as u32,
         data_size_in: frame.len() as u32,
         data_in: frame.as_ptr() as u64,
         repeat,
+        ctx_size_in: ctx.as_ref().map_or(0, |c| c.len() as u32),
+        ctx_in: ctx.as_ref().map_or(0, |c| c.as_ptr() as u64),
         ..Default::default()
     };
     sys_bpf(BPF_PROG_TEST_RUN, &mut attr).map_err(|e| Error::Sys("BPF_PROG_TEST_RUN", e))?;

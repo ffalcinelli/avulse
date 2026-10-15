@@ -24,7 +24,9 @@ use crate::insn::{Alu, Asm, AsmError, Cond, FP, Insn, Label, MapRef, MapRefs, Re
 const MAP_LOOKUP_ELEM: i32 = 1;
 const TAIL_CALL: i32 = 12;
 const SKB_LOAD_BYTES: i32 = 26;
-const TC_ACT_OK: i32 = 0;
+/// What the matcher returns when it cannot reach the action program: pass the packet to the
+/// next classifier (fail-open).
+const TC_ACT_UNSPEC: i32 = -1;
 
 /// The skb, for the whole program.
 const CTX: Reg = 6;
@@ -129,7 +131,7 @@ pub fn compile(test: &Test) -> Result<Matcher, Error> {
     a.alu64_imm(Alu::Mov, 3, SLOT_ACTION as i32);
     a.call(TAIL_CALL);
     a.bind(out);
-    a.alu64_imm(Alu::Mov, 0, TC_ACT_OK);
+    a.alu64_imm(Alu::Mov, 0, TC_ACT_UNSPEC);
     a.exit();
     let (insns, maps) = g.a.finish()?;
     Ok(Matcher { insns, maps })
@@ -671,7 +673,11 @@ impl Gen {
     fn scalar(&mut self, s: Scalar, fail: Label) {
         let a = &mut self.a;
         match s {
-            Scalar::FrameLen => a.load(Size::W, VAL, FACTS, off::LEN),
+            Scalar::FrameLen => {
+                a.load(Size::W, VAL, FACTS, off::LEN);
+                a.load(Size::W, 1, FACTS, off::BASE);
+                a.alu32_reg(Alu::Sub, VAL, 1);
+            }
             Scalar::TcpLen => {
                 a.load(Size::W, VAL, FACTS, off::PAY_END);
                 a.load(Size::W, 1, FACTS, off::PAY);
@@ -750,8 +756,9 @@ impl Gen {
         let a = &mut self.a;
         match r {
             Region::Frame => {
-                a.alu64_imm(Alu::Mov, VAL, 0);
+                a.load(Size::W, VAL, FACTS, off::BASE);
                 a.load(Size::W, LEN, FACTS, off::LEN);
+                a.alu64_reg(Alu::Sub, LEN, VAL);
             }
             Region::At(h, start, len) => {
                 self.need(h.flags(), absent);

@@ -1,14 +1,16 @@
-//! Filter IR to eBPF code generation and the static BPF programs.
+//! Filter IR to eBPF code generation and the static BPF programs of the Linux backend.
 //!
-//! **Spike A** (Phase 0): this crate checks that a filter can run exactly in the kernel as eBPF
-//! generated at runtime. Its pieces:
+//! A filter runs exactly in the kernel as eBPF generated at runtime (Spike A, Phase 0). The
+//! pieces:
 //!
-//! - `bpf/tc.bpf.c`, a static TC (cls_bpf) program in C, parses the headers as
-//!   [`avulse_proto::Packet`] does and writes the result to per-CPU [`facts`], then tail-calls
-//!   the matcher;
+//! - `bpf/tc.bpf.c`, the static TC (cls_bpf) programs in C. `avulse_ingress` and
+//!   `avulse_egress` check the handle's configuration ([`abi::Config`]: layer, flags,
+//!   heartbeat, marks), parse the headers as [`avulse_proto::Packet`] does into per-CPU
+//!   [`facts`], and tail-call the matcher. The matcher tail-calls `avulse_act`, which diverts
+//!   the packet to a ring buffer ([`abi::Record`]), copies it, or drops it;
 //! - [`codegen`] turns a filter's IR into that matcher, with the assembler in [`insn`];
 //! - `loader` (Linux only) loads the static object with `aya` and the matcher with the `bpf()`
-//!   system call, and runs both with `BPF_PROG_TEST_RUN`.
+//!   system call, and runs them with `BPF_PROG_TEST_RUN`.
 //!
 //! See `docs/spikes/ebpf-codegen.md` for what the spike found.
 //!
@@ -23,6 +25,7 @@
 //! assert!(avulse_ebpf::codegen::compile(regex.ir()).is_err());
 //! ```
 
+pub mod abi;
 pub mod codegen;
 pub mod facts;
 pub mod insn;

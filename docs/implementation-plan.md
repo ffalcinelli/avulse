@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-15, Steps 1 to 6 and Spikes A and B done, Spike C deferred; next: Step 7)
+## Status (2026-10-15, Steps 1 to 7 and Spikes A and B done, Spike C deferred; next: Step 8)
 
 | Area | State |
 | --- | --- |
@@ -15,7 +15,7 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `fuzz/` | cargo-fuzz targets `bytecode` (verifier and interpreter on arbitrary programs), `filter` (parser, `fmt` round trip, checker, evaluator, bytecode agreement) and `windivert` (front-end, bytecode and native agreement). Outside the workspace. |
 | `crates/wasm` (`avulse-wasm`) | The filter engine for the website's playground (wasm-bindgen, `publish = false`). |
 | Docs and website | README (front page), guide (`book/`, mdBook), `site/` with the playground, rustdoc and pdoc, built by `scripts/build-site.sh` and deployed by `pages.yml` to <https://ffalcinelli.github.io/avulse/>. Every public item is documented (`missing_docs`). |
-| `crates/ebpf` (`avulse-ebpf`) | Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Needs clang on Linux. |
+| `crates/ebpf` (`avulse-ebpf`) | Step 7: the capture side of the static TC programs (`avulse_ingress`/`avulse_egress` → matcher → `avulse_act`): per-handle configuration, metadata facts, ring buffer records, divert/sniff/drop, marks, loopback, NETWORK/FORWARD/ETHERNET selection, fragments, the forwarding check, fail-open; `abi.rs` mirrors `bpf/abi.h`. Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Needs clang on Linux. |
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
 | `crates/avulse` (`avulse`) | Step 6: the handle API with no backend yet. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends will be modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. |
 | `crates/{capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
@@ -505,7 +505,46 @@ Use a fake backend; nothing needs root.
 **Acceptance:** done-criteria 1 and 4 hold; the guide gets an "API" page stub with the address
 fields.
 
-### Step 7: The kernel side of capture
+### Step 7: The kernel side of capture (done)
+
+**Outcome.** `crates/ebpf/bpf/tc.bpf.c`, `bpf/abi.h` (mirrored by `src/abi.rs`), `bpf/facts.h`, and
+the loader (`Classifier::{load_with_ring, set_config, stats, records, clear_matcher, run_on}`).
+`tests/kernel.rs` passes on 6.8 and 5.15.
+
+- **Two entry programs,** `avulse_ingress` and `avulse_egress`, run the checks in this order:
+  configuration, shutdown, heartbeat, marks, loopback, layer. Then they parse, write the
+  metadata facts, and tail-call the matcher.
+- **`avulse_act` acts on the verdict.**
+  - It drops with `CFG_DROP`.
+  - Otherwise it copies the packet to the ring in three size classes (2, 16 and 64 KiB). It
+    diverts (`TC_ACT_STOLEN`), or passes with `CFG_SNIFF`, cut to `snaplen`.
+  - A packet over 64 KiB cannot be diverted whole, so it passes.
+  - Every failure passes the packet (`TC_ACT_UNSPEC`, so the next classifier runs). This
+    includes the generated matcher, which used to return `TC_ACT_OK` when the action slot was
+    empty; `TC_ACT_OK` would have skipped lower-priority handles.
+- **The facts grew to 48 bytes:** layer, `base`, ifindex, offloaded VLAN TCI, and `M_*` bits.
+  - At the NETWORK layers the filter sees the IP packet: `F_ETH` is cleared, and `frame` and
+    `frame.len` start at `base` (the IP header). `Facts::at_network` is the contract. The
+    emulator and kernel tests check verdicts there against `Filter::matches` on the IP packet
+    parsed alone (2.26 million runs agree on both kernels).
+- **Records** (`struct avulse_record`, 40 bytes, then the whole frame) carry:
+  - the timestamp (`CLOCK_MONOTONIC`), length, ifindex and ingress ifindex;
+  - the GSO size and segment count, and the offloaded VLAN TCI;
+  - the L3 offset, the `M_*` bits (outbound, loopback, impostor, VLAN, forward, sniffed), the
+    layer, and the presence bits.
+- **Marks:** `0x4156____` (injected, with the TC priority) and `0x4157____` (inbound redirect via
+  `lo`, Step 9).
+- **The license string is `"GPL"`:** the kernel does not count "Dual LGPL/GPL" as GPL-compatible,
+  and `bpf_fib_lookup` is GPL-only.
+- **Measured (VirtualBox):** parse and checks take 90 ns (6.8) or 190 ns (5.15), and diverting
+  `tcp.dstport == 443` to the ring takes 265 or 372 ns.
+- **Not testable through `BPF_PROG_TEST_RUN`,** so left to Steps 8 and 12 (real traffic):
+  - offloaded VLAN tags (the context cannot set them);
+  - the 64 KiB class and the over-64 KiB pass (test runs take about one page);
+  - forwarded packets on 5.15, which refuses `ingress_ifindex` in the context;
+  - a forwarding check that finds a route.
+
+The original plan of the step follows.
 
 **Where.** `crates/ebpf/bpf/tc.bpf.c` (plus `facts.h`/`facts.rs`), and maps declared there.
 
@@ -707,7 +746,7 @@ what the `avulse` crate and its Linux backend now hold).
 - [x] Step 4: TCP options, fuzz targets
 - [x] Step 5: spikes A (go) and B (go, pure Rust); C deferred until a Mac is available
 - [x] Step 6: public API and address (`crates/avulse`)
-- [ ] Step 7: kernel side of capture (config, metadata facts, ring buffer, verdicts)
+- [x] Step 7: kernel side of capture (config, metadata facts, ring buffer, verdicts)
 - [ ] Step 8: Linux backend: open, attach, registry, heartbeat, receive
 - [ ] Step 9: injection
 - [ ] Step 10: matcher coverage and superset fallback

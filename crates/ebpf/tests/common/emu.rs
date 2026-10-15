@@ -3,7 +3,7 @@
 //! verifier would: jumps go forward, registers are written before they are read, and memory
 //! accesses stay in the stack and the facts.
 
-use avulse_ebpf::facts::{Facts, SLOT_ACTION};
+use avulse_ebpf::facts::{self, Facts, SLOT_ACTION};
 use avulse_ebpf::insn::{Insn, class};
 
 pub const FACTS_FD: i32 = 101;
@@ -26,7 +26,7 @@ pub enum Outcome {
 struct Machine<'a> {
     regs: [Option<u64>; 11],
     stack: [u8; STACK_SIZE as usize],
-    facts: [u8; 32],
+    facts: [u8; facts::SIZE],
     frame: &'a [u8],
 }
 
@@ -39,8 +39,8 @@ impl Machine<'_> {
         if (STACK_TOP - STACK_SIZE..STACK_TOP).contains(&addr) && addr + n as u64 <= STACK_TOP {
             let at = (addr - (STACK_TOP - STACK_SIZE)) as usize;
             &mut self.stack[at..at + n]
-        } else if (FACTS_ADDR..FACTS_ADDR + 32).contains(&addr)
-            && addr + n as u64 <= FACTS_ADDR + 32
+        } else if (FACTS_ADDR..FACTS_ADDR + facts::SIZE as u64).contains(&addr)
+            && addr + n as u64 <= FACTS_ADDR + facts::SIZE as u64
         {
             let at = (addr - FACTS_ADDR) as usize;
             &mut self.facts[at..at + n]
@@ -117,15 +117,9 @@ pub fn run(insns: &[Insn], facts: &Facts, frame: &[u8]) -> Outcome {
     let mut m = Machine {
         regs: [None; 11],
         stack: [0; STACK_SIZE as usize],
-        facts: [0; 32],
+        facts: facts.to_bytes(),
         frame,
     };
-    let f = facts;
-    let words = [f.len, f.flags, f.l3, f.l4, f.l4_len, f.pay, f.pay_end];
-    for (i, w) in words.iter().enumerate() {
-        m.facts[i * 4..i * 4 + 4].copy_from_slice(&w.to_ne_bytes());
-    }
-    m.facts[28..32].copy_from_slice(&[f.proto, f.l3_len, f.verdict, f.pad]);
     m.regs[1] = Some(CTX_ADDR);
     m.regs[10] = Some(STACK_TOP);
     let mut pc = 0;
