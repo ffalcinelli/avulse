@@ -33,7 +33,7 @@ use avulse_filter::ir::{self, ArithOp, CmpOp, Lit, Quant, SetItem, Slice, SliceE
 
 use crate::facts::{
     F_ARP, F_ETH, F_FRAG, F_ICMP, F_ICMPV6, F_IPV4, F_IPV6, F_MORE, F_TCP, F_UDP, M_IMPOSTOR,
-    M_LOOPBACK, M_OUTBOUND, M_VLAN, SLOT_ACTION, off,
+    M_LOOPBACK, M_OUTBOUND, M_VLAN, M_VLAN_AD, SLOT_ACTION, off,
 };
 use crate::insn::{Alu, Asm, AsmError, Cond, FP, Insn, Label, MapRef, MapRefs, Reg, Size};
 
@@ -372,6 +372,15 @@ fn lower_leaf(test: &Test, env: &Env<'_>) -> Option<Test> {
             decide(&t, v).map(Test::Const)
         }
         Field::Iface | Field::FrameInterfaceName => lower_iface(&t, env),
+        // A tag is there when its ID is, which the generator reads also from an offloaded tag.
+        Field::Vlan | Field::Ieee8021ad => match t {
+            Test::Exists(_) => Some(exists(if f == Field::Vlan {
+                Field::VlanId
+            } else {
+                Field::Ieee8021adId
+            })),
+            _ => None,
+        },
         Field::LocalAddr | Field::RemoteAddr => lower_addr(&t, f == Field::LocalAddr),
         Field::LocalPort | Field::RemotePort => {
             let local = f == Field::LocalPort;
@@ -540,26 +549,14 @@ fn lower_addr(test: &Test, local: bool) -> Option<Test> {
     })
 }
 
-/// Whether the filter reads the link-layer layout, which an offloaded VLAN tag changes.
+/// Whether the filter reads link-layer bytes whose place an offloaded VLAN tag changes (the
+/// fields of the tags, `eth.type` and `frame.len` take the offloaded tag into account).
 fn l2_sensitive(test: &Test) -> bool {
     fn value(v: &Value) -> bool {
         match v {
             Value::Field(f) | Value::Layer(f, _) | Value::Raw(f, _) => matches!(
                 f,
-                Field::Frame
-                    | Field::FrameLen
-                    | Field::FrameCapLen
-                    | Field::Eth
-                    | Field::EthType
-                    | Field::Vlan
-                    | Field::VlanPriority
-                    | Field::VlanDei
-                    | Field::VlanId
-                    | Field::VlanEtype
-                    | Field::Ieee8021ad
-                    | Field::Ieee8021adPriority
-                    | Field::Ieee8021adDei
-                    | Field::Ieee8021adId
+                Field::Frame | Field::Eth | Field::Vlan | Field::Ieee8021ad
             ),
             Value::Slice(v, _)
             | Value::Len(v)
@@ -599,6 +596,7 @@ enum Hdr {
     Udp,
     Icmp,
     Icmpv6,
+    Arp,
 }
 
 impl Hdr {
@@ -612,6 +610,7 @@ impl Hdr {
             Hdr::Udp => F_UDP,
             Hdr::Icmp => F_ICMP,
             Hdr::Icmpv6 => F_ICMPV6,
+            Hdr::Arp => F_ARP,
         }
     }
 
@@ -619,7 +618,7 @@ impl Hdr {
     fn base(self) -> Option<i16> {
         match self {
             Hdr::Eth => None,
-            Hdr::Ipv4 | Hdr::Ipv6 | Hdr::Ip => Some(off::L3),
+            Hdr::Ipv4 | Hdr::Ipv6 | Hdr::Ip | Hdr::Arp => Some(off::L3),
             Hdr::Tcp | Hdr::Udp | Hdr::Icmp | Hdr::Icmpv6 => Some(off::L4),
         }
     }
@@ -662,7 +661,12 @@ fn whole(off: i32, width: u8) -> Bits {
 #[derive(Clone, Copy, Debug)]
 enum Scalar {
     At(Hdr, Bits),
+    /// `frame.len`, 4 more than the kernel sees when a VLAN tag was offloaded at ETHERNET.
     FrameLen,
+    /// `eth.type`: the TPID of an offloaded VLAN tag, else the EtherType in the frame.
+    EthType,
+    /// An IPv4 address of an ARP packet (the target's if `true`), when its protocol is IPv4.
+    ArpIp(bool),
     /// `tcp.len`: the payload length, absent on fragments with more to come.
     TcpLen,
     /// A field of the facts, masked; with `invert`, the masked bits flipped.
@@ -672,7 +676,9 @@ enum Scalar {
         mask: u32,
         invert: bool,
     },
-    /// Of VLAN tag `i`, if it is an 802.1ad tag (`true`) or not: bits from the frame start.
+    /// Of VLAN tag `i`, if it is an 802.1ad tag (`true`) or not: bits from the frame start (the
+    /// TCI at `14 + 4 * i`, the inner EtherType at `16 + 4 * i`). At ETHERNET, an offloaded tag
+    /// is tag 0 and the tags in the frame follow.
     Tag(u8, bool, Bits),
     /// Of the first TCP option in slot `n` of the facts, if its length is `len`: bits from the
     /// option start.
@@ -686,6 +692,8 @@ impl Scalar {
         match self {
             Scalar::At(_, b) | Scalar::Tag(_, _, b) | Scalar::Opt(_, _, b) => b.max(),
             Scalar::FrameLen | Scalar::TcpLen => u32::MAX as i128,
+            Scalar::EthType => 0xffff,
+            Scalar::ArpIp(_) => u32::MAX as i128,
             Scalar::Fact { mask, .. } => mask as i128,
             Scalar::WscaleMul => 1 << 14,
         }
@@ -695,7 +703,11 @@ impl Scalar {
     fn dynamic(self) -> bool {
         matches!(
             self,
-            Scalar::TcpLen | Scalar::Tag(..) | Scalar::Opt(..) | Scalar::WscaleMul
+            Scalar::TcpLen
+                | Scalar::Tag(..)
+                | Scalar::Opt(..)
+                | Scalar::WscaleMul
+                | Scalar::ArpIp(_)
         )
     }
 }
@@ -729,6 +741,10 @@ enum Region {
     Opt(u8),
     /// VLAN tag `i` (TCI and inner EtherType), if it is an 802.1ad tag (`true`) or not.
     Tag(u8, bool),
+    /// The ARP packet.
+    Arp,
+    /// A MAC address of an ARP packet (the target's if `true`), when it has 6-byte ones.
+    ArpMac(bool),
 }
 
 impl Region {
@@ -737,6 +753,7 @@ impl Region {
         match self {
             Region::At(_, _, len) => Some(len as usize),
             Region::Tag(..) => Some(4),
+            Region::ArpMac(_) => Some(6),
             _ => None,
         }
     }
@@ -746,6 +763,7 @@ impl Region {
         match self {
             Region::At(_, _, len) => Some(len as usize),
             Region::Tag(..) => Some(4),
+            Region::ArpMac(_) => Some(6),
             Region::Ipv4Hdr | Region::TcpHdr => Some(60),
             Region::TcpOpts | Region::Opt(_) => Some(40),
             _ => None,
@@ -755,7 +773,11 @@ impl Region {
     fn dynamic(self) -> bool {
         matches!(
             self,
-            Region::Payload(_) | Region::TcpOpts | Region::Opt(_) | Region::Tag(..)
+            Region::Payload(_)
+                | Region::TcpOpts
+                | Region::Opt(_)
+                | Region::Tag(..)
+                | Region::ArpMac(_)
         )
     }
 }
@@ -947,7 +969,14 @@ fn scalar(f: Field) -> Option<(Kind, u32, Vec<Scalar>)> {
     let opt = |slot, len, b| (Uint, F_TCP, vec![Scalar::Opt(slot, len, b)]);
     let h = |h: Hdr, occ: Vec<Scalar>| (Uint, h.flags(), occ);
     Some(match f {
-        Field::EthType => h(Eth, vec![at(Eth, 12, 2)]),
+        Field::EthType => h(Eth, vec![Scalar::EthType]),
+        Field::ArpHwType => h(Arp, vec![at(Arp, 0, 2)]),
+        Field::ArpProtoType => h(Arp, vec![at(Arp, 2, 2)]),
+        Field::ArpHwSize => h(Arp, vec![at(Arp, 4, 1)]),
+        Field::ArpProtoSize => h(Arp, vec![at(Arp, 5, 1)]),
+        Field::ArpOpcode => h(Arp, vec![at(Arp, 6, 2)]),
+        Field::ArpSrcProtoIpv4 => (Addr, F_ARP, vec![Scalar::ArpIp(false)]),
+        Field::ArpDstProtoIpv4 => (Addr, F_ARP, vec![Scalar::ArpIp(true)]),
         Field::VlanPriority => (Uint, F_ETH, tags(false, |o| bits(o, 2, 13, 7))),
         Field::VlanDei => (Bool, F_ETH, tags(false, |o| bits(o, 2, 12, 1))),
         Field::VlanId => (Uint, F_ETH, tags(false, |o| bits(o, 2, 0, 0xfff))),
@@ -1071,6 +1100,9 @@ fn regions(f: Field) -> Option<(u32, Vec<Region>)> {
         Field::EthAddr => Some((F_ETH, vec![At(Hdr::Eth, 0, 6), At(Hdr::Eth, 6, 6)])),
         Field::Vlan => Some((F_ETH, vec![Tag(0, false), Tag(1, false)])),
         Field::Ieee8021ad => Some((F_ETH, vec![Tag(0, true), Tag(1, true)])),
+        Field::Arp => one(Arp),
+        Field::ArpSrcHwMac => one(ArpMac(false)),
+        Field::ArpDstHwMac => one(ArpMac(true)),
         Field::Ip => one(Ipv4Hdr),
         Field::Ipv6Src => one(At(Hdr::Ipv6, 8, 16)),
         Field::Ipv6Dst => one(At(Hdr::Ipv6, 24, 16)),
@@ -1108,7 +1140,6 @@ fn operand(v: &Value) -> Result<Operand, Error> {
             }
             match f {
                 Field::Ipv6 => Ok(Operand::Presence(F_IPV6)),
-                Field::Arp => Ok(Operand::Presence(F_ARP)),
                 _ => unsupported(format!("the field `{}`", def(*f).name)),
             }
         }
@@ -1507,6 +1538,7 @@ fn emit(test: &Test, env: &Env<'_>) -> Result<Matcher, Error> {
         a: Asm::default(),
         slots: 0,
         options: false,
+        ethernet: env.layer == Layer::Ethernet,
     };
     let vlan = env.layer == Layer::Ethernet && l2_sensitive(test);
     let a = &mut g.a;
@@ -1554,6 +1586,8 @@ struct Gen {
     slots: usize,
     /// Whether the code reads the TCP options of the facts.
     options: bool,
+    /// Whether the handle is at the ETHERNET layer, where a VLAN tag may have been offloaded.
+    ethernet: bool,
 }
 
 impl Gen {
@@ -2084,6 +2118,13 @@ impl Gen {
         }
     }
 
+    /// Loads bits `b` of the tag in the frame at position `i`, or jumps to `fail`.
+    fn tag_bits(&mut self, i: u8, ad: bool, b: Bits, fail: Label) {
+        self.tag(i, ad, fail);
+        self.a.alu64_imm(Alu::Mov, 2, 0);
+        self.read(b, fail);
+    }
+
     /// Jumps to `absent` unless VLAN tag `i` exists and is an 802.1ad tag (`ad`) or not.
     fn tag(&mut self, i: u8, ad: bool, absent: Label) {
         let a = &mut self.a;
@@ -2131,6 +2172,54 @@ impl Gen {
                 a.load(Size::W, VAL, FACTS, off::LEN);
                 a.load(Size::W, 1, FACTS, off::BASE);
                 a.alu32_reg(Alu::Sub, VAL, 1);
+                if self.ethernet {
+                    let done = a.label();
+                    a.load(Size::B, 1, FACTS, off::META);
+                    a.alu32_imm(Alu::And, 1, M_VLAN as i32);
+                    a.jmp32_imm(Cond::Eq, 1, 0, done);
+                    a.alu32_imm(Alu::Add, VAL, 4);
+                    a.bind(done);
+                }
+            }
+            Scalar::EthType => {
+                let (inband, done) = (self.a.label(), self.a.label());
+                if self.ethernet {
+                    let a = &mut self.a;
+                    a.load(Size::B, 1, FACTS, off::META);
+                    a.alu32_imm(Alu::And, 1, M_VLAN as i32);
+                    a.jmp32_imm(Cond::Eq, 1, 0, inband);
+                    a.alu64_imm(Alu::Mov, VAL, 0x8100);
+                    a.load(Size::B, 1, FACTS, off::META);
+                    a.alu32_imm(Alu::And, 1, M_VLAN_AD as i32);
+                    a.jmp32_imm(Cond::Eq, 1, 0, done);
+                    a.alu64_imm(Alu::Mov, VAL, 0x88a8);
+                    a.ja(done);
+                }
+                self.a.bind(inband);
+                self.a.alu64_imm(Alu::Mov, 2, 0);
+                self.read(whole(12, 2), fail);
+                self.a.bind(done);
+            }
+            Scalar::ArpIp(target) => {
+                // The protocol must be IPv4, with 4-byte addresses; they follow the
+                // hardware addresses, whose size the packet gives.
+                for (off, want) in [(2, 0x0800), (5, 4)] {
+                    self.a.load(Size::W, 2, FACTS, off::L3);
+                    self.read(whole(off, if off == 2 { 2 } else { 1 }), fail);
+                    self.a.jmp_imm(Cond::Ne, VAL, want, fail);
+                }
+                self.a.load(Size::W, 2, FACTS, off::L3);
+                self.read(whole(4, 1), fail);
+                let a = &mut self.a;
+                a.alu64_reg(Alu::Mov, 2, VAL);
+                if target {
+                    a.alu64_reg(Alu::Add, 2, VAL);
+                    a.alu64_imm(Alu::Add, 2, 4);
+                }
+                a.alu64_imm(Alu::Add, 2, 8);
+                a.load(Size::W, 1, FACTS, off::L3);
+                a.alu64_reg(Alu::Add, 2, 1);
+                self.read(whole(0, 4), fail);
             }
             Scalar::TcpLen => {
                 let a = &mut self.a;
@@ -2162,11 +2251,45 @@ impl Gen {
                     a.alu32_imm(Alu::Xor, VAL, mask as i32);
                 }
             }
-            Scalar::Tag(i, ad, b) => {
-                self.tag(i, ad, fail);
-                self.a.alu64_imm(Alu::Mov, 2, 0);
-                self.read(b, fail);
+            Scalar::Tag(i, ad, b) if self.ethernet => {
+                // With an offloaded tag, it is tag 0 and the tags in the frame come after.
+                let (offloaded, done) = (self.a.label(), self.a.label());
+                let a = &mut self.a;
+                a.load(Size::B, 1, FACTS, off::META);
+                a.jmp32_imm(Cond::Set, 1, M_VLAN as u32, offloaded);
+                self.tag_bits(i, ad, b, fail);
+                self.a.ja(done);
+                self.a.bind(offloaded);
+                if i == 0 {
+                    let a = &mut self.a;
+                    a.load(Size::B, 1, FACTS, off::META);
+                    a.alu32_imm(Alu::And, 1, M_VLAN_AD as i32);
+                    a.jmp32_imm(if ad { Cond::Eq } else { Cond::Ne }, 1, 0, fail);
+                    if b.off == 14 {
+                        a.load(Size::H, VAL, FACTS, off::VLAN_TCI);
+                        if b.shift != 0 {
+                            a.alu32_imm(Alu::Rsh, VAL, b.shift as i32);
+                        }
+                        a.alu32_imm(Alu::And, VAL, b.mask as i32);
+                    } else {
+                        // The EtherType after the offloaded tag is the frame's.
+                        a.alu64_imm(Alu::Mov, 2, 0);
+                        self.read(whole(12, 2), fail);
+                    }
+                } else {
+                    self.tag_bits(
+                        i - 1,
+                        ad,
+                        Bits {
+                            off: b.off - 4,
+                            ..b
+                        },
+                        fail,
+                    );
+                }
+                self.a.bind(done);
             }
+            Scalar::Tag(i, ad, b) => self.tag_bits(i, ad, b, fail),
             Scalar::Opt(n, len, b) => {
                 self.option(n, fail);
                 self.a.jmp_imm(Cond::Ne, LEN, len as i32, fail);
@@ -2335,6 +2458,31 @@ impl Gen {
                 self.tag(i, ad, absent);
                 self.a.alu64_imm(Alu::Mov, VAL, 14 + 4 * i as i32);
                 self.a.alu64_imm(Alu::Mov, LEN, 4);
+            }
+            Region::Arp => {
+                self.need(F_ARP, absent);
+                let a = &mut self.a;
+                a.load(Size::W, VAL, FACTS, off::L3);
+                a.load(Size::W, LEN, FACTS, off::PAY);
+                a.alu64_reg(Alu::Sub, LEN, VAL);
+            }
+            Region::ArpMac(target) => {
+                self.need(F_ARP, absent);
+                self.a.load(Size::W, 2, FACTS, off::L3);
+                self.read(whole(4, 1), absent);
+                self.a.jmp_imm(Cond::Ne, VAL, 6, absent);
+                if target {
+                    // After the sender's addresses: 8 + 6 + the protocol address size.
+                    self.a.load(Size::W, 2, FACTS, off::L3);
+                    self.read(whole(5, 1), absent);
+                    self.a.alu64_imm(Alu::Add, VAL, 14);
+                } else {
+                    self.a.alu64_imm(Alu::Mov, VAL, 8);
+                }
+                let a = &mut self.a;
+                a.load(Size::W, 1, FACTS, off::L3);
+                a.alu64_reg(Alu::Add, VAL, 1);
+                a.alu64_imm(Alu::Mov, LEN, 6);
             }
         }
         if let Some(s) = s {

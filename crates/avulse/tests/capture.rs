@@ -157,7 +157,12 @@ fn icmp(p: &[u8]) -> (u8, String) {
 
 /// Whether the kernel runs the filter exactly at the NETWORK layer.
 fn exact(filter: &str) -> bool {
-    let env = avulse_ebpf::codegen::Env::new(Layer::Network);
+    exact_at(filter, Layer::Network)
+}
+
+/// Whether the kernel runs the filter exactly at `layer`.
+fn exact_at(filter: &str, layer: Layer) -> bool {
+    let env = avulse_ebpf::codegen::Env::new(layer);
     avulse_ebpf::codegen::compile_superset(Filter::compile(filter).unwrap().ir(), &env)
         .is_ok_and(|m| m.exact())
 }
@@ -790,4 +795,224 @@ fn now_ns() -> i64 {
     #[allow(clippy::unnecessary_cast)]
     let ns = ts.tv_sec as i64 * 1_000_000_000 + ts.tv_nsec as i64;
     ns
+}
+
+// The ETHERNET layer (Step 11).
+
+/// Turns the VLAN offloads of both ends on or off: with them on, the device keeps the outer tag
+/// out of the frame (`skb->vlan_tci`), and the backend must put it back.
+fn vlan_offload(on: bool) {
+    let v = if on { "on" } else { "off" };
+    // veth may not offer the 802.1ad offloads: only the 802.1Q state is checked.
+    let features =
+        format!("rxvlan {v} txvlan {v} rx-vlan-stag-hw-parse {v} tx-vlan-stag-hw-insert {v}");
+    for exec in [String::new(), format!("ip netns exec {NETNS} ")] {
+        let dev = if exec.is_empty() { HOST_IF } else { PEER_IF };
+        sh(&format!("{exec}ethtool -K {dev} {features}"));
+        let k = output(&format!("{exec}ethtool -k {dev}"));
+        for f in ["rx-vlan-offload", "tx-vlan-offload"] {
+            assert!(k.contains(&format!("{f}: {v}")), "{dev} {f}: {k}");
+        }
+    }
+}
+
+/// A VLAN device `name` on `parent`, at both ends, with 10.199.`net`.1 here and .2 at the peer.
+fn vlan_link(parent: (&str, &str), name: (&str, &str), kind: &str, net: u8) {
+    for (ns, parent, name, host) in [("", parent.0, name.0, 1), (NETNS, parent.1, name.1, 2)] {
+        let exec = if ns.is_empty() {
+            String::new()
+        } else {
+            format!("ip netns exec {ns} ")
+        };
+        for cmd in [
+            format!("{exec}ip link add link {parent} name {name} type vlan {kind}"),
+            format!("{exec}ip addr add 10.199.{net}.{host}/24 dev {name}"),
+            format!("{exec}ip link set {name} up"),
+        ] {
+            assert!(sh(&cmd), "{cmd}");
+        }
+    }
+}
+
+fn ping_to(addr: &str, count: u32) -> bool {
+    sh(&format!("ping -c {count} -i 0.2 -W 1 {addr}"))
+}
+
+/// ARP requests and replies diverted and sent back: the peers still resolve each other.
+#[test]
+fn arp_divert_and_reinject() {
+    if !enabled() {
+        return;
+    }
+    let _veth = Veth::new();
+    sh(&format!("ip neigh flush dev {HOST_IF}"));
+    sh(&format!(
+        "ip netns exec {NETNS} ip neigh flush dev {PEER_IF}"
+    ));
+    let h = open("arp", Layer::Ethernet, 0, Flags::NONE);
+    let (ok, got) = forwarding(&h, |_, _| {}, || ping(2));
+    assert!(ok);
+    let op = |p: &[u8]| u16::from_be_bytes([p[20], p[21]]);
+    assert!(got.iter().any(|(p, a)| op(p) == 1 && a.outbound), "{got:?}");
+    assert!(
+        got.iter().any(|(p, a)| op(p) == 2 && !a.outbound),
+        "{got:?}"
+    );
+}
+
+/// 802.1Q tags, with the offloads on and off: the filter sees them in the kernel (exactly),
+/// the frames come with the tag in place, and diverted tagged frames go back out and in.
+#[test]
+fn vlan_tags() {
+    if !enabled() {
+        return;
+    }
+    let _veth = Veth::new();
+    vlan_link((HOST_IF, PEER_IF), ("avt0.10", "avt1.10"), "id 10", 10);
+    let peer = "10.199.10.2";
+    assert!(ping_to(peer, 1));
+    for offload in [true, false] {
+        vlan_offload(offload);
+        for filter in ["vlan.id == 10 and icmp", "eth.type == 0x8100 and icmp"] {
+            assert!(exact_at(filter, Layer::Ethernet), "{filter}");
+            let h = open(filter, Layer::Ethernet, 0, Flags::SNIFF);
+            assert!(ping_to(peer, 2));
+            let got = drain(&h);
+            assert_eq!(got.len(), 4, "{filter}, offload {offload}: {got:?}");
+            for (p, a) in &got {
+                assert_eq!(&p[12..14], &[0x81, 0x00], "{p:02x?}");
+                assert_eq!(u16::from_be_bytes([p[14], p[15]]) & 0xfff, 10);
+                assert!(a.vlan && a.vlan_tci & 0xfff == 10);
+            }
+            assert!(got.iter().any(|(_, a)| a.outbound) && got.iter().any(|(_, a)| !a.outbound));
+        }
+        let h = open("vlan.id == 10 and icmp", Layer::Ethernet, 0, Flags::NONE);
+        let (ok, got) = forwarding(&h, |_, _| {}, || ping_to(peer, 3));
+        assert!(ok, "offload {offload}");
+        assert_eq!(got.len(), 6, "offload {offload}: {got:?}");
+    }
+}
+
+/// An 802.1ad tag outside an 802.1Q one (QinQ), with the offloads on and off.
+#[test]
+fn qinq() {
+    if !enabled() {
+        return;
+    }
+    let _veth = Veth::new();
+    vlan_link(
+        (HOST_IF, PEER_IF),
+        ("avt0.20", "avt1.20"),
+        "proto 802.1ad id 20",
+        30,
+    );
+    vlan_link(("avt0.20", "avt1.20"), ("avt0.21", "avt1.21"), "id 21", 21);
+    let peer = "10.199.21.2";
+    assert!(ping_to(peer, 1));
+    for offload in [true, false] {
+        vlan_offload(offload);
+        let filter = "ieee8021ad.id == 20 and vlan.id == 21 and icmp";
+        assert!(exact_at(filter, Layer::Ethernet));
+        let h = open(filter, Layer::Ethernet, 0, Flags::SNIFF);
+        assert!(ping_to(peer, 2));
+        let got = drain(&h);
+        assert_eq!(got.len(), 4, "offload {offload}: {got:?}");
+        for (p, _) in &got {
+            assert_eq!(
+                (&p[12..14], &p[16..18]),
+                (&[0x88, 0xa8][..], &[0x81, 0x00][..])
+            );
+        }
+        let h = open(filter, Layer::Ethernet, 0, Flags::NONE);
+        let (ok, got) = forwarding(&h, |_, _| {}, || ping_to(peer, 2));
+        assert!(ok && got.len() == 4, "offload {offload}: {got:?}");
+    }
+}
+
+/// A frame changed on its way: the host's ARP replies say another MAC address, and the peer
+/// believes them.
+#[test]
+fn modify_source_mac() {
+    if !enabled() {
+        return;
+    }
+    let _veth = Veth::new();
+    let fake = [2, 0, 0, 0, 0, 0x99];
+    let h = open(
+        "arp.opcode == reply and outbound",
+        Layer::Ethernet,
+        0,
+        Flags::NONE,
+    );
+    sh(&format!(
+        "ip netns exec {NETNS} ip neigh flush dev {PEER_IF}"
+    ));
+    let edit = |p: &mut Vec<u8>, _: &mut Address| {
+        p[6..12].copy_from_slice(&fake);
+        p[22..28].copy_from_slice(&fake);
+    };
+    let (_, got) = forwarding(&h, edit, || {
+        sh(&format!("ip netns exec {NETNS} ping -c 1 -W 1 {HOST}"))
+    });
+    assert!(!got.is_empty());
+    let neigh = output(&format!("ip netns exec {NETNS} ip neigh show {HOST}"));
+    assert!(neigh.contains("02:00:00:00:00:99"), "{neigh}");
+}
+
+/// Non-IP frames injected inbound: an LLDP frame reaches the interface, and an ARP request
+/// gets the host's reply.
+#[test]
+fn inject_inbound_frames() {
+    if !enabled() {
+        return;
+    }
+    let _veth = Veth::new();
+    // A handle sees what handles of a higher priority inject, as impostors.
+    let send = open("eth", Layer::Ethernet, 100, Flags::SEND_ONLY);
+    let sniff = open(
+        "eth.type == 0x88cc or arp",
+        Layer::Ethernet,
+        0,
+        Flags::SNIFF,
+    );
+    let mut addr = Address::new(Layer::Ethernet);
+    addr.if_idx = Veth::ifindex();
+    let me = [2, 0, 0, 0, 0, 0x77];
+    let mut lldp = vec![0x01, 0x80, 0xc2, 0, 0, 0x0e];
+    lldp.extend(me);
+    lldp.extend([0x88, 0xcc]);
+    // Chassis ID, port ID, TTL, end.
+    lldp.extend([
+        0x02, 0x07, 0x04, 2, 0, 0, 0, 0, 0x77, 0x04, 0x02, 0x07, b'1',
+    ]);
+    lldp.extend([0x06, 0x02, 0, 120, 0, 0]);
+    lldp.resize(60, 0);
+    send.send(&lldp, &addr).unwrap();
+    let mac: Vec<u8> = output(&format!("cat /sys/class/net/{HOST_IF}/address"))
+        .trim()
+        .split(':')
+        .map(|b| u8::from_str_radix(b, 16).unwrap())
+        .collect();
+    let mut arp = vec![0xff; 6];
+    arp.extend(me);
+    arp.extend([0x08, 0x06, 0, 1, 8, 0, 6, 4, 0, 1]);
+    arp.extend(me);
+    arp.extend([10, 199, 0, 77, 0, 0, 0, 0, 0, 0, 10, 199, 0, 1]);
+    arp.resize(60, 0);
+    send.send(&arp, &addr).unwrap();
+    let got = drain(&sniff);
+    assert!(
+        got.iter()
+            .any(|(p, a)| p == &lldp && !a.outbound && a.impostor),
+        "{got:?}"
+    );
+    // The host answers the made-up peer.
+    assert!(
+        got.iter().any(|(p, a)| a.outbound
+            && p[12..14] == [8, 6]
+            && p[20..22] == [0, 2]
+            && p[..6] == me
+            && p[6..12] == mac[..]),
+        "{got:?}"
+    );
 }

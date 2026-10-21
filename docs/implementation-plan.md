@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-21, Steps 1 to 10 and Spikes A and B done, Spike C partly done; next: Step 11)
+## Status (2026-10-21, Steps 1 to 11 and Spikes A and B done, Spike C partly done; next: Step 12)
 
 | Area | State |
 | --- | --- |
@@ -871,7 +871,49 @@ match-all fallback, which costs a trip to user space per packet.
 - `filter explain` shows which;
 - the 241 WinDivert vectors run through the kernel matcher agree with the evaluator.
 
-### Step 11: The ETHERNET layer
+### Step 11: The ETHERNET layer (done, except devices without an Ethernet header)
+
+**Outcome.** The ETHERNET layer captures and sends every frame, offloaded VLAN tags are exact
+in the kernel, and the ARP fields compile. `tests/capture.rs` (23 tests) and `tests/kernel.rs`
+(15) pass on 6.8 and 5.15.
+
+- **The offloaded tag's TPID.** The kernel offloads only 802.1Q (0x8100) and 802.1ad (0x88a8)
+  tags, so one metadata bit tells them apart: `M_VLAN_AD`, set from `skb->vlan_proto`. The
+  records carry the `M_*` bits already, so their layout did not change. User space puts the tag
+  back with its TPID (it always wrote 0x8100).
+- **The parser parity.** With an offloaded tag, `tc.bpf.c` parses one in-band tag less, so the
+  kernel's facts are those of the frame as user space restores it (Packet takes two tags). The
+  contract is `Facts::offloaded(restored)`: the restored frame's facts, 4 bytes back, with
+  `M_VLAN`, `M_VLAN_AD` and the TCI.
+- **Exact matchers with an offloaded tag** (ETHERNET only): `vlan.*` and `ieee8021ad.*` see it as
+  tag 0 and the tags in the frame after it; `eth.type` is its TPID; `frame.len` counts its 4
+  bytes; `vlan`/`ieee8021ad` presence is that of the ID. Only filters that read link-layer bytes
+  (`frame`, `eth`, the tags' bytes) keep the `M_VLAN` prologue and are inexact. The emulator test
+  `offloaded_vlan_tags` strips the outer tag of every tagged corpus frame (both TPIDs) and checks
+  every `SUPPORTED` filter against the evaluator on the original.
+- **ARP fields:** `arp.hw.type`, `proto.type`, `hw.size`, `proto.size`, `opcode`,
+  `src/dst.hw_mac` (when the hardware size is 6) and `src/dst.proto_ipv4` (when the protocol is
+  IPv4 with 4-byte addresses), at offsets the packet's sizes give, and the `arp` bytes.
+  `arp contains` stays widened: an ARP packet can be up to 1028 bytes long.
+- **Injection** needed no change. Tagged frames go out through `AF_PACKET` with the tag in the
+  frame, and come in through the `lo` redirect, whatever the offload setting (`vlan_tags`,
+  `qinq`). Non-IP frames injected inbound (LLDP, ARP) reach the interface's ingress
+  (`inject_inbound_frames`): the redirect happens at `lo`'s TC ingress, before any protocol
+  handling, so no other mechanism was needed.
+- **Capture tests** (VM): `arp_divert_and_reinject` (ARP diverted and sent back both ways; the
+  peers still resolve each other); `vlan_tags` and `qinq` (802.1Q, and 802.1ad outside 802.1Q,
+  over veth VLAN devices, with the offloads on and off: captured exactly in the kernel, tags in
+  place with the right TPIDs, diverted and sent back); `modify_source_mac` (the host's ARP
+  replies rewritten to another MAC, which the peer then believes); `inject_inbound_frames` (an
+  LLDP frame and an ARP request injected inbound; the sniffing handle sees them as impostors and
+  the host answers the ARP request).
+- **Left for later:** devices without an Ethernet header (tun, WireGuard, IP tunnels), which
+  Step 8 skips. The programs would need to know, per packet, that the frame starts at the IP
+  header, for instance from a per-interface set in the configuration. That is worth its own
+  step after Phase 2 (VPN traffic is common), with the inbound redirect revisited for L3
+  targets (Step 9's note).
+
+The original plan of the step follows.
 
 **Where.** `crates/ebpf/bpf/tc.bpf.c`, `crates/avulse/src/backend/linux/`.
 
@@ -955,6 +997,6 @@ what the `avulse` crate and its Linux backend now hold).
 - [x] Step 8: Linux backend: open, attach, registry, heartbeat, receive
 - [x] Step 9: injection
 - [x] Step 10: matcher coverage and superset fallback
-- [ ] Step 11: ETHERNET layer
+- [x] Step 11: ETHERNET layer (devices without an Ethernet header left for later)
 - [ ] Step 12: privileged suite on both VMs (Phase 2 exit)
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement

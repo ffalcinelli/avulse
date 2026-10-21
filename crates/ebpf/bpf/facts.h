@@ -28,6 +28,7 @@
 #define M_VLAN     (1u << 3) /* `vlan_tci` holds an offloaded outer VLAN tag */
 #define M_FORWARD  (1u << 4) /* forwarded (NETWORK_FORWARD) */
 #define M_SNIFFED  (1u << 5) /* records only: the packet went on */
+#define M_VLAN_AD  (1u << 6) /* with M_VLAN: the offloaded tag's TPID is 0x88a8 (else 0x8100) */
 
 /* Slots of the `avulse_progs` program array. */
 #define SLOT_MATCHER 0

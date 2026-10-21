@@ -122,8 +122,12 @@ of kind `PermissionDenied`. Kernel 5.10 or later with BTF is supported (tested o
   they are when it opens. Only Ethernet and loopback devices are supported; tun and WireGuard
   devices are skipped, or refused when named. Loopback traffic is seen once, as outbound.
 - **VLAN tags.** When the network card takes the outer tag off (VLAN offload), the backend puts it
-  back where it was: in the frame at the `Ethernet` layer, and in `vlan`/`vlan_tci` at every
-  layer.
+  back where it was, with its TPID (0x8100, or 0x88a8 for an 802.1ad tag): in the frame at the
+  `Ethernet` layer, and in `vlan`/`vlan_tci` at every layer. Frames go out and in with their tags
+  in the frame, whatever the offload setting.
+- **The `Ethernet` layer** sees every frame on the selected interfaces, ARP, LLDP and tagged ones
+  included, from the destination MAC address on (`Link::Ethernet`). Sending puts a frame out of
+  `if_idx` as it is, or in through `lo`, non-IP frames too.
 - **Priorities** become TC priorities: `30001 - priority` (lower runs first). Priority 0 takes the
   next TC priority after every open handle.
 - **Packet marks.** Packets a handle sends carry `0x4156____` in `skb->mark` (the low 16 bits are
@@ -140,7 +144,7 @@ of kind `PermissionDenied`. Kernel 5.10 or later with BTF is supported (tested o
 
 The backend compiles the filter to eBPF when the handle opens, and the kernel decides each packet
 on its own: no trip to user space for the packets the filter does not match. That covers the
-header fields of Ethernet, VLAN tags, IPv4, IPv6, TCP (with the MSS, window scale, SACK
+header fields of Ethernet, VLAN tags, ARP, IPv4, IPv6, TCP (with the MSS, window scale, SACK
 permitted and timestamps options), UDP and ICMP; quantifiers, sets (searched as a tree, whatever
 their size), address prefixes and ranges; comparisons and slices of bytes, and `contains` in
 headers; `len()`, `count()`, arithmetic and `&` on numbers, and comparisons of two fields; and the
@@ -153,7 +157,7 @@ so that the kernel takes a superset of the packets the filter matches, and user 
 whole filter on them. It keeps the matching ones and sends the others back at once; with `DROP`,
 it drops the matching ones. Among what is widened: `contains` and `matches` on payloads and
 frames, layer operators (`vlan.id#2`), `@field`, `&` on bytes, slices of several ranges, string
-functions, `timestamp` and `random*`, and the ARP and ICMP identifier fields. `avulse filter
+functions, `timestamp` and `random*`, and the ICMP identifier fields. `avulse filter
 explain` prints what the kernel runs:
 
 ```console
@@ -163,5 +167,7 @@ linux kernel: the superset `tcp.dstport == 80`, and user space filters what it t
 ```
 
 At the `Ethernet` layer, a frame whose outer VLAN tag the card took off is seen without it by the
-kernel. A filter that reads the link-layer layout (`eth.type`, `vlan.*`, `frame` bytes and
-length) takes such frames to user space, which decides with the tag back in place.
+kernel, and the filter as if it were in place: `vlan.*`, `ieee8021ad.*`, `eth.type` and
+`frame.len` count it. A filter that reads link-layer bytes (`frame`, `eth`, or the tags' bytes,
+`vlan` and `ieee8021ad`, compared or sliced) takes such frames to user space, which decides with
+the tag back in place.

@@ -230,6 +230,25 @@ pub fn arp() -> Vec<u8> {
     f
 }
 
+/// An ARP reply, and ARP packets with other address sizes.
+pub fn arps() -> Vec<Vec<u8>> {
+    let mut reply = vec![0, 1, 8, 0, 6, 4, 0, 2];
+    reply.extend([2, 0, 0, 0, 0, 2, 10, 0, 0, 2]);
+    reply.extend([2, 0, 0, 0, 0, 1, 10, 0, 0, 1]);
+    // 8-byte hardware addresses, IPv4.
+    let mut long_hw = vec![0, 6, 8, 0, 8, 4, 0, 1];
+    long_hw.extend([1, 2, 3, 4, 5, 6, 7, 8, 10, 0, 0, 3]);
+    long_hw.extend([0; 8]);
+    long_hw.extend([10, 0, 0, 4]);
+    // Ethernet, but a 16-byte protocol address.
+    let mut v6 = vec![0, 1, 0x86, 0xdd, 6, 16, 0, 1];
+    v6.extend([2, 0, 0, 0, 0, 3]);
+    v6.extend([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    v6.extend([0; 6]);
+    v6.extend([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+    vec![reply, long_hw, v6]
+}
+
 const PAYLOADS: &[&[u8]] = &[
     b"",
     b"GET / HTTP/1.1\r\n\r\n",
@@ -294,6 +313,15 @@ pub fn corpus(seed: u64, mutants: usize, min_len: usize) -> Vec<Vec<u8>> {
         base.push(eth(&[], 0x86dd, &ipv6(6, &[], 0, &t)));
     }
     base.push(eth(&[], 0x0806, &arp()));
+    for a in arps() {
+        base.push(eth(&[], 0x0806, &a));
+    }
+    base.push(eth(&[(0x8100, 30)], 0x0806, &arp()));
+    base.push(eth(
+        &[(0x88a8, 0x2028)],
+        0x0800,
+        &ipv4(&Ip4::default(), &udp(53, 53, b"x")),
+    ));
     base.push(eth(&[], 0x88cc, &[1, 2, 3, 4]));
     base.push(eth(
         &[(0x8100, 1), (0x8100, 2), (0x8100, 3)],
@@ -579,6 +607,19 @@ pub const SUPPORTED: &[&str] = &[
     "all tcp.port > tcp.hdr_len",
     "tcp.flags.syn == tcp.flags.ack",
     "ip.src == ip.dst",
+    // ARP.
+    "arp.opcode == 1",
+    "arp.opcode == reply",
+    "arp.hw.type == 1",
+    "arp.proto.type == 0x0800",
+    "arp.hw.size == 6",
+    "arp.proto.size != 4",
+    "arp.src.hw_mac == 02:00:00:00:00:01",
+    "arp.dst.hw_mac == 02:00:00:00:00:01",
+    "arp.src.proto_ipv4 == 10.0.0.1",
+    "arp.dst.proto_ipv4 in {10.0.0.0/30}",
+    "arp[7] == 1",
+    "len(arp) == 28",
     // Large sets: trees of jumps.
     "tcp.port in {1 3 5 7 9 11 13 22 25 53 80 110 143 443 993 8000..8100}",
     "ip.addr in {10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 8.8.8.8 1.1.1.1 9.9.9.9}",
@@ -599,8 +640,8 @@ pub const UNSUPPORTED: &[&str] = &[
     "ipv6[0] == 0x60",
     "random8 < 128",
     "timestamp > 0",
-    "arp.opcode == 1",
     "icmp.ident == 1",
+    "arp contains 0a:00:00:02",
     "tcp.srcport * tcp.dstport * tcp.seq_raw > 0",
     "tcp.dstport / (tcp.srcport - 53) > 0",
     "ip.src[0] == 10",

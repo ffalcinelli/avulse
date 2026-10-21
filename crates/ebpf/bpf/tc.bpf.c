@@ -288,8 +288,12 @@ static __always_inline void parse_arp(struct __sk_buff *skb, struct avulse_facts
     f->pay = f->pay_end = off + n;
 }
 
-/* Packet::parse for Link::Ethernet. */
-static __always_inline void parse(struct __sk_buff *skb, struct avulse_facts *f)
+/*
+ * Packet::parse for Link::Ethernet, of the frame as user space sees it: when the device took
+ * the outer VLAN tag off (offload), user space puts it back, so only one more tag fits in
+ * Packet's two (`max_tags`).
+ */
+static __always_inline void parse(struct __sk_buff *skb, struct avulse_facts *f, __u32 max_tags)
 {
     __u32 len = skb->len, off = ETH_LEN, et;
 
@@ -302,7 +306,7 @@ static __always_inline void parse(struct __sk_buff *skb, struct avulse_facts *f)
     f->pay = off;
 #pragma unroll
     for (int i = 0; i < MAX_VLANS; i++) {
-        if (!is_vlan(et))
+        if (!is_vlan(et) || i >= max_tags)
             break;
         if (off + 4 > len || ld16(skb, off + 2, &et))
             return;
@@ -395,9 +399,12 @@ static __always_inline int classify(struct __sk_buff *skb, int outbound)
     if (skb->vlan_present) {
         meta |= M_VLAN;
         vlan_tci = skb->vlan_tci;
+        /* vlan_proto is in network byte order. */
+        if (skb->vlan_proto == __builtin_bswap16(0x88a8))
+            meta |= M_VLAN_AD;
     }
 
-    parse(skb, f);
+    parse(skb, f, (meta & M_VLAN) ? MAX_VLANS - 1 : MAX_VLANS);
     f->layer = layer;
     f->ifindex = skb->ifindex;
     f->vlan_tci = vlan_tci;

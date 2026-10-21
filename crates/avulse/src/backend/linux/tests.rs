@@ -4,7 +4,7 @@
 
 use avulse_ebpf::abi::{RECORD_HEADER, Record};
 use avulse_ebpf::facts::{
-    F_ETH, F_ICMP, F_IPV4, F_IPV6, M_IMPOSTOR, M_OUTBOUND, M_SNIFFED, M_VLAN,
+    F_ETH, F_ICMP, F_IPV4, F_IPV6, M_IMPOSTOR, M_OUTBOUND, M_SNIFFED, M_VLAN, M_VLAN_AD,
 };
 use avulse_ebpf::loader::{Attachment, Hook};
 use avulse_filter::Layer;
@@ -119,6 +119,16 @@ fn vlan_tags() {
     let e = entry(&record(&untagged, 14, M_VLAN, 0, 0x2005), Layer::Network).unwrap();
     assert_eq!(e.data, ping());
     assert_eq!(Ctx::decode(&e.addr.context).unwrap().l2(), &tagged[..18]);
+
+    // An offloaded 802.1ad tag keeps its TPID.
+    let qinq = frame(&[[0x88, 0xa8, 0, 20], [0x81, 0, 0, 10]], [8, 0], &ping());
+    let inner_only = frame(&[[0x81, 0, 0, 10]], [8, 0], &ping());
+    let e = entry(
+        &record(&inner_only, 18, M_VLAN | M_VLAN_AD, 0, 20),
+        Layer::Ethernet,
+    )
+    .unwrap();
+    assert_eq!(e.data, qinq);
 
     // QinQ, with the outer tag offloaded: three tags.
     let inner = frame(&[[0x81, 0, 0, 1], [0x81, 0, 0, 2]], [8, 0], &ping());

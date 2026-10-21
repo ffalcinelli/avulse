@@ -239,8 +239,9 @@ and the CLI is usable.
 Progress (steps in `docs/implementation-plan.md`): the kernel side of capture (Step 7), the backend's receive
 side (Step 8: open, attach, registry, heartbeat, queue, `avulse cleanup`) and injection (Step 9: raw and
 `AF_PACKET` sockets, the `lo` redirect, GSO, reinjection by user-space filters) and the matcher's coverage with the
-superset fallback (Step 10: metadata, IPv6, VLAN, TCP options, arithmetic, set trees) are done and tested on both
-VMs. Next: ETHERNET (Step 11), the privileged suite (Step 12).
+superset fallback (Step 10: metadata, IPv6, VLAN, TCP options, arithmetic, set trees) and the ETHERNET layer
+(Step 11: ARP, VLAN and QinQ with or without offload, non-IP injection) are done and tested on both VMs. Next: the
+privileged suite (Step 12); devices without an Ethernet header (tun, WireGuard) come after it.
 
 Exit: privileged tests pass on both Vagrant VMs, covering divert, inject, GSO, forward, ETHERNET/ARP/VLAN, crash
 cleanup, and exact in-kernel match versus interpreter (`BPF_PROG_TEST_RUN`).

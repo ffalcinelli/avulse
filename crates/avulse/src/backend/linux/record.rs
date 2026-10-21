@@ -1,7 +1,9 @@
 //! From a ring buffer record to a packet and its [`Address`], with the reinjection context.
 
 use avulse_ebpf::abi::Record;
-use avulse_ebpf::facts::{F_IPV6, M_IMPOSTOR, M_LOOPBACK, M_OUTBOUND, M_SNIFFED, M_VLAN};
+use avulse_ebpf::facts::{
+    F_IPV6, M_IMPOSTOR, M_LOOPBACK, M_OUTBOUND, M_SNIFFED, M_VLAN, M_VLAN_AD,
+};
 use avulse_filter::{Event, Layer};
 use avulse_proto::{Link, checksum};
 
@@ -85,14 +87,19 @@ fn is_vlan(ethertype: &[u8]) -> bool {
 /// inconsistent.
 ///
 /// A VLAN tag the device took off (offload, [`M_VLAN`]) goes back into the frame as it was on the
-/// wire, with TPID 0x8100: in the packet at the ETHERNET layer, in the saved link-layer header at
-/// the NETWORK layers.
+/// wire, with its TPID (0x88a8 with [`M_VLAN_AD`], else 0x8100): in the packet at the ETHERNET
+/// layer, in the saved link-layer header at the NETWORK layers.
 pub fn entry(rec: &Record<'_>, layer: Layer) -> Option<Entry> {
     let mut frame = rec.data.to_vec();
     let mut l3 = rec.l3 as usize;
     if rec.meta & M_VLAN != 0 && frame.len() >= 12 {
         let [hi, lo] = rec.vlan_tci.to_be_bytes();
-        frame.splice(12..12, [0x81, 0x00, hi, lo]);
+        let tpid = if rec.meta & M_VLAN_AD != 0 {
+            [0x88, 0xa8]
+        } else {
+            [0x81, 0x00]
+        };
+        frame.splice(12..12, [tpid[0], tpid[1], hi, lo]);
         l3 += 4;
     }
     let network = layer != Layer::Ethernet;

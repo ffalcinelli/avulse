@@ -16,7 +16,7 @@ mod windivert_vectors;
 mod tshark_filters;
 
 use avulse_ebpf::codegen::{self, Env, Error, Matcher};
-use avulse_ebpf::facts::{F_IPV4, F_IPV6, Facts, M_OUTBOUND, M_VLAN};
+use avulse_ebpf::facts::{F_IPV4, F_IPV6, Facts, M_OUTBOUND};
 use avulse_filter::{Filter, Layer, Meta};
 use avulse_proto::{Link, Packet};
 use common::emu::{self, FACTS_FD, Outcome, PROGS_FD};
@@ -259,30 +259,34 @@ fn windivert_vectors_agree() {
 }
 
 /// At the ETHERNET layer the device may have taken the outer VLAN tag off the frame: user
-/// space puts it back (TPID 0x8100), and the matcher must agree with the frame as user space
-/// sees it, or take it (a superset) when the filter reads the link-layer layout.
+/// space puts it back (with its TPID), and the matcher must agree with the frame as user space
+/// sees it, from the facts the kernel computes (`Facts::offloaded`), or take it (a superset)
+/// when the filter reads link-layer bytes.
 #[test]
 fn offloaded_vlan_tags() {
-    let frames: Vec<Vec<u8>> = common::corpus(10, 2000, 0)
+    let frames: Vec<Vec<u8>> = common::corpus(10, 3000, 0)
         .into_iter()
-        .filter(|f| f.len() >= 18 && f[12..14] == [0x81, 0x00])
+        .filter(|f| f.len() >= 18 && matches!(f[12..14], [0x81, 0x00] | [0x88, 0xa8]))
         .collect();
-    assert!(frames.len() > 50, "{}", frames.len());
+    assert!(frames.len() > 100, "{}", frames.len());
     let env = common::env(Layer::Ethernet);
     for src in common::SUPPORTED {
         let filter = Filter::compile(src).unwrap();
         let m = codegen::compile(filter.ir(), &env).unwrap();
         let insns = m.with_fds(FACTS_FD, PROGS_FD);
-        for frame in &frames {
+        for (i, frame) in frames.iter().enumerate() {
             let stripped = [&frame[..12], &frame[16..]].concat();
+            let restored = Packet::parse(frame, Link::Ethernet);
+            let (bits, ifindex) = common::variant(i);
+            let facts = Facts::offloaded(&restored).unwrap();
             let facts = Facts {
                 layer: Layer::Ethernet as u8,
-                meta: M_VLAN,
-                vlan_tci: u16::from_be_bytes([frame[14], frame[15]]),
-                ..Facts::from_packet(&Packet::parse(&stripped, Link::Ethernet))
+                meta: facts.meta | bits,
+                ifindex,
+                ..facts
             };
-            let meta = common::meta(Layer::Ethernet, 0, 0);
-            let want = filter.matches(&Packet::parse(frame, Link::Ethernet), &meta);
+            let meta = common::meta(Layer::Ethernet, bits, ifindex);
+            let want = filter.matches(&restored, &meta);
             let got = emu::run(&insns, &facts, &stripped);
             if m.exact() {
                 assert_eq!(got, Outcome::Verdict(want), "{src} on {frame:02x?}");

@@ -122,6 +122,9 @@ pub const M_VLAN: u8 = 1 << 3;
 pub const M_FORWARD: u8 = 1 << 4;
 /// Records only: the packet was copied and went on.
 pub const M_SNIFFED: u8 = 1 << 5;
+/// With [`M_VLAN`]: the offloaded tag is an 802.1ad tag (TPID 0x88a8), not an 802.1Q one
+/// (0x8100). The kernel offloads no other kind.
+pub const M_VLAN_AD: u8 = 1 << 6;
 
 /// The program array slot of the generated matcher.
 pub const SLOT_MATCHER: u32 = 0;
@@ -182,6 +185,29 @@ impl Facts {
             opts,
             ..Facts::default()
         }
+    }
+
+    /// The facts of a frame whose outer VLAN tag the device took off: `restored` is the frame
+    /// with the tag in place (as user space puts it back), the kernel sees it without those 4
+    /// bytes, and with [`M_VLAN`] (and [`M_VLAN_AD`] for TPID 0x88a8) and the tag's TCI. The
+    /// parser then takes one in-band tag less, so that it finds what parsing `restored` finds.
+    /// `None` if `restored` has no tag to take off.
+    pub fn offloaded(restored: &Packet<'_>) -> Option<Facts> {
+        let tag = *restored.vlans().first()?;
+        let f = Facts::from_packet(restored);
+        let back = |v: u32| if v >= 16 { v - 4 } else { v };
+        let ad = if tag.tpid == 0x88a8 { M_VLAN_AD } else { 0 };
+        Some(Facts {
+            len: f.len - 4,
+            l3: back(f.l3),
+            l4: back(f.l4),
+            pay: back(f.pay),
+            pay_end: back(f.pay_end),
+            vlans: f.vlans - 1,
+            vlan_tci: tag.tci,
+            meta: f.meta | M_VLAN | ad,
+            ..f
+        })
     }
 
     /// The facts at the NETWORK layers, from those of the Ethernet frame: the filter sees the
