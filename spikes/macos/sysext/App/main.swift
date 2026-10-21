@@ -1,8 +1,12 @@
-// The host app: checks that the Rust library runs inside a Swift process, then asks for the
-// system extension to be activated and prints how the request ends, as `RESULT <outcome>`.
+// The host app: checks that the Rust library runs inside a Swift process, asks for the system
+// extension to be activated, and, if that works, enables it as the packet filter and times a
+// few HTTPS requests with and without it. Prints `RESULT <outcome>` lines.
 
 import Foundation
+import NetworkExtension
 import SystemExtensions
+
+let extensionId = "com.github.ffalcinelli.avulse.spike.filter"
 
 func selfTest() -> String {
     var prog = [UInt8](repeating: 0, count: 65536)
@@ -20,6 +24,49 @@ func selfTest() -> String {
     return hit == 1 && miss == 0 ? "ok (\(n) bytes of bytecode)" : "wrong: \(hit) \(miss)"
 }
 
+/// Seconds for each of a few HTTPS requests.
+func timeRequests(_ label: String) {
+    var times: [String] = []
+    for _ in 0..<5 {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        p.arguments = ["-sS", "-o", "/dev/null", "-w", "%{time_total}", "https://github.com/"]
+        let out = Pipe()
+        p.standardOutput = out
+        try? p.run()
+        p.waitUntilExit()
+        let s = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+        times.append(s ?? "?")
+    }
+    print("RESULT curl \(label): \(times.joined(separator: " "))")
+}
+
+func enableFilter() {
+    let m = NEFilterManager.shared()
+    m.loadFromPreferences { err in
+        if let err = err { print("RESULT load-preferences failed: \(err)") }
+        let c = NEFilterProviderConfiguration()
+        c.filterPackets = true
+        c.filterSockets = false
+        c.filterPacketProviderBundleIdentifier = extensionId
+        m.providerConfiguration = c
+        m.localizedDescription = "Avulse spike"
+        m.isEnabled = true
+        m.saveToPreferences { err in
+            if let err = err as NSError? {
+                print("RESULT filter-save failed domain=\(err.domain) code=\(err.code) \(err)")
+                exit(5)
+            }
+            print("RESULT filter-enabled")
+            DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+                timeRequests("with the filter")
+                m.isEnabled = false
+                m.saveToPreferences { _ in exit(0) }
+            }
+        }
+    }
+}
+
 class Delegate: NSObject, OSSystemExtensionRequestDelegate {
     func request(
         _ request: OSSystemExtensionRequest,
@@ -30,16 +77,16 @@ class Delegate: NSObject, OSSystemExtensionRequestDelegate {
     }
 
     func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
+        // Keep waiting: the request may still complete if something approves it.
         print("RESULT needs-user-approval")
-        exit(3)
     }
 
     func request(
         _ request: OSSystemExtensionRequest,
         didFinishWithResult result: OSSystemExtensionRequest.Result
     ) {
-        print("RESULT finished \(result.rawValue)")
-        exit(0)
+        print("RESULT activated \(result.rawValue)")
+        enableFilter()
     }
 
     func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
@@ -49,13 +96,15 @@ class Delegate: NSObject, OSSystemExtensionRequestDelegate {
     }
 }
 
+setvbuf(stdout, nil, _IOLBF, 0)
 print("SELFTEST \(selfTest())")
+timeRequests("without the filter")
 let delegate = Delegate()
 let request = OSSystemExtensionRequest.activationRequest(
-    forExtensionWithIdentifier: "com.github.ffalcinelli.avulse.spike.filter", queue: .main)
+    forExtensionWithIdentifier: extensionId, queue: .main)
 request.delegate = delegate
 OSSystemExtensionManager.shared.submitRequest(request)
-DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+DispatchQueue.main.asyncAfter(deadline: .now() + 45) {
     print("RESULT timeout")
     exit(4)
 }

@@ -40,7 +40,7 @@ for variant in AvulseSpike AvulseSpikePlain; do
     if [ "$variant" = AvulseSpike ]; then
         swift_build FilterExt "$sx/Contents/MacOS/$ext" NetworkExtension Network -- \
             "$here/Filter/FilterPacketProvider.swift" "$here/Filter/main.swift"
-        swift_build AvulseSpike "$app/Contents/MacOS/AvulseSpike" SystemExtensions -- \
+        swift_build AvulseSpike "$app/Contents/MacOS/AvulseSpike" SystemExtensions NetworkExtension -- \
             "$here/App/main.swift"
         codesign --force --sign - --options runtime --entitlements "$here/Filter.entitlements" "$sx"
         codesign --force --sign - --options runtime --entitlements "$here/App.entitlements" "$app"

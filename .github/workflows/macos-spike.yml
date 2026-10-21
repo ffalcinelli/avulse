@@ -34,6 +34,8 @@ jobs:
           toolchain: stable
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - run: cargo build --release
+      # Created by the runner user, so that the steps that do not run as root can append too.
+      - run: touch report.jsonl
       - name: Environment (before any setup)
         continue-on-error: true
         run: sudo ./target/release/probe report.jsonl env
