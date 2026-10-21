@@ -12,7 +12,8 @@ emit() { # name, ok (true/false/null), value
 # macOS has no timeout(1).
 with_timeout() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 
-emit developer_mode null "$(sudo systemextensionsctl developer on 2>&1; systemextensionsctl developer 2>&1)"
+# It may wait for someone to confirm in the GUI: give up after 30 s.
+emit developer_mode null "$(with_timeout 30 sudo systemextensionsctl developer on 2>&1; echo "exit $?"; with_timeout 10 systemextensionsctl developer 2>&1)"
 for variant in AvulseSpike AvulseSpikePlain; do
     sudo rm -rf "/Applications/$variant.app"
     sudo cp -R "$out/$variant.app" /Applications/
@@ -23,8 +24,8 @@ for variant in AvulseSpike AvulseSpikePlain; do
     grep -q 'SELFTEST ok' <<<"$output" && ok=true
     emit "$variant.run" "$ok" "exit $status
 $output"
-    emit "$variant.state" null "$(systemextensionsctl list 2>&1)"
-    logs=$(log show --start "$start" --style compact --info \
+    emit "$variant.state" null "$(with_timeout 20 systemextensionsctl list 2>&1)"
+    logs=$(with_timeout 60 log show --start "$start" --style compact --info \
         --predicate 'process == "sysextd" OR process == "amfid" OR process == "nesessionmanager" OR subsystem == "com.github.ffalcinelli.avulse.spike" OR eventMessage CONTAINS "AvulseSpike" OR eventMessage CONTAINS "avulse"' \
         2>&1 | tail -n 80)
     emit "$variant.log" null "$logs"
