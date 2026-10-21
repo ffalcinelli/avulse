@@ -157,10 +157,16 @@ pub fn run(insns: &[Insn], facts: &Facts, frame: &[u8]) -> Outcome {
                         0x00 => d.wrapping_add(s),
                         0x10 => d.wrapping_sub(s),
                         0x20 => d.wrapping_mul(s),
+                        0x30 if wide => d.checked_div(s).unwrap_or(0),
+                        0x30 => (d as u32).checked_div(s as u32).unwrap_or(0) as u64,
+                        0x40 => d | s,
                         0x50 => d & s,
                         0x60 => d << (s & if wide { 63 } else { 31 }),
                         0x70 if wide => d >> (s & 63),
                         0x70 => ((d as u32) >> (s & 31)) as u64,
+                        0x90 if wide => d.checked_rem(s).unwrap_or(d),
+                        0x90 => (d as u32).checked_rem(s as u32).unwrap_or(d as u32) as u64,
+                        0xa0 => d ^ s,
                         0xb0 => s,
                         _ => panic!("ALU op {op:#x}"),
                     };
@@ -253,9 +259,11 @@ pub fn run(insns: &[Insn], facts: &Facts, frame: &[u8]) -> Outcome {
                             0x40 => a & b != 0,
                             0x50 => a != b,
                             0x60 => sa > sb,
+                            0x70 => sa >= sb,
                             0xa0 => a < b,
                             0xb0 => a <= b,
                             0xc0 => sa < sb,
+                            0xd0 => sa <= sb,
                             _ => panic!("jump op {op:#x}"),
                         };
                         if taken { jump(pc, i.off) } else { pc + 1 }

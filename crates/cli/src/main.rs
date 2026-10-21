@@ -131,6 +131,27 @@ impl Source {
     }
 }
 
+/// What the Linux kernel runs of a filter, at the NETWORK layer.
+fn linux_kernel(f: &Filter) -> String {
+    use avulse_ebpf::codegen::{self, Env};
+    let env = Env::new(Layer::Network);
+    match codegen::compile(f.ir(), &env) {
+        Ok(_) => "linux kernel: exact\n".into(),
+        Err(codegen::Error::TooLarge) => {
+            "linux kernel: every packet, and user space filters them (the filter is too large)\n"
+                .into()
+        }
+        Err(e) => {
+            let s = codegen::superset(f.ir(), &env);
+            let widened = match s.test {
+                avulse_filter::ir::Test::Const(true) => "every packet".to_string(),
+                t => format!("the superset `{}`", t.native()),
+            };
+            format!("linux kernel: {widened}, and user space filters what it takes ({e})\n")
+        }
+    }
+}
+
 fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(code) => code,
@@ -198,6 +219,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             if f.user_space_only() {
                 text += "note: `matches` runs in user space only; kernel backends pass these packets up\n";
             }
+            text += &linux_kernel(&f);
             if bytecode {
                 match f.program() {
                     Ok(p) => {

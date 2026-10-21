@@ -56,11 +56,17 @@ tcp.port == 80 and not udp
 ## `avulse filter explain`
 
 Compiles the filter and prints the typed intermediate representation as an S-expression, after
-macro expansion and simplification. It notes when the filter needs user space.
+macro expansion and simplification. It notes when the filter needs user space, and says what the
+Linux kernel runs at the NETWORK layer: the filter exactly, or a superset of it, whose packets
+user space filters again (see [Handles](../libraries/handles.md#where-filters-run)).
 
 ```console
 $ avulse filter explain 'tcp.flags & syn and not tcp.flags & ack'
 (and (true (& tcp.flags 2)) (not (true (& tcp.flags 16))))
+linux kernel: exact
+$ avulse filter explain 'tcp.dstport == 80 and tcp.payload contains "GET"'
+(and (any_eq tcp.dstport 80) (contains tcp.payload 47:45:54))
+linux kernel: the superset `tcp.dstport == 80`, and user space filters what it takes (the eBPF generator does not support `contains` on bytes that may be longer than 64)
 ```
 
 With `--bytecode`, it also prints the program that the kernel backends verify and run (see
@@ -69,6 +75,8 @@ With `--bytecode`, it also prints the program that the kernel backends verify an
 ```console
 $ avulse filter explain --bytecode 'tcp.dstport in {80 443} and not ip.src == 10.0.0.0/8'
 (and (in tcp.dstport 80 443) (not (any_eq ip.src 10.0.0.0/8)))
+
+linux kernel: exact
 
 bytecode, 7 instructions, 101 bytes:
 0  field    r0, tcp.dstport

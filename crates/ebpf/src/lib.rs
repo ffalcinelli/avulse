@@ -8,21 +8,30 @@
 //!   heartbeat, marks), parse the headers as [`avulse_proto::Packet`] does into per-CPU
 //!   [`facts`], and tail-call the matcher. The matcher tail-calls `avulse_act`, which diverts
 //!   the packet to a ring buffer ([`abi::Record`]), copies it, or drops it;
-//! - [`codegen`] turns a filter's IR into that matcher, with the assembler in [`insn`];
+//! - [`codegen`] turns a filter's IR into that matcher, with the assembler in [`insn`]; what it
+//!   cannot compile it widens to a superset ([`codegen::compile_superset`]), which user space
+//!   filters again;
 //! - `loader` (Linux only) loads the static object with `aya` and the matcher with the `bpf()`
 //!   system call, and runs them with `BPF_PROG_TEST_RUN`.
 //!
 //! See `docs/spikes/ebpf-codegen.md` for what the spike found.
 //!
 //! ```
-//! use avulse_filter::Filter;
+//! use avulse_ebpf::codegen::{self, Env};
+//! use avulse_filter::{Filter, Layer};
 //!
+//! let env = Env::new(Layer::Network);
 //! let filter = Filter::compile("tcp.dstport == 80 and ip.src == 10.0.0.0/8").unwrap();
-//! let matcher = avulse_ebpf::codegen::compile(filter.ir()).unwrap();
-//! assert!(matcher.insns().len() < 100);
+//! let matcher = codegen::compile(filter.ir(), &env).unwrap();
+//! assert!(matcher.exact() && matcher.insns().len() < 100);
 //!
-//! let regex = Filter::compile(r#"tcp.payload contains "GET""#).unwrap();
-//! assert!(avulse_ebpf::codegen::compile(regex.ir()).is_err());
+//! // A search of the whole payload does not run in the kernel: the kernel takes what has a
+//! // TCP payload, and user space looks for "GET" in it.
+//! let get = Filter::compile(r#"tcp.dstport == 80 and tcp.payload contains "GET""#).unwrap();
+//! assert!(codegen::compile(get.ir(), &env).is_err());
+//! let superset = codegen::superset(get.ir(), &env);
+//! assert_eq!(superset.test.native().to_string(), "tcp.dstport == 80");
+//! assert!(!codegen::compile_superset(get.ir(), &env).unwrap().exact());
 //! ```
 
 pub mod abi;

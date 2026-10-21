@@ -107,10 +107,7 @@ The Linux backend runs eBPF programs on the traffic-control (TC) hooks of each i
 a handle needs `CAP_BPF` and `CAP_NET_ADMIN`, or root; without them it fails with an `Error::Io`
 of kind `PermissionDenied`. Kernel 5.10 or later with BTF is supported (tested on 5.15 and 6.8).
 
-- **Filters run in the kernel** when the code generator supports them; the others take every
-  packet of the layer to user space, which keeps the matching ones and sends the others back at
-  once (with `DROP`, it drops the matching ones). That costs a trip to user space per packet.
-  Today it includes every filter with metadata fields, such as `outbound` or `iface`.
+- **Filters run in the kernel** (see [Where filters run](#where-filters-run) below).
 - **Sending** needs `CAP_NET_RAW` as well. Loopback packets, and new packets with an empty
   `context`, go through a raw IP socket and are routed like local traffic. A packet received
   outbound (or forwarded) goes back out of the interface it was captured on, behind the Ethernet
@@ -138,3 +135,33 @@ of kind `PermissionDenied`. Kernel 5.10 or later with BTF is supported (tested o
   every packet within 3 seconds (a heartbeat stops). The next `Handle::open` removes them, and so
   does `avulse cleanup` (or `avulse::cleanup()`). Open handles are listed in a registry pinned at
   `/sys/fs/bpf/avulse/`.
+
+### Where filters run
+
+The backend compiles the filter to eBPF when the handle opens, and the kernel decides each packet
+on its own: no trip to user space for the packets the filter does not match. That covers the
+header fields of Ethernet, VLAN tags, IPv4, IPv6, TCP (with the MSS, window scale, SACK
+permitted and timestamps options), UDP and ICMP; quantifiers, sets (searched as a tree, whatever
+their size), address prefixes and ranges; comparisons and slices of bytes, and `contains` in
+headers; `len()`, `count()`, arithmetic and `&` on numbers, and comparisons of two fields; and the
+metadata: `inbound`/`outbound`, `loopback`, `impostor`, `fragment`, `ifidx`, `iface` (by name,
+resolved when the handle opens: an interface renamed later is not seen under its new name),
+`protocol`, `local.*`/`remote.*`, and `layer`, `event` and `priority`.
+
+What the kernel cannot run is widened: each such test becomes `true` (or `false` under a `not`),
+so that the kernel takes a superset of the packets the filter matches, and user space runs the
+whole filter on them. It keeps the matching ones and sends the others back at once; with `DROP`,
+it drops the matching ones. Among what is widened: `contains` and `matches` on payloads and
+frames, layer operators (`vlan.id#2`), `@field`, `&` on bytes, slices of several ranges, string
+functions, `timestamp` and `random*`, and the ARP and ICMP identifier fields. `avulse filter
+explain` prints what the kernel runs:
+
+```console
+$ avulse filter explain 'tcp.dstport == 80 and tcp.payload contains "GET"'
+(and (any_eq tcp.dstport 80) (contains tcp.payload 47:45:54))
+linux kernel: the superset `tcp.dstport == 80`, and user space filters what it takes (the eBPF generator does not support `contains` on bytes that may be longer than 64)
+```
+
+At the `Ethernet` layer, a frame whose outer VLAN tag the card took off is seen without it by the
+kernel. A filter that reads the link-layer layout (`eth.type`, `vlan.*`, `frame` bytes and
+length) takes such frames to user space, which decides with the tag back in place.

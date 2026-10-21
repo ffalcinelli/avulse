@@ -25,9 +25,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use avulse_ebpf::abi::{self, Config, Record};
-use avulse_ebpf::codegen;
+use avulse_ebpf::codegen::{self, Env};
 use avulse_ebpf::loader::{self, Classifier, Hook};
-use avulse_filter::ir::Test;
 use avulse_filter::{Filter, Layer};
 use avulse_proto::{Link, Packet};
 
@@ -190,7 +189,10 @@ impl Handle {
         if send_only {
             flags |= abi::CFG_SHUTDOWN;
         } else {
-            let exact = set_matcher(&mut classifier, spec.filter)?;
+            let (exact, options) = set_matcher(&mut classifier, spec)?;
+            if options {
+                flags |= abi::CFG_TCP_OPTIONS;
+            }
             if !exact {
                 // The kernel diverts (or copies) every packet of the layer; user space reinjects
                 // (or ignores) what the filter does not match, and drops what it matches.
@@ -287,20 +289,32 @@ impl Handle {
     }
 }
 
-/// Generates the matcher, or takes every packet of the layer when the code generator cannot
-/// compile the filter or the verifier rejects it. Returns whether the kernel matcher is exact.
-fn set_matcher(classifier: &mut Classifier, filter: &Filter) -> Result<bool> {
-    if let Ok(m) = codegen::compile(filter.ir()) {
+/// Generates the matcher: the filter exactly, or else a superset of it (unsupported tests
+/// widened), or else every packet of the layer, when the code generator cannot compile it or
+/// the verifier rejects it. Returns whether the kernel matcher is exact (when it is not, user
+/// space filters what it diverts), and whether it reads TCP options.
+fn set_matcher(classifier: &mut Classifier, spec: &Spec<'_>) -> Result<(bool, bool)> {
+    let resolve = |name: &str| loader::if_index(name).ok();
+    let env = Env {
+        layer: spec.layer,
+        priority: spec.priority,
+        ifindex: &resolve,
+    };
+    let ir = spec.filter.ir();
+    let candidates = [
+        codegen::compile_superset(ir, &env),
+        codegen::everything(&env),
+    ];
+    for m in candidates.into_iter().flatten() {
         match classifier.set_matcher(&m) {
-            Ok(_) => return Ok(true),
+            Ok(_) => return Ok((m.exact(), m.reads_tcp_options())),
             Err(loader::Error::Rejected { .. }) => {}
             Err(e) => return Err(io_error(e)),
         }
     }
-    let all = codegen::compile(&Test::Const(true))
-        .map_err(|e| Error::Io(io::Error::other(e.to_string())))?;
-    classifier.set_matcher(&all).map_err(io_error)?;
-    Ok(false)
+    Err(Error::Io(io::Error::other(
+        "the verifier rejects every matcher",
+    )))
 }
 
 /// The TC priority of a handle: `30001 - priority`, or after every open handle for priority 0.

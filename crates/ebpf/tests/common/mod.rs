@@ -1,9 +1,59 @@
-//! What the host and kernel tests share: a corpus of frames, the filters, and a random filter
-//! generator.
+//! What the host and kernel tests share: a corpus of frames, the filters, metadata variants,
+//! and a random filter generator.
 
 #![allow(dead_code)]
 
 pub mod emu;
+
+use avulse_ebpf::codegen::Env;
+use avulse_ebpf::facts::{M_IMPOSTOR, M_LOOPBACK, M_OUTBOUND};
+use avulse_filter::{Layer, Meta};
+
+/// The interfaces the tests name: index and name.
+pub const IFACES: &[(u32, &str)] = &[(1, "lo"), (2, "eth0"), (3, "veth3"), (7, "wlan0")];
+
+pub fn ifindex(name: &str) -> Option<u32> {
+    IFACES.iter().find(|(_, n)| *n == name).map(|(i, _)| *i)
+}
+
+/// What the generator knows of a test handle at `layer`.
+pub fn env(layer: Layer) -> Env<'static> {
+    Env {
+        layer,
+        priority: 0,
+        ifindex: &ifindex,
+    }
+}
+
+/// The metadata of the `i`th frame of a run: `M_*` bits and interface index.
+pub fn variant(i: usize) -> (u8, u32) {
+    [
+        (0, 2),
+        (M_OUTBOUND, 2),
+        (M_OUTBOUND | M_LOOPBACK, 1),
+        (M_IMPOSTOR, 3),
+        (M_OUTBOUND | M_IMPOSTOR, 7),
+    ][i % 5]
+}
+
+/// The metadata user space gives the filter for those facts.
+pub fn meta(layer: Layer, bits: u8, ifindex: u32) -> Meta<'static> {
+    Meta {
+        layer,
+        outbound: bits & M_OUTBOUND != 0,
+        loopback: bits & M_LOOPBACK != 0,
+        impostor: bits & M_IMPOSTOR != 0,
+        ifidx: ifindex,
+        // The backend names every interface, with "" when the name is unknown.
+        iface: Some(
+            IFACES
+                .iter()
+                .find(|(i, _)| *i == ifindex)
+                .map_or("", |(_, n)| *n),
+        ),
+        ..Meta::default()
+    }
+}
 
 /// A small deterministic generator (xorshift64*), so that failures reproduce.
 pub struct Rng(u64);
@@ -113,21 +163,49 @@ pub fn ipv6(nh: u8, exts: &[(u8, usize)], tclass: u8, body: &[u8]) -> Vec<u8> {
     f
 }
 
+/// A TCP header with `opts` words of options: none, an MSS, or a NOP, a window scale and
+/// SACK permitted.
 pub fn tcp(sport: u16, dport: u16, flags: u16, opts: usize, payload: &[u8]) -> Vec<u8> {
+    let o: &[u8] = match opts {
+        0 => &[],
+        1 => &[2, 4, 5, 0xb4],
+        _ => &[1, 3, 3, 7, 4, 2, 1, 1],
+    };
+    tcp_opts(sport, dport, flags, o, payload)
+}
+
+/// A TCP header with these option bytes, padded with zeros to a word.
+pub fn tcp_opts(sport: u16, dport: u16, flags: u16, opts: &[u8], payload: &[u8]) -> Vec<u8> {
+    let mut o = opts.to_vec();
+    o.resize(opts.len().div_ceil(4) * 4, 0);
     let mut f = Vec::new();
     f.extend(sport.to_be_bytes());
     f.extend(dport.to_be_bytes());
     f.extend(0x0102_0304_u32.to_be_bytes());
     f.extend(0x0506_0708_u32.to_be_bytes());
-    let doff = (5 + opts) as u16;
+    let doff = (5 + o.len() / 4) as u16;
     f.extend((doff << 12 | flags).to_be_bytes());
     f.extend([0x10, 0x00, 0xaa, 0xbb, 0, 0]);
-    for _ in 0..opts {
-        f.extend([2, 4, 5, 0xb4]);
-    }
+    f.extend(o);
     f.extend(payload);
     f
 }
+
+/// Option lists that exercise the walk: timestamps, a known option of the wrong length, the
+/// end of the list, a length below 2 or past the header, unknown kinds, a second MSS, a large
+/// window scale.
+const OPTIONS: &[&[u8]] = &[
+    &[1, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 0],
+    &[8, 10, 1, 2, 3, 4, 5, 6, 7, 8, 1, 0],
+    &[2, 3, 5, 0],
+    &[1, 1, 1, 0, 2, 4, 5, 0xb4],
+    &[3, 3, 15, 1],
+    &[5, 1, 2, 4, 5, 0xb4],
+    &[2, 4, 5, 0xb4, 2, 4, 1, 0],
+    &[254, 6, 0, 0, 0, 0, 4, 2],
+    &[2, 44, 5, 0xb4],
+    &[3, 3, 0, 4, 2, 2, 4, 1, 0x40, 1, 1],
+];
 
 pub fn udp(sport: u16, dport: u16, payload: &[u8]) -> Vec<u8> {
     let mut f = Vec::new();
@@ -203,6 +281,17 @@ pub fn corpus(seed: u64, mutants: usize, min_len: usize) -> Vec<Vec<u8>> {
             0x86dd,
             &ipv6(6, &[(51, 12), (44, 8), (44, 8)], 0, &t),
         ));
+    }
+    for (i, o) in OPTIONS.iter().enumerate() {
+        let t = tcp_opts(
+            443,
+            40000 + i as u16,
+            0x012,
+            o,
+            PAYLOADS[i % PAYLOADS.len()],
+        );
+        base.push(eth(&[], 0x0800, &ipv4(&Ip4::default(), &t)));
+        base.push(eth(&[], 0x86dd, &ipv6(6, &[], 0, &t)));
     }
     base.push(eth(&[], 0x0806, &arp()));
     base.push(eth(&[], 0x88cc, &[1, 2, 3, 4]));
@@ -387,41 +476,147 @@ pub const SUPPORTED: &[&str] = &[
     "udp.payload[0:4]",
     "frame[-1000:]",
     "frame[-60:]",
+    // Metadata.
+    "outbound",
+    "inbound",
+    "loopback",
+    "impostor",
+    "outbound and not impostor",
+    "fragment",
+    "ifidx == 2",
+    "ifidx > 2",
+    "iface == \"eth0\"",
+    "iface != \"wlan0\"",
+    "iface in {\"lo\" \"veth3\"}",
+    "iface not in {\"lo\" \"nonexistent\"}",
+    "protocol == 17",
+    "protocol in {1 58}",
+    "local.port == 80",
+    "remote.port in {80 443}",
+    "local.port != 53",
+    "local.addr == 10.0.0.0/8",
+    "remote.addr == 192.168.1.1",
+    "local.addr != 10.1.2.3",
+    "remote.addr == 2001:db8::2",
+    "local.addr in {172.16.0.0/12 fe80::/10}",
+    "remote.addr not in {192.168.1.1 2001:db8::2}",
+    "local.addr",
+    "remote.port",
+    // IPv6 addresses.
+    "ipv6.src == fe80::1",
+    "ipv6.dst == 2001:db8::/32",
+    "ipv6.addr == 2001:db8::2",
+    "ipv6.addr != fe80::1",
+    "ipv6.addr !== fe80::1",
+    "ipv6.src > fe00::",
+    "ipv6.dst < 2001:db8::2",
+    "ipv6.dst <= 2001:db8::2",
+    "ipv6.dst in {2001:db8::1..2001:db8::ff}",
+    "ipv6.addr in {fe80::/10 ::1}",
+    "ipv6.src[0:2] == fe:80",
+    // Link layer.
+    "eth.addr == ff:ff:ff:ff:ff:ff",
+    "eth.addr != 02:00:00:00:00:01",
+    "eth.src > 01:00:00:00:00:00",
+    "eth.dst in {ff:ff:ff:ff:ff:ff 01:00:5e:00:00:01}",
+    "vlan",
+    "vlan.id == 10",
+    "vlan.id != 10",
+    "all vlan.id > 1",
+    "vlan.priority == 0",
+    "vlan.dei",
+    "vlan.etype == 0x0800",
+    "vlan[0:2] == 00:0a",
+    "ieee8021ad",
+    "ieee8021ad.id == 20",
+    "ieee8021ad.dei == 0",
+    "ieee8021ad.priority < 4",
+    // TCP options.
+    "tcp.options",
+    "tcp.options.mss",
+    "tcp.options.mss_val == 1460",
+    "tcp.options.mss_val < 1200",
+    "tcp.options.wscale",
+    "tcp.options.wscale.shift == 7",
+    "tcp.options.wscale.multiplier == 128",
+    "tcp.options.wscale.multiplier > 1000",
+    "tcp.options.sack_perm",
+    "tcp.options.timestamp",
+    "tcp.options.timestamp.tsval > 1",
+    "tcp.options.timestamp.tsecr == 0",
+    "tcp.options[0] == 2",
+    "tcp.options.mss[0:2] == 02:04",
+    // Lengths, counts, header contents.
+    "len(tcp.payload) > 3",
+    "len(udp.payload) == 3",
+    "len(ip.src) == 4",
+    "len(tcp.options) > 4",
+    "len(frame) > 70",
+    "count(ip.addr) == 2",
+    "count(vlan.id) == 1",
+    "count(tcp.payload) == 1",
+    "tcp contains 05:b4",
+    "ip contains 0a:01",
+    "udp contains 00:35",
+    "tcp.options contains 03:03",
+    "all eth.addr contains 00",
+    // Arithmetic and comparisons of fields.
+    "tcp.port + 1 == 81",
+    "tcp.srcport - tcp.dstport > 0",
+    "tcp.dstport * 2 > 1000",
+    "tcp.dstport / 100 == 80",
+    "tcp.srcport % 1000 == 0",
+    "tcp.srcport / (tcp.dstport + 1) > 2",
+    "-tcp.srcport < -1000",
+    "abs(tcp.srcport - tcp.dstport) < 1000",
+    "max(tcp.srcport, tcp.dstport) > 1024",
+    "min(tcp.port) < 100",
+    "max(tcp.srcport, udp.srcport) > 1000",
+    "tcp.flags & 0x12 == 0x12",
+    "tcp.srcport == tcp.dstport",
+    "ip.ttl > ip.dsfield",
+    "udp.srcport != udp.dstport",
+    "all tcp.port > tcp.hdr_len",
+    "tcp.flags.syn == tcp.flags.ack",
+    "ip.src == ip.dst",
+    // Large sets: trees of jumps.
+    "tcp.port in {1 3 5 7 9 11 13 22 25 53 80 110 143 443 993 8000..8100}",
+    "ip.addr in {10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 8.8.8.8 1.1.1.1 9.9.9.9}",
+    "tcp.dstport not in {1 2 3 4 5 6 7 8 9 10 11 12 80 81 82}",
+    "udp.payload in {01:02:03 \"GET\"}",
 ];
 
 /// Filters it must refuse, so that the backend filters them in user space.
 pub const UNSUPPORTED: &[&str] = &[
     "tcp.payload contains \"GET\"",
-    "len(tcp.payload) > 3",
-    "tcp.flags & 0x12 == 0x12",
-    "ipv6.src == ::1",
-    "eth.addr == ff:ff:ff:ff:ff:ff",
-    "vlan.id == 10",
-    "tcp.options.mss_val < 1200",
-    "outbound",
-    "tcp.srcport == tcp.dstport",
+    "frame contains 00:00",
     "tcp.payload > 01:02",
     "@tcp.port == 00:50",
     "tcp.port#1 == 80",
-    "count(ip.addr) == 2",
     "lower(iface) == \"eth0\"",
-    "tcp.port + 1 == 81",
-    "max(tcp.srcport, tcp.dstport) > 1024",
+    "iface contains \"eth\"",
     "tcp.payload[0:2,4:2] == 01:02:03:04",
     "ipv6[0] == 0x60",
-    "udp.payload in {01:02 03:04}",
+    "random8 < 128",
+    "timestamp > 0",
+    "arp.opcode == 1",
+    "icmp.ident == 1",
+    "tcp.srcport * tcp.dstport * tcp.seq_raw > 0",
+    "tcp.dstport / (tcp.srcport - 53) > 0",
+    "ip.src[0] == 10",
+    "eth.dst & ff:00:00:00:00:00 == ff:00:00:00:00:00",
 ];
 
-/// A random filter built from [`SUPPORTED`] with `and`, `or`, `not` and `xor`.
-pub fn random_filter(rng: &mut Rng, depth: usize) -> String {
+/// A random filter built from `pool` with `and`, `or`, `not` and `xor`.
+pub fn random_filter(rng: &mut Rng, pool: &[&str], depth: usize) -> String {
     if depth == 0 || rng.below(3) == 0 {
-        return format!("({})", rng.pick(SUPPORTED));
+        return format!("({})", rng.pick(pool));
     }
-    let a = random_filter(rng, depth - 1);
+    let a = random_filter(rng, pool, depth - 1);
     match rng.below(4) {
         0 => format!("not {a}"),
-        1 => format!("({a} and {})", random_filter(rng, depth - 1)),
-        2 => format!("({a} or {})", random_filter(rng, depth - 1)),
-        _ => format!("({a} xor {})", random_filter(rng, depth - 1)),
+        1 => format!("({a} and {})", random_filter(rng, pool, depth - 1)),
+        2 => format!("({a} or {})", random_filter(rng, pool, depth - 1)),
+        _ => format!("({a} xor {})", random_filter(rng, pool, depth - 1)),
     }
 }

@@ -19,6 +19,7 @@ doc = false
 
 [dependencies]
 avulse = { path = "../avulse" }
+avulse-ebpf.workspace = true
 avulse-filter = { workspace = true, features = ["regex"] }
 avulse-proto.workspace = true
 clap = { version = "4.6.7", features = ["derive"] }

@@ -26,7 +26,7 @@ use avulse_ebpf::facts::{
     F_IPV4, F_IPV6, F_UDP, Facts, M_FORWARD, M_IMPOSTOR, M_LOOPBACK, M_OUTBOUND, M_SNIFFED,
 };
 use avulse_ebpf::loader::{Classifier, Hook, SkbCtx};
-use avulse_filter::{Filter, Layer, Meta};
+use avulse_filter::{Filter, Layer};
 use avulse_proto::{Link, Packet};
 
 const TC_ACT_SHOT: i32 = 2;
@@ -91,7 +91,12 @@ fn classifier(filter: &str, config: &Config) -> Classifier {
     let mut tc = Classifier::load().expect("load the TC object");
     tc.set_config(config).unwrap();
     let f = Filter::compile(filter).unwrap();
-    tc.set_matcher(&codegen::compile(f.ir()).unwrap())
+    let layer = match config.layer {
+        5 => Layer::Ethernet,
+        1 => Layer::NetworkForward,
+        _ => Layer::Network,
+    };
+    tc.set_matcher(&codegen::compile(f.ir(), &common::env(layer)).unwrap())
         .unwrap_or_else(|e| panic!("{filter}: {e}"));
     tc
 }
@@ -128,7 +133,9 @@ fn kernel_agrees_with_the_evaluator() {
     }
     pin_to_cpu0();
     let mut tc = Classifier::load().expect("load the TC object");
-    tc.set_config(&config(Layer::Ethernet, abi::CFG_DROP))
+    // `avulse_options` finds the TCP options when the configuration asks for them.
+    let opts = abi::CFG_TCP_OPTIONS;
+    tc.set_config(&config(Layer::Ethernet, abi::CFG_DROP | opts))
         .unwrap();
     let frames = common::corpus(1, 3000, 14);
 
@@ -149,8 +156,11 @@ fn kernel_agrees_with_the_evaluator() {
     );
     // At the NETWORK layer, IP packets get `Facts::at_network`; the rest never reaches the
     // matcher.
-    tc.set_config(&config(Layer::Network, abi::CFG_DROP | abi::CFG_FRAGMENTS))
-        .unwrap();
+    tc.set_config(&config(
+        Layer::Network,
+        abi::CFG_DROP | abi::CFG_FRAGMENTS | opts,
+    ))
+    .unwrap();
     let mut ip_frames = 0;
     for frame in &frames {
         assert_eq!(tc.run(frame).unwrap(), TC_ACT_UNSPEC);
@@ -177,23 +187,30 @@ fn kernel_agrees_with_the_evaluator() {
         .unwrap_or(300);
     let mut rng = common::Rng::new(5);
     let mut filters: Vec<String> = common::SUPPORTED.iter().map(|s| s.to_string()).collect();
-    filters.extend((0..cases).map(|_| common::random_filter(&mut rng, 4)));
+    filters.extend((0..cases).map(|_| common::random_filter(&mut rng, common::SUPPORTED, 4)));
     let (mut most_insns, mut most_processed, mut runs) = (0, (0, String::new()), 0);
+    let verdict = |m: bool| if m { TC_ACT_SHOT } else { TC_ACT_UNSPEC };
     for (i, src) in filters.iter().enumerate() {
         let filter = Filter::compile(src).unwrap();
-        let m = codegen::compile(filter.ir()).unwrap();
-        let stats = tc.set_matcher(&m).unwrap_or_else(|e| panic!("{src}: {e}"));
-        most_insns = most_insns.max(stats.insns);
-        let p = processed(&stats.log);
-        if p > most_processed.0 {
-            most_processed = (p, src.clone());
-        }
-        let verdict = |m: bool| if m { TC_ACT_SHOT } else { TC_ACT_UNSPEC };
-        tc.set_config(&config(Layer::Ethernet, abi::CFG_DROP))
+        let mut load = |tc: &mut Classifier, layer: Layer| {
+            let m = codegen::compile(filter.ir(), &common::env(layer)).unwrap();
+            let stats = tc.set_matcher(&m).unwrap_or_else(|e| panic!("{src}: {e}"));
+            most_insns = most_insns.max(stats.insns);
+            let p = processed(&stats.log);
+            if p > most_processed.0 {
+                most_processed = (p, src.clone());
+            }
+            if m.reads_tcp_options() { opts } else { 0 }
+        };
+        // Packets of `BPF_PROG_TEST_RUN` arrive on the loopback device (ingress, not marked as
+        // loopback, since the configuration names no loopback device).
+        let o = load(&mut tc, Layer::Ethernet);
+        tc.set_config(&config(Layer::Ethernet, abi::CFG_DROP | o))
             .unwrap();
+        let meta = common::meta(Layer::Ethernet, 0, TEST_DEV);
         for frame in &frames {
             let pkt = Packet::parse(frame, Link::Ethernet);
-            let want = verdict(filter.matches(&pkt, &Meta::default()));
+            let want = verdict(filter.matches(&pkt, &meta));
             assert_eq!(tc.run(frame).unwrap(), want, "{src} on {frame:02x?}");
             runs += 1;
         }
@@ -201,15 +218,20 @@ fn kernel_agrees_with_the_evaluator() {
         if i >= common::SUPPORTED.len() && i % 3 != 0 {
             continue;
         }
-        tc.set_config(&config(Layer::Network, abi::CFG_DROP | abi::CFG_FRAGMENTS))
-            .unwrap();
+        let o = load(&mut tc, Layer::Network);
+        tc.set_config(&config(
+            Layer::Network,
+            abi::CFG_DROP | abi::CFG_FRAGMENTS | o,
+        ))
+        .unwrap();
+        let meta = common::meta(Layer::Network, 0, TEST_DEV);
         for frame in &frames {
             let eth = Facts::from_packet(&Packet::parse(frame, Link::Ethernet));
             let want = if eth.flags & (F_IPV4 | F_IPV6) == 0 {
                 TC_ACT_UNSPEC
             } else {
                 let ip = Packet::parse(&frame[eth.l3 as usize..], Link::Ip);
-                verdict(filter.matches(&ip, &Meta::default()))
+                verdict(filter.matches(&ip, &meta))
             };
             assert_eq!(
                 tc.run(frame).unwrap(),
@@ -579,7 +601,7 @@ fn everything_fails_open() {
     small.set_config(&config(Layer::Network, 0)).unwrap();
     let f = Filter::compile("udp").unwrap();
     small
-        .set_matcher(&codegen::compile(f.ir()).unwrap())
+        .set_matcher(&codegen::compile(f.ir(), &common::env(Layer::Network)).unwrap())
         .unwrap();
     assert_eq!(small.run(&frame).unwrap(), TC_ACT_STOLEN);
     assert_eq!(small.run(&frame).unwrap(), TC_ACT_UNSPEC);
@@ -625,8 +647,8 @@ fn large_filters_load() {
         .join(" or ");
     let long = format!("tcp.payload[0:1000] == {}", vec!["41"; 1000].join(":"));
     let mut rng = common::Rng::new(9);
-    let deep = common::random_filter(&mut rng, 10);
-    // Each `xor` compiles its right side twice.
+    let deep = common::random_filter(&mut rng, common::SUPPORTED, 10);
+    // Each `xor` keeps its left result on the stack.
     let xors = (0..12).fold("tcp".to_string(), |acc, i| {
         format!("(ip.ttl == {i} xor {acc})")
     });
@@ -636,9 +658,28 @@ fn large_filters_load() {
         ("1000-byte compare", long),
         ("depth-10 random", deep),
         ("12 nested xor", xors),
+        (
+            "40-option set",
+            format!(
+                "tcp.options.mss_val in {{{}}}",
+                (1..=40)
+                    .map(|i| (i * 31).to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        ),
+        (
+            "header contains",
+            "tcp contains 05:b4:01:01 or ip contains 0a:00:00".into(),
+        ),
+        (
+            "arithmetic",
+            "max(tcp.srcport, tcp.dstport, udp.srcport) / (tcp.hdr_len + 1) > count(ip.addr) * 3"
+                .into(),
+        ),
     ] {
         let filter = Filter::compile(&src).unwrap();
-        match codegen::compile(filter.ir()) {
+        match codegen::compile(filter.ir(), &common::env(Layer::Ethernet)) {
             Ok(m) => match tc.set_matcher(&m) {
                 Ok(s) => eprintln!(
                     "{name}: {} instructions, {} processed",
@@ -672,6 +713,34 @@ fn timing() {
     );
     let (_, ns) = tc.time(&frame, 200_000).unwrap();
     eprintln!("parse only: {ns} ns");
+    let syn = common::eth(
+        &[],
+        0x0800,
+        &common::ipv4(
+            &common::Ip4::default(),
+            &common::tcp_opts(
+                40000,
+                443,
+                0x002,
+                &[
+                    2, 4, 5, 0xb4, 4, 2, 8, 10, 0, 0, 0, 1, 0, 0, 0, 0, 1, 3, 3, 7,
+                ],
+                b"",
+            ),
+        ),
+    );
+    let mss = Filter::compile("tcp.options.mss_val < 1400").unwrap();
+    tc.set_matcher(&codegen::compile(mss.ir(), &common::env(Layer::Ethernet)).unwrap())
+        .unwrap();
+    tc.set_config(&config(
+        Layer::Ethernet,
+        abi::CFG_DROP | abi::CFG_TCP_OPTIONS,
+    ))
+    .unwrap();
+    let (verdict, ns) = tc.time(&syn, 200_000).unwrap();
+    eprintln!("tcp.options.mss_val < 1400 on a SYN with 4 options: {ns} ns (verdict {verdict})");
+    tc.set_config(&config(Layer::Ethernet, abi::CFG_DROP))
+        .unwrap();
     let ports = (1..=2000)
         .map(|p| p.to_string())
         .collect::<Vec<_>>()
@@ -682,7 +751,7 @@ fn timing() {
         format!("tcp.port in {{{ports}}}"),
     ] {
         let filter = Filter::compile(&src).unwrap();
-        tc.set_matcher(&codegen::compile(filter.ir()).unwrap())
+        tc.set_matcher(&codegen::compile(filter.ir(), &common::env(Layer::Ethernet)).unwrap())
             .unwrap();
         let (verdict, ns) = tc.time(&frame, 200_000).unwrap();
         let name: String = src.chars().take(60).collect();
@@ -691,9 +760,106 @@ fn timing() {
     // Diverting: the copy to the ring, drained between batches.
     tc.set_config(&config(Layer::Ethernet, 0)).unwrap();
     let filter = Filter::compile("tcp.dstport == 443").unwrap();
-    tc.set_matcher(&codegen::compile(filter.ir()).unwrap())
+    tc.set_matcher(&codegen::compile(filter.ir(), &common::env(Layer::Ethernet)).unwrap())
         .unwrap();
     let (verdict, ns) = tc.time(&frame, 1_000).unwrap();
     tc.records();
     eprintln!("tcp.dstport == 443, diverted: {ns} ns (verdict {verdict})");
+}
+
+/// WinDivert's vectors, as the filter crate's tests have them.
+#[path = "../../filter/src/tests/windivert_vectors.rs"]
+#[rustfmt::skip]
+#[allow(dead_code)]
+mod windivert_vectors;
+
+/// The filters of the tshark comparison.
+#[path = "../../filter/src/tests/filters.rs"]
+#[allow(dead_code)]
+mod tshark_filters;
+
+/// WinDivert's vectors through the kernel matcher, at the NETWORK layer and outbound, as
+/// WinDivert's own tests run them.
+#[test]
+fn windivert_vectors_in_the_kernel() {
+    if !enabled() {
+        return;
+    }
+    let mut tc = Classifier::load().expect("load the TC object");
+    tc.set_config(&config(Layer::Network, abi::CFG_DROP | abi::CFG_FRAGMENTS))
+        .unwrap();
+    let (mut exact, mut total) = (0, 0);
+    for &(src, packet, want) in windivert_vectors::VECTORS {
+        if src.contains("random") {
+            continue;
+        }
+        let filter = Filter::compile_windivert(src, Layer::Network).unwrap();
+        let m = codegen::compile_superset(filter.ir(), &common::env(Layer::Network)).unwrap();
+        tc.set_matcher(&m).unwrap_or_else(|e| panic!("{src}: {e}"));
+        let o = if m.reads_tcp_options() {
+            abi::CFG_TCP_OPTIONS
+        } else {
+            0
+        };
+        tc.set_config(&config(
+            Layer::Network,
+            abi::CFG_DROP | abi::CFG_FRAGMENTS | o,
+        ))
+        .unwrap();
+        let ip = windivert_vectors::PACKETS[packet].1;
+        let frame = common::eth(&[], if ip[0] >> 4 == 6 { 0x86dd } else { 0x0800 }, ip);
+        let got = tc.run_on(Hook::Egress, &frame, &SkbCtx::default()).unwrap() == TC_ACT_SHOT;
+        if m.exact() {
+            assert_eq!(got, want, "{src}");
+            exact += 1;
+        } else {
+            assert!(got || !want, "{src}");
+        }
+        total += 1;
+    }
+    eprintln!("WinDivert vectors: {exact} of {total} exact in the kernel, the rest supersets");
+}
+
+/// Every filter of the tshark comparison loads, exactly or widened, at both layers, and the
+/// verdicts on the corpus are those of the evaluator (or a superset of them).
+#[test]
+fn tshark_filters_in_the_kernel() {
+    if !enabled() {
+        return;
+    }
+    pin_to_cpu0();
+    let mut tc = Classifier::load().expect("load the TC object");
+    let frames = common::corpus(12, 300, 14);
+    let all = tshark_filters::AGREE
+        .iter()
+        .chain(tshark_filters::OUTER)
+        .chain(tshark_filters::EXTENSIONS);
+    let mut n = 0;
+    for src in all {
+        let filter = Filter::compile(src).unwrap();
+        let m = codegen::compile_superset(filter.ir(), &common::env(Layer::Ethernet)).unwrap();
+        tc.set_matcher(&m).unwrap_or_else(|e| panic!("{src}: {e}"));
+        let o = if m.reads_tcp_options() {
+            abi::CFG_TCP_OPTIONS
+        } else {
+            0
+        };
+        tc.set_config(&config(Layer::Ethernet, abi::CFG_DROP | o))
+            .unwrap();
+        let meta = common::meta(Layer::Ethernet, 0, TEST_DEV);
+        for frame in &frames {
+            let want = filter.matches(&Packet::parse(frame, Link::Ethernet), &meta);
+            let got = tc.run(frame).unwrap() == TC_ACT_SHOT;
+            if m.exact() {
+                assert_eq!(got, want, "{src} on {frame:02x?}");
+            } else {
+                assert!(got || !want, "{src} on {frame:02x?}");
+            }
+        }
+        let m = codegen::compile_superset(filter.ir(), &common::env(Layer::Network)).unwrap();
+        tc.set_matcher(&m)
+            .unwrap_or_else(|e| panic!("{src} at NETWORK: {e}"));
+        n += 1;
+    }
+    eprintln!("tshark filters: {n} load at both layers");
 }

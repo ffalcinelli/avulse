@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-15, Steps 1 to 9 and Spikes A and B done, Spike C deferred; next: Step 10)
+## Status (2026-10-21, Steps 1 to 10 and Spikes A and B done, Spike C partly done; next: Step 11)
 
 | Area | State |
 | --- | --- |
@@ -15,7 +15,8 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `fuzz/` | cargo-fuzz targets `bytecode` (verifier and interpreter on arbitrary programs), `filter` (parser, `fmt` round trip, checker, evaluator, bytecode agreement) and `windivert` (front-end, bytecode and native agreement). Outside the workspace. |
 | `crates/wasm` (`avulse-wasm`) | The filter engine for the website's playground (wasm-bindgen, `publish = false`). |
 | Docs and website | README (front page), guide (`book/`, mdBook), `site/` with the playground, rustdoc and pdoc, built by `scripts/build-site.sh` and deployed by `pages.yml` to <https://ffalcinelli.github.io/avulse/>. Every public item is documented (`missing_docs`). |
-| `crates/ebpf` (`avulse-ebpf`) | Step 9: `avulse_ingress` redirects the inbound packets user space injects through `lo` (`MARK_REDIRECT`, `PRIO_INJECTED`); test runs return the context (`Classifier::run_ctx`). Step 8: the loader attaches through Netlink (`Classifier::attach`, `Attachment::detach`) and opens raw BPF hash maps (`HashMap`, for the registry). Step 7: the capture side of the static TC programs (`avulse_ingress`/`avulse_egress` → matcher → `avulse_act`): per-handle configuration, metadata facts, ring buffer records, divert/sniff/drop, marks, loopback, NETWORK/FORWARD/ETHERNET selection, fragments, the forwarding check, fail-open; `abi.rs` mirrors `bpf/abi.h`. Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Needs clang on Linux. |
+| `crates/ebpf` (`avulse-ebpf`) | Step 10: the generator covers metadata (through `Env`: layer, priority, interface names), IPv6 and MAC addresses, VLAN fields, TCP options (`avulse_options`, behind `CFG_TCP_OPTIONS`), byte order and `contains` in headers, arithmetic, field-to-field comparisons, set trees, `xor` through a slot; `superset`/`compile_superset` widen the rest, and `Matcher::exact` says when user space filters again. Step 9: `avulse_ingress` redirects the inbound packets user space injects through `lo` (`MARK_REDIRECT`, `PRIO_INJECTED`); test runs return the context (`Classifier::run_ctx`). Step 8: the loader attaches through Netlink (`Classifier::attach`, `Attachment::detach`) and opens raw BPF hash maps (`HashMap`, for the registry). Step 7: the capture side of the static TC programs (`avulse_ingress`/`avulse_egress` → matcher → `avulse_act`): per-handle configuration, metadata facts, ring buffer records, divert/sniff/drop, marks, loopback, NETWORK/FORWARD/ETHERNET selection, fragments, the forwarding check, fail-open; `abi.rs` mirrors `bpf/abi.h`. Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Needs clang on Linux. |
+| `spikes/macos` | Spike C (partial, `docs/spikes/macos.md`): probes of bpf, raw-socket and `utun` injection, pf and the filter engine's speed, and a `NEFilterPacketProvider` system extension around a Rust static library; run on GitHub's macOS runners by `.github/workflows/macos-spike.yml` (on changes to the spike). Outside the workspace. |
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
 | `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. 13 unit tests without privileges; `tests/capture.rs` (18 tests, `AVULSE_BPF=1`, root, in the VMs) on a veth pair. Other platforms: `Error::Unsupported`. |
 | `crates/{capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
@@ -421,9 +422,16 @@ equivalent on the vector packets.
   `KeExpandKernelStackAndCalloutEx`, and a caller-provided register file for the interpreter. Use
   `windows-drivers-rs`: one WFP callout and one NDIS LWF, test-signed, loaded in a Windows Vagrant
   VM. Decide pure Rust or a thin C shim.
-- [ ] **Spike C: macOS.** Deferred: no Mac is available (owner decision, 2026-10-15). Check
-  `NEFilterPacketProvider` frame level, throughput and delay semantics, and `/dev/bpf`
-  reinjection. Do it before Phase 6.
+- [ ] **Spike C: macOS.** Partly done on GitHub's macOS runners, 2026-10-21 (no Mac; owner
+  decision to use the runners): see `docs/spikes/macos.md`. Answered: `/dev/bpf` capture and
+  outbound injection (not inbound), inbound reinjection through a raw socket (host-order
+  `ip_len`/`ip_off`) or `utun`, no divert in pf, and the system extension's build (Rust static
+  library in Swift, universal, ad hoc signed). The runners have SIP off; the extension reaches
+  `activated_waiting_for_user` and nothing approves it headless. **Left:** the provider's frame
+  level, throughput and delay semantics. Next try: script the approval on a runner
+  (`osascript` in System Settings); else a Mac with SIP off, or a Developer ID (owner action).
+  Do it before Phase 6. Also found: the bytecode interpreter is 2 to 7 times slower than the IR
+  evaluator (it copies its operand registers every instruction); fix it in Phase 5.
 
 ### After that
 
@@ -755,7 +763,81 @@ priority chaining (two handles, marks, impostor), and auto-reinjection by a fall
 
 **Acceptance:** those scenarios pass on both VMs.
 
-### Step 10: Matcher coverage and a tight superset
+### Step 10: Matcher coverage and a tight superset (done)
+
+**Outcome.** `crates/ebpf/src/codegen.rs` (`compile(test, &Env)`, `superset`,
+`compile_superset`, `everything`, `Matcher::exact`), the facts' VLAN count and TCP option
+offsets (`bpf/facts.h`, `tc.bpf.c`'s option walk), the backend's matcher chain, and `avulse filter
+explain`'s `linux kernel:` line. In the emulator: 323 of the 463 tshark-table filters and 221 of
+the 225 non-random WinDivert vectors compile exactly (the 4 others read `timestamp`); every one
+of them, and 300 random mixes of supported and unsupported tests, runs as a sound superset.
+In the kernel (`tests/kernel.rs`, 15 tests, on 6.8 and 5.15): 540 filters agree with the
+evaluator over 3 million runs; all 463 tshark filters load at both layers; 221 of the 225
+vectors are exact. `tests/capture.rs` (18) passes on both.
+
+- **`Env`** carries the handle's constants: the layer, the priority, and an interface resolver.
+  A pass over the IR before code generation (`lower`) decides `layer`, `event`, `priority` and
+  `subifidx`, turns `iface` into `ifidx` (the index is resolved when the handle opens; a rename is
+  not followed), and rewrites `local.*`/`remote.*` into conditionals on `outbound` over the source
+  and destination fields, as `value::load` defines them at the packet layers. Against an address
+  of the other family, `!=` and `not in` hold.
+- **Metadata** from the facts: `inbound`/`outbound`, `loopback`, `impostor`, `fragment`, `ifidx`,
+  `protocol`.
+- **Occurrences** are general: each may be absent (VLAN tags, TCP options, division by zero), and
+  a stack slot records whether any was present, so `all` and `not in` stay false on none.
+- **Bytes:** IPv6 and MAC addresses as fixed-length ranges, with prefixes (masked word compares),
+  ranges and lexicographic order (`value::ord`) for any byte value of fixed length (slices of a
+  constant length included, which covers WinDivert's `packet[i]`); sets of bytes; `contains` in
+  regions of at most 64 bytes (headers, options, tags), unrolled. `contains` on payloads and
+  frames, and ordering of variable-length bytes, are widened.
+- **Numbers:** `len()`, `count()` of fields, `+ - * / %`, unary `-`, `abs()`, `max()`/`min()`
+  (absent arguments skipped) and `&`, in 64-bit registers, when a static range analysis shows that
+  no intermediate overflows and that both sides of a division are non-negative (the BPF of 5.15
+  has no signed division). Comparisons of two numeric fields (`tcp.srcport == tcp.dstport`), with
+  the quantifiers over pairs; booleans are normalised first.
+- **VLAN tags and TCP options:** the facts keep the number of in-band tags (`vlans`, the old
+  padding byte) and the offsets of the first MSS, window scale, SACK permitted and timestamps
+  options (`opts`, the old reserved word), so the facts stay 48 bytes. A tag's kind is read from
+  its TPID. The option walk (`Tcp::option_iter`'s rules) is a static program of its own,
+  `avulse_options` (slot `SLOT_OPTIONS`), which the parser tail-calls only with
+  `CFG_TCP_OPTIONS`, set when the matcher reads options (`Matcher::reads_tcp_options`). It took
+  three tries to get past the verifier (E2BIG on 6.8): a loop inlined in the parser multiplied
+  with every path into it, and a loop alone still tracked the moving position exactly. What
+  works: one unrolled step per byte position (constant stack offsets), with the walk's state
+  (the next option's start, kept in `facts.verdict` until the matcher writes it, and the offsets
+  found) in the facts map, read through `volatile`, which the verifier does not track. A BPF-to-
+  BPF call was avoided: next to tail calls it needs arm64 JIT support that kernels before 6.0
+  lack.
+- **Offloaded tags** (ETHERNET only): the kernel sees the frame without its outer tag, so a filter
+  that reads the link-layer layout (`eth.type`, `vlan.*`, `ieee8021ad.*`, `frame`) takes such
+  frames to user space (a prologue on `M_VLAN`), and its matcher is inexact. Step 11 can make it
+  exact with the TPID in the facts.
+- **Sets** become sorted, merged ranges (IPv4 prefixes too) searched by a tree of jumps above 4
+  ranges. **Decision:** no BPF maps for sets; a tree of 2000 single values is about 4000
+  instructions, far under the limit, and maps would add per-handle map lifecycles.
+- **5.15 quirk:** before a load of variable length into the stack (`contains`), the 5.15
+  verifier wants the whole buffer initialized; the matcher zeroes it.
+- **Measured** (VirtualBox, 6.8 / 5.15): parse 92 / 191 ns; `tcp.dstport == 443` 118 / 238 ns;
+  `tcp.options.mss_val < 1400` on a SYN with four options, the walk included, 223 / 442 ns. Twelve
+  nested `xor`s are the most verifier work (about 200,000 instructions processed, of the
+  1,000,000 limit): the slots' constant values keep paths apart.
+- **`xor`** keeps its left result in a stack slot: each side is compiled once.
+- **Superset** (`superset`, `compile_superset`): each test `compile` refuses becomes `true`, or
+  `false` under an odd number of `not`s; `xor` and conditionals are first written with
+  `and`/`or`/`not`; then `ir::simplify`. The backend loads the exact matcher, else the superset,
+  else one that takes everything (`everything`) when the verifier refuses; only inexact matchers
+  make user space evaluate the filter (as before).
+- **Tests:** the emulator test runs every filter at both layers with five metadata variants and
+  the matching `Meta`; new tests for supersets (random mixes, the tshark tables, WinDivert's
+  vectors), offloaded tags (frames stripped of their tag against the evaluator on the original),
+  and folded constants. The tshark tables moved to `crates/filter/src/tests/filters.rs`, which
+  `crates/ebpf/tests` include by path, like the vectors. `kernel.rs` runs the same in the kernel,
+  plus the vectors and the tshark tables.
+- **Left widened:** layer operators (`#n`), `@field`, `&` on bytes, multi-range slices,
+  `contains`/`matches` on payloads, string functions, `timestamp`/`random*`, the ARP fields,
+  `icmp.ident`/`seq`, `icmpv6.echo.*`, `ipv6.fraghdr.*`, and the `ipv6`/`arp` protocol bytes.
+
+The original plan of the step follows.
 
 **Why.** Spike A's code generator covers a subset. Everything else currently takes the
 match-all fallback, which costs a trip to user space per packet.
@@ -866,12 +948,13 @@ what the `avulse` crate and its Linux backend now hold).
 - [x] Step 2: bytecode + verifier + interpreter
 - [x] Step 3: WinDivert front-end + 241 vectors + `filter convert`
 - [x] Step 4: TCP options, fuzz targets
-- [x] Step 5: spikes A (go) and B (go, pure Rust); C deferred until a Mac is available
+- [x] Step 5: spikes A (go) and B (go, pure Rust); C partly done on GitHub's runners (the
+  provider at work is left)
 - [x] Step 6: public API and address (`crates/avulse`)
 - [x] Step 7: kernel side of capture (config, metadata facts, ring buffer, verdicts)
 - [x] Step 8: Linux backend: open, attach, registry, heartbeat, receive
 - [x] Step 9: injection
-- [ ] Step 10: matcher coverage and superset fallback
+- [x] Step 10: matcher coverage and superset fallback
 - [ ] Step 11: ETHERNET layer
 - [ ] Step 12: privileged suite on both VMs (Phase 2 exit)
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement

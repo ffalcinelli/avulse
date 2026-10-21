@@ -90,12 +90,20 @@ pub enum Alu {
     Sub = 0x10,
     /// `dst *= src`.
     Mul = 0x20,
+    /// `dst /= src` (unsigned; division by zero gives 0).
+    Div = 0x30,
+    /// `dst |= src`.
+    Or = 0x40,
     /// `dst &= src`.
     And = 0x50,
     /// `dst <<= src`.
     Lsh = 0x60,
     /// `dst >>= src` (logical).
     Rsh = 0x70,
+    /// `dst %= src` (unsigned; modulo zero leaves `dst`).
+    Mod = 0x90,
+    /// `dst ^= src`.
+    Xor = 0xa0,
     /// `dst = src`.
     Mov = 0xb0,
 }
@@ -115,12 +123,16 @@ pub enum Cond {
     Ne = 0x50,
     /// Signed greater.
     Sgt = 0x60,
+    /// Signed greater or equal.
+    Sge = 0x70,
     /// Unsigned less.
     Lt = 0xa0,
     /// Unsigned less or equal.
     Le = 0xb0,
     /// Signed less.
     Slt = 0xc0,
+    /// Signed less or equal.
+    Sle = 0xd0,
 }
 
 const K: u8 = 0x00;

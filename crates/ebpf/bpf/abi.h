@@ -20,6 +20,7 @@
 #define CFG_SHUTDOWN  (1u << 3) /* pass everything (shutdown of the receive side) */
 #define CFG_FWD_CHECK (1u << 4) /* IP forwarding is on: ingress at NETWORK skips forwarded */
 #define CFG_SKIP_LO   (1u << 5) /* lo is attached for injection only */
+#define CFG_TCP_OPTIONS (1u << 6) /* the matcher reads TCP options: find them (avulse_options) */
 
 /* The handle's configuration: the one entry of the `avulse_config` array. User space writes
  * it whole; the heartbeat refreshes `heartbeat_ns`. */

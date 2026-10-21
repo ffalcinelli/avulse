@@ -155,8 +155,11 @@ fn icmp(p: &[u8]) -> (u8, String) {
     )
 }
 
+/// Whether the kernel runs the filter exactly at the NETWORK layer.
 fn exact(filter: &str) -> bool {
-    avulse_ebpf::codegen::compile(Filter::compile(filter).unwrap().ir()).is_ok()
+    let env = avulse_ebpf::codegen::Env::new(Layer::Network);
+    avulse_ebpf::codegen::compile_superset(Filter::compile(filter).unwrap().ir(), &env)
+        .is_ok_and(|m| m.exact())
 }
 
 #[test]
@@ -205,15 +208,17 @@ fn sniff_pings() {
     }));
 }
 
-/// Filters the code generator cannot compile take every packet of the layer in the kernel, and
-/// user space keeps the matching ones; it reinjects the others when the handle diverts.
+/// Filters the code generator cannot compile run as a superset in the kernel, and user space
+/// keeps the matching packets; it reinjects the others when the handle diverts. `timestamp` is
+/// user space only, so the kernel takes every ping here (the `xor` widens to `true`), and user
+/// space keeps the outbound ones.
 #[test]
 fn user_space_filters() {
     if !enabled() {
         return;
     }
     let _veth = Veth::new();
-    let filter = format!("{PINGS} and outbound");
+    let filter = format!("{PINGS} and (outbound xor timestamp < 0)");
     assert!(!exact(&filter));
     let h = open(&filter, Layer::Network, 0, Flags::SNIFF);
     assert!(ping(3));
@@ -233,7 +238,7 @@ fn user_space_filters() {
     // Dropping the matching packets only: the requests go out, and the peer replies (as a handle
     // that runs before sees), but the replies are dropped.
     let h = open(
-        &format!("{PINGS} and inbound"),
+        &format!("{PINGS} and (inbound xor timestamp < 0)"),
         Layer::Network,
         0,
         Flags::DROP,

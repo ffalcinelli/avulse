@@ -21,7 +21,7 @@ use aya::{Ebpf, EbpfError, EbpfLoader, Pod};
 
 use crate::abi::{self, Config};
 use crate::codegen::Matcher;
-use crate::facts::{Facts, SLOT_ACTION, SLOT_MATCHER};
+use crate::facts::{Facts, SLOT_ACTION, SLOT_MATCHER, SLOT_OPTIONS};
 
 /// The static programs, built from `bpf/tc.bpf.c`.
 pub static TC_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tc.bpf.o"));
@@ -254,7 +254,12 @@ impl Classifier {
             .map_max_entries("avulse_ring", ring_bytes)
             .load(TC_OBJECT)
             .map_err(|e| Error::Ebpf(Box::new(e)))?;
-        for name in ["avulse_ingress", "avulse_egress", "avulse_act"] {
+        for name in [
+            "avulse_ingress",
+            "avulse_egress",
+            "avulse_act",
+            "avulse_options",
+        ] {
             let prog: &mut SchedClassifier = ebpf
                 .program_mut(name)
                 .ok_or_else(|| Error::Aya(format!("no program {name}")))?
@@ -272,8 +277,9 @@ impl Classifier {
             matcher: None,
             links: Vec::new(),
         };
-        let act = c.prog_fd("avulse_act")?;
-        update(c.map_fd("avulse_progs")?, SLOT_ACTION, act)?;
+        let progs = c.map_fd("avulse_progs")?;
+        update(progs, SLOT_ACTION, c.prog_fd("avulse_act")?)?;
+        update(progs, SLOT_OPTIONS, c.prog_fd("avulse_options")?)?;
         Ok(c)
     }
 
@@ -464,7 +470,8 @@ impl Classifier {
     }
 }
 
-fn if_index(ifname: &str) -> Result<u32, Error> {
+/// The index of the interface named `ifname`.
+pub fn if_index(ifname: &str) -> Result<u32, Error> {
     let name = CString::new(ifname)
         .map_err(|_| Error::Sys("if_nametoindex", io::ErrorKind::InvalidInput.into()))?;
     // SAFETY: `name` is a valid C string.

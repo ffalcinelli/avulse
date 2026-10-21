@@ -83,6 +83,7 @@ name = "avulse-cli"
 version = "0.0.0"
 dependencies = [
  "avulse",
+ "avulse-ebpf",
  "avulse-filter",
  "avulse-proto",
  "clap",

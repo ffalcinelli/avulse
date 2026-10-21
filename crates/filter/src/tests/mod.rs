@@ -1,4 +1,5 @@
 mod bytecode;
+mod filters;
 mod frames;
 mod pcap;
 mod tshark;

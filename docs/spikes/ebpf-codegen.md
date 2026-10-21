@@ -114,6 +114,12 @@ frame is TCP to port 443, carrying `GET / HTTP/1.1`:
 
 ## Left for Phase 2
 
+Status (2026-10-21): the NETWORK layers, the metadata, IPv6 addresses, `eth.addr`, VLAN fields,
+TCP options, `contains` (in headers), arithmetic, attaching on clsact, diverting in the action
+program and the superset fallback are done (Steps 7 to 10 in `docs/implementation-plan.md`).
+VLAN offload is handled in user space, and by a superset in the kernel at the ETHERNET layer
+(Step 11 can make it exact). An arm64 run is still to do.
+
 - **VLAN offload.** On a real TC hook, the outer VLAN tag is usually in `skb->vlan_tci`, not in
   the packet data. `BPF_PROG_TEST_RUN` keeps it in the data. The parser must account for both, as
   must the restore on capture.

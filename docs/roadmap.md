@@ -183,13 +183,13 @@ The pipeline is IR → bytecode (forward jumps only, so the verifier proves term
 
 | Feature | Linux | Windows (own driver) | macOS (system extension) |
 | --- | --- | --- | --- |
-| NETWORK | TC clsact cls_bpf (not TCX), `TC_ACT_STOLEN` | WFP `INBOUND/OUTBOUND_IPPACKET` callouts | `NEFilterPacketProvider` (drop + delay); modify = drop + reinject |
-| NETWORK_FORWARD | TC with `ingress_ifindex` / `bpf_fib_lookup` (as ebpfdivert) | WFP `IPFORWARD` | limited: pf + bpf device; documented gap |
+| NETWORK | TC clsact cls_bpf (not TCX), `TC_ACT_STOLEN` | WFP `INBOUND/OUTBOUND_IPPACKET` callouts | `NEFilterPacketProvider` (allow, drop, delay then allow); modify = drop + reinject |
+| NETWORK_FORWARD | TC with `ingress_ifindex` / `bpf_fib_lookup` (as ebpfdivert) | WFP `IPFORWARD` | limited: pf has no divert (`route-to`/`dup-to` only) + bpf device; documented gap |
 | **ETHERNET** | TC sees L2; restore the offloaded VLAN tag (`skb->vlan_tci`) in captured frames | **NDIS Lightweight Filter** send/receive NBL hooks | `NEFilterPacketProvider` / `/dev/bpf` for L2 inject |
 | FLOW | sockops + cgroup_skb (port `ebpfdivert_events.bpf.c`) | WFP `ALE_FLOW_ESTABLISHED` + flow-delete | `NEFilterDataProvider` flows |
 | SOCKET (block bind/connect) | cgroup connect/bind hooks, `EPERM` | WFP `ALE_{BIND,CONNECT,LISTEN,ACCEPT}` | data provider (connect); bind/listen sniff-only |
 | REFLECT | pinned registry diff (as ebpfdivert) | driver handle table | daemon registry |
-| Reinjection | AF_PACKET + vnet GSO, raw IP, `lo` redirect | `FwpsInject*` / `NdisF{Send,Indicate}NetBufferLists` | `/dev/bpf` write / raw socket |
+| Reinjection | AF_PACKET + vnet GSO, raw IP, `lo` redirect | `FwpsInject*` / `NdisF{Send,Indicate}NetBufferLists` | outbound: `/dev/bpf` write (L2); inbound: raw IP socket (host-order `ip_len`/`ip_off`; bpf cannot inject inbound) |
 | Priority, loop prevention | TC prio + `skb->mark` tagging | WFP sublayer weights + inject-context tagging | daemon-ordered handler chain |
 | Crash safety | heartbeat, fail-open | handle cleanup on process exit | daemon watches XPC client death |
 
@@ -207,8 +207,10 @@ The phases run in order. Each has an exit criterion.
    one NDIS LWF, test-signed, loaded in a Windows VM. Decide whether pure Rust is viable or whether a thin C shim is
    needed. Done: go, pure Rust, with our own bindgen for NDIS and WFP (`docs/spikes/windows-driver.md`).
 4. **Spike C, macOS.** Find out whether `NEFilterPacketProvider` exposes Ethernet frames, measure its throughput
-   and delay semantics, and test reinjection through `/dev/bpf`. Deferred until a Mac is available; it must be done
-   before Phase 6.
+   and delay semantics, and test reinjection through `/dev/bpf`. Partly done on GitHub's macOS runners
+   (`docs/spikes/macos.md`): bpf injects outbound only; a raw socket (host-order `ip_len`) reinjects inbound on the
+   right interface; pf has no divert; the system extension builds with the Rust library and stops at the user's
+   approval, so the provider's frame level, throughput and delay are still to measure before Phase 6.
 
 Exit: a written go/no-go note for each spike, and the capability matrix above confirmed or corrected.
 
@@ -236,8 +238,9 @@ and the CLI is usable.
 
 Progress (steps in `docs/implementation-plan.md`): the kernel side of capture (Step 7), the backend's receive
 side (Step 8: open, attach, registry, heartbeat, queue, `avulse cleanup`) and injection (Step 9: raw and
-`AF_PACKET` sockets, the `lo` redirect, GSO, reinjection by user-space filters) are done and tested on both VMs.
-Next: matcher coverage and the superset (Step 10), ETHERNET (Step 11), the privileged suite (Step 12).
+`AF_PACKET` sockets, the `lo` redirect, GSO, reinjection by user-space filters) and the matcher's coverage with the
+superset fallback (Step 10: metadata, IPv6, VLAN, TCP options, arithmetic, set trees) are done and tested on both
+VMs. Next: ETHERNET (Step 11), the privileged suite (Step 12).
 
 Exit: privileged tests pass on both Vagrant VMs, covering divert, inject, GSO, forward, ETHERNET/ARP/VLAN, crash
 cleanup, and exact in-kernel match versus interpreter (`BPF_PROG_TEST_RUN`).

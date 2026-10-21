@@ -37,10 +37,11 @@ pub struct Facts {
     pub vlan_tci: u16,
     /// Metadata bits ([`M_OUTBOUND`] and the others).
     pub meta: u8,
-    /// Padding.
-    pub pad: u8,
-    /// Reserved.
-    pub reserved: u32,
+    /// The number of VLAN tags in the frame (not counting an offloaded one), at most 2.
+    pub vlans: u8,
+    /// Where the first MSS, window scale, SACK permitted and timestamps options are, from the
+    /// start of the TCP header (0 when there is none), as [`OPT_KINDS`] orders them.
+    pub opts: [u8; 4],
 }
 
 /// Byte offsets of the [`Facts`] fields, for the generated code.
@@ -75,7 +76,15 @@ pub mod off {
     pub const VLAN_TCI: i16 = 40;
     /// [`Facts::meta`](super::Facts::meta).
     pub const META: i16 = 42;
+    /// [`Facts::vlans`](super::Facts::vlans).
+    pub const VLANS: i16 = 43;
+    /// [`Facts::opts`](super::Facts::opts).
+    pub const OPTS: i16 = 44;
 }
+
+/// The TCP option kinds [`Facts::opts`] records, in order: MSS, window scale, SACK permitted,
+/// timestamps.
+pub const OPT_KINDS: [u8; 4] = [2, 3, 4, 8];
 
 /// Size of [`Facts`] in bytes.
 pub const SIZE: usize = 48;
@@ -118,6 +127,9 @@ pub const M_SNIFFED: u8 = 1 << 5;
 pub const SLOT_MATCHER: u32 = 0;
 /// The program array slot of the action program, which the matcher tail-calls.
 pub const SLOT_ACTION: u32 = 1;
+/// The program array slot of `avulse_options`, which finds the TCP options ([`Facts::opts`])
+/// before the matcher runs, when the configuration asks for them.
+pub const SLOT_OPTIONS: u32 = 2;
 
 impl Facts {
     /// The facts of a parsed Ethernet frame: what the static TC program computes from the same
@@ -148,6 +160,14 @@ impl Facts {
         }
         let pay = p.payload_range();
         let l4 = p.l4_offset();
+        let mut opts = [0; 4];
+        for o in p.tcp().iter().flat_map(|t| t.option_iter()) {
+            if let Some(i) = OPT_KINDS.iter().position(|&k| k == o.kind())
+                && opts[i] == 0
+            {
+                opts[i] = o.offset() as u8;
+            }
+        }
         Facts {
             len: p.data().len() as u32,
             flags,
@@ -158,6 +178,8 @@ impl Facts {
             pay_end: pay.end as u32,
             proto: p.ip_protocol().unwrap_or(0),
             l3_len: p.ipv4().map_or(0, |h| h.header_len()) as u8,
+            vlans: p.vlans().len() as u8,
+            opts,
             ..Facts::default()
         }
     }
@@ -169,6 +191,7 @@ impl Facts {
     pub fn at_network(mut self) -> Facts {
         self.flags &= !F_ETH;
         self.base = self.l3;
+        self.vlans = 0;
         self
     }
 
@@ -192,8 +215,8 @@ impl Facts {
         b[36..40].copy_from_slice(&self.ifindex.to_ne_bytes());
         b[40..42].copy_from_slice(&self.vlan_tci.to_ne_bytes());
         b[42] = self.meta;
-        b[43] = self.pad;
-        b[44..48].copy_from_slice(&self.reserved.to_ne_bytes());
+        b[43] = self.vlans;
+        b[44..48].copy_from_slice(&self.opts);
         b
     }
 }

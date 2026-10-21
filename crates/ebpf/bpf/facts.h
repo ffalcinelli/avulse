@@ -32,7 +32,8 @@
 /* Slots of the `avulse_progs` program array. */
 #define SLOT_MATCHER 0
 #define SLOT_ACTION  1
-#define SLOTS        2
+#define SLOT_OPTIONS 2
+#define SLOTS        3
 
 struct avulse_facts {
     __u32 len;      /* frame length (skb->len) */
@@ -50,8 +51,8 @@ struct avulse_facts {
     __u32 ifindex;  /* the device the packet is on */
     __u16 vlan_tci; /* the offloaded outer VLAN tag, when M_VLAN */
     __u8 meta;      /* M_* */
-    __u8 pad;
-    __u32 reserved;
+    __u8 vlans;     /* VLAN tags in the frame (an offloaded one aside), at most 2 */
+    __u8 opts[4];   /* first MSS, WS, SACK_PERM and TS options, from the TCP header; 0: none */
 };
 
 _Static_assert(__builtin_offsetof(struct avulse_facts, len) == 0, "facts.rs");
@@ -69,6 +70,8 @@ _Static_assert(__builtin_offsetof(struct avulse_facts, base) == 32, "facts.rs");
 _Static_assert(__builtin_offsetof(struct avulse_facts, ifindex) == 36, "facts.rs");
 _Static_assert(__builtin_offsetof(struct avulse_facts, vlan_tci) == 40, "facts.rs");
 _Static_assert(__builtin_offsetof(struct avulse_facts, meta) == 42, "facts.rs");
+_Static_assert(__builtin_offsetof(struct avulse_facts, vlans) == 43, "facts.rs");
+_Static_assert(__builtin_offsetof(struct avulse_facts, opts) == 44, "facts.rs");
 _Static_assert(sizeof(struct avulse_facts) == 48, "facts.rs");
 
 #endif

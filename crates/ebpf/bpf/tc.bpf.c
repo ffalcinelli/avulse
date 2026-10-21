@@ -97,6 +97,74 @@ static __always_inline int is_vlan(__u32 et)
     return et == 0x8100 || et == 0x88a8 || et == 0x9100;
 }
 
+/* A byte of the facts, read and written in memory every time (see tcp_options). */
+#define FACT8(f, field) (*(volatile __u8 *)&(f)->field)
+
+/*
+ * Tcp::option_iter's walk over the options of the TCP header (facts l4 and l4_len): the
+ * offsets from the header of the first MSS, window scale, SACK permitted and timestamps
+ * options go to facts.opts, 0 when there is none. The walk ends after an EOL, and at an option
+ * whose length is missing, below 2 or past the header.
+ *
+ * Shaped for the verifier. A loop over a moving position tracks that position exactly on
+ * every path, and the states never merge: even alone, it went over the verifier's limit.
+ * Here each of the 40 possible positions is a step of its own (constant stack offsets), and
+ * the walk's state (where the next option starts, in facts.verdict until the matcher writes
+ * it, and the offsets found) lives in the facts map, whose contents the verifier does not
+ * track, so the states at each step are alike and get pruned.
+ */
+static __always_inline void tcp_options(struct __sk_buff *skb, struct avulse_facts *f)
+{
+    __u8 b[44];
+    __u32 off = f->l4, hl = f->l4_len, n;
+
+    __builtin_memset(f->opts, 0, sizeof(f->opts));
+    if (hl <= 20 || hl > 60)
+        return;
+    n = hl - 20;
+    __builtin_memset(b, 0, sizeof(b));
+#pragma unroll
+    for (int i = 0; i < 10; i++) {
+        if (i * 4 >= n)
+            break;
+        if (bpf_skb_load_bytes(skb, off + 20 + i * 4, &b[i * 4], 4))
+            return;
+    }
+/* The length of the options, read again each time for the same reason. */
+#define OPTS_LEN() ((__u32)(*(volatile __u32 *)&f->l4_len) - 20)
+    FACT8(f, verdict) = 0;
+#pragma unroll
+    for (int p = 0; p < 40; p++) {
+        __u32 kind = b[p], len = b[p + 1];
+
+        if (FACT8(f, verdict) != p)
+            continue;
+        if (p >= OPTS_LEN() || kind == 0) {
+            FACT8(f, verdict) = 0xff;
+            continue;
+        }
+        if (kind == 1) {
+            FACT8(f, verdict) = p + 1;
+            continue;
+        }
+        if (p + 1 >= OPTS_LEN() || len < 2 || p + len > OPTS_LEN()) {
+            FACT8(f, verdict) = 0xff;
+            continue;
+        }
+        if (kind == 2 && !FACT8(f, opts[0]))
+            FACT8(f, opts[0]) = 20 + p;
+        else if (kind == 3 && !FACT8(f, opts[1]))
+            FACT8(f, opts[1]) = 20 + p;
+        else if (kind == 4 && !FACT8(f, opts[2]))
+            FACT8(f, opts[2]) = 20 + p;
+        else if (kind == 8 && !FACT8(f, opts[3]))
+            FACT8(f, opts[3]) = 20 + p;
+        FACT8(f, verdict) = p + len;
+    }
+#undef OPTS_LEN
+    FACT8(f, verdict) = 0;
+}
+
 /* Packet::parse_transport: the header must fit in [off, end). */
 static __always_inline void parse_transport(struct __sk_buff *skb, struct avulse_facts *f,
                                             __u32 proto, __u32 off, __u32 end)
@@ -240,6 +308,7 @@ static __always_inline void parse(struct __sk_buff *skb, struct avulse_facts *f)
             return;
         off += 4;
         f->pay = off;
+        f->vlans = i + 1;
     }
     if (is_vlan(et))
         return;
@@ -339,12 +408,15 @@ static __always_inline int classify(struct __sk_buff *skb, int outbound)
             return TC_ACT_UNSPEC;
         f->flags &= ~F_ETH;
         f->base = f->l3;
+        f->vlans = 0;
         if ((f->flags & F_FRAG) && !outbound && !(cfg->flags & CFG_FRAGMENTS))
             return TC_ACT_UNSPEC;
         if (!outbound && layer == LAYER_NETWORK && (cfg->flags & CFG_FWD_CHECK) &&
             forwarded(skb, f))
             return TC_ACT_UNSPEC;
     }
+    if ((cfg->flags & CFG_TCP_OPTIONS) && (f->flags & F_TCP) && f->l4_len > 20)
+        bpf_tail_call(skb, &avulse_progs, SLOT_OPTIONS);
     bpf_tail_call(skb, &avulse_progs, SLOT_MATCHER);
     count(S_NO_MATCHER);
     return TC_ACT_UNSPEC;
@@ -381,6 +453,21 @@ SEC("classifier")
 int avulse_egress(struct __sk_buff *skb)
 {
     return classify(skb, 1);
+}
+
+/* Between the parser and the matcher, for the matchers that read TCP options. */
+SEC("classifier")
+int avulse_options(struct __sk_buff *skb)
+{
+    __u32 zero = 0;
+    struct avulse_facts *f = bpf_map_lookup_elem(&avulse_facts, &zero);
+
+    if (!f)
+        return TC_ACT_UNSPEC;
+    tcp_options(skb, f);
+    bpf_tail_call(skb, &avulse_progs, SLOT_MATCHER);
+    count(S_NO_MATCHER);
+    return TC_ACT_UNSPEC;
 }
 
 /*

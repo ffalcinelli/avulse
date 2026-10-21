@@ -13,6 +13,11 @@ pub const CFG_SHUTDOWN: u32 = 1 << 3;
 pub const CFG_FWD_CHECK: u32 = 1 << 4;
 /// The loopback device is attached for injection only.
 pub const CFG_SKIP_LO: u32 = 1 << 5;
+/// The matcher reads TCP options ([`Matcher::reads_tcp_options`]): find them
+/// (`avulse_options`) before it runs.
+///
+/// [`Matcher::reads_tcp_options`]: crate::codegen::Matcher::reads_tcp_options
+pub const CFG_TCP_OPTIONS: u32 = 1 << 6;
 
 /// `struct avulse_config`: the one entry of the `avulse_config` array.
 #[repr(C)]
