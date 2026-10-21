@@ -1,0 +1,57 @@
+name: Privileged
+
+# The tests that need root, on a GitHub Ubuntu runner (passwordless sudo, a 6.x kernel): the BPF
+# programs in the kernel (crates/ebpf/tests/kernel.rs) and the Linux backend on veth pairs and
+# network namespaces (crates/avulse/tests/capture.rs). They do not replace the runs on the
+# Vagrant VMs: the 5.15 verifier is the strict one.
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    paths:
+      - crates/avulse/**
+      - crates/ebpf/**
+      - crates/filter/**
+      - crates/proto/**
+      - Cargo.lock
+      - .github/workflows/privileged.yml
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - name: Install ethtool
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ethtool
+      - name: Build the tests
+        run: |
+          for t in "avulse-ebpf kernel" "avulse capture"; do
+            set -- $t
+            cargo test -p "$1" --test "$2" --no-run 2>&1 | tee "build-$2.log"
+            grep -o "target/debug/deps/$2-[0-9a-f]*" "build-$2.log" | head -n 1 > "$2.bin"
+          done
+      - name: Kernel and runner
+        run: |
+          uname -a
+          ls -l /sys/kernel/btf/vmlinux
+          sysctl net.ipv4.ip_forward
+          sudo iptables -S FORWARD || true
+      # Docker sets the FORWARD policy to DROP, which the forward-layer test would hit.
+      - run: sudo iptables -P FORWARD ACCEPT
+      - name: BPF programs in the kernel
+        run: sudo AVULSE_BPF=1 "$(cat kernel.bin)" --nocapture --test-threads=1
+      - name: The Linux backend on real traffic
+        run: sudo AVULSE_BPF=1 "$(cat capture.bin)" --nocapture --test-threads=1

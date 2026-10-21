@@ -167,6 +167,38 @@ fn unsupported_filters_are_refused_and_widened() {
     }
 }
 
+/// An unsupported test widens to the presence of the protocols it reads, and not further than
+/// the tests next to it require.
+#[test]
+fn supersets_keep_the_protocols() {
+    let env = common::env(Layer::Network);
+    for (src, superset) in [
+        ("icmp.seq == 1", "icmp"),
+        ("udp.payload contains \"hello\"", "udp"),
+        (
+            "tcp.dstport == 80 and tcp.payload contains \"GET\"",
+            "tcp.dstport == 80",
+        ),
+        (
+            "ip.src == 10.0.0.1 and icmp.seq == 1",
+            "ip.src == 10.0.0.1 and icmp",
+        ),
+        (
+            "tcp.payload contains \"GET\" or icmp.seq == 1",
+            "tcp or icmp",
+        ),
+        // Under a `not`, the only subset is false; extensions have no protocol.
+        ("tcp and not icmp.seq == 1", "tcp"),
+        ("udp and timestamp > 0", "udp"),
+        ("timestamp > 0", "true"),
+    ] {
+        let filter = Filter::compile(src).unwrap();
+        let s = codegen::superset(filter.ir(), &env);
+        assert!(!s.exact, "{src}");
+        assert_eq!(s.test.native().to_string(), superset, "{src}");
+    }
+}
+
 /// Random mixes of supported and unsupported tests: the superset never misses a packet.
 #[test]
 fn supersets_are_sound() {

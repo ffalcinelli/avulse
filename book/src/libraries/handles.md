@@ -152,9 +152,10 @@ metadata: `inbound`/`outbound`, `loopback`, `impostor`, `fragment`, `ifidx`, `if
 resolved when the handle opens: an interface renamed later is not seen under its new name),
 `protocol`, `local.*`/`remote.*`, and `layer`, `event` and `priority`.
 
-What the kernel cannot run is widened: each such test becomes `true` (or `false` under a `not`),
-so that the kernel takes a superset of the packets the filter matches, and user space runs the
-whole filter on them. It keeps the matching ones and sends the others back at once; with `DROP`,
+What the kernel cannot run is widened: each such test becomes the presence of the protocols it
+reads (`icmp.seq == 1` becomes `icmp`, since a test of an absent field is false), or `true` when
+it reads none (`false` under a `not`), so that the kernel takes a superset of the packets the
+filter matches, and user space runs the whole filter on them. It keeps the matching ones and sends the others back at once; with `DROP`,
 it drops the matching ones. Among what is widened: `contains` and `matches` on payloads and
 frames, layer operators (`vlan.id#2`), `@field`, `&` on bytes, slices of several ranges, string
 functions, `timestamp` and `random*`, and the ICMP identifier fields. `avulse filter

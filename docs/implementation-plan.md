@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-21, Steps 1 to 11 and Spikes A and B done, Spike C partly done; next: Step 12)
+## Status (2026-10-21, Phase 2 done: Steps 1 to 12 and Spikes A and B, Spike C partly done; next: Phase 3)
 
 | Area | State |
 | --- | --- |
@@ -18,7 +18,7 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `crates/ebpf` (`avulse-ebpf`) | Step 10: the generator covers metadata (through `Env`: layer, priority, interface names), IPv6 and MAC addresses, VLAN fields, TCP options (`avulse_options`, behind `CFG_TCP_OPTIONS`), byte order and `contains` in headers, arithmetic, field-to-field comparisons, set trees, `xor` through a slot; `superset`/`compile_superset` widen the rest, and `Matcher::exact` says when user space filters again. Step 9: `avulse_ingress` redirects the inbound packets user space injects through `lo` (`MARK_REDIRECT`, `PRIO_INJECTED`); test runs return the context (`Classifier::run_ctx`). Step 8: the loader attaches through Netlink (`Classifier::attach`, `Attachment::detach`) and opens raw BPF hash maps (`HashMap`, for the registry). Step 7: the capture side of the static TC programs (`avulse_ingress`/`avulse_egress` → matcher → `avulse_act`): per-handle configuration, metadata facts, ring buffer records, divert/sniff/drop, marks, loopback, NETWORK/FORWARD/ETHERNET selection, fragments, the forwarding check, fail-open; `abi.rs` mirrors `bpf/abi.h`. Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Needs clang on Linux. |
 | `spikes/macos` | Spike C (partial, `docs/spikes/macos.md`): probes of bpf, raw-socket and `utun` injection, pf and the filter engine's speed, and a `NEFilterPacketProvider` system extension around a Rust static library; run on GitHub's macOS runners by `.github/workflows/macos-spike.yml` (on changes to the spike). Outside the workspace. |
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
-| `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. 13 unit tests without privileges; `tests/capture.rs` (18 tests, `AVULSE_BPF=1`, root, in the VMs) on a veth pair. Other platforms: `Error::Unsupported`. |
+| `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. 13 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 32 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
 | `crates/{capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
 | CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
@@ -941,7 +941,29 @@ MAC, and LLDP sniffing.
 **Acceptance:** those pass on both VMs. The guide documents the layer: what the filter sees
 (`Link::Ethernet`), and how tags are restored.
 
-### Step 12: The privileged suite (Phase 2 exit)
+### Step 12: The privileged suite (Phase 2 exit) (done)
+
+**Outcome.** `crates/avulse/tests/capture.rs` is the suite (32 tests, plus `tests/kernel.rs`'s
+15), and passes on 6.8 and 5.15. `.github/workflows/privileged.yml` runs both with `sudo` on a
+GitHub Ubuntu runner, on pushes that touch the Linux crates and on pull requests. Added to Steps
+8 to 11's tests:
+- `loopback_single_sighting` (IPv4 and IPv6: held until sent back, seen once),
+  `tcp_both_directions` (handshake, data and FINs each way), `inbound_udp` (held, then delivered
+  through `lo`'s redirect), `auto_priority` (open order, the second handle sees an impostor),
+  `queue_limits` (QUEUE_LENGTH, QUEUE_SIZE and QUEUE_TIME drops, the parameter range,
+  `shutdown(Send)`), `shutdown_wakes_blocked_recv`, `bad_arguments` (an unknown interface, a tun
+  device, the handle's checks through the real backend, nothing left behind), `forward_layer` (two
+  namespaces routed through the host: diverted and sent on at NETWORK_FORWARD, unseen at
+  NETWORK), and `kernel_agrees_with_evaluator` (20 filters, 17 exact, against a catch-all handle
+  and `Filter::matches` on real traffic);
+- `modify_outbound` now rewrites the payload too, and `bulk_tcp` checks 8 MiB each way byte for
+  byte.
+
+WinDivert's "close while receiving" becomes `shutdown_wakes_blocked_recv`: a Rust handle cannot be
+closed while another thread borrows it. The widening got tighter on the way: an unsupported test
+becomes the presence of the protocols it reads (`icmp.seq == 1` → `icmp`, a test of an absent field
+being false) instead of `true`, so user space sees fewer packets.
+
 
 **Where.** `crates/avulse/tests/` (root only, `AVULSE_BPF=1`, network namespaces and veth
 pairs, like `../ebpfdivert/tests/test_integration.c`), run in the VMs like `tests/kernel.rs`.
@@ -998,5 +1020,5 @@ what the `avulse` crate and its Linux backend now hold).
 - [x] Step 9: injection
 - [x] Step 10: matcher coverage and superset fallback
 - [x] Step 11: ETHERNET layer (devices without an Ethernet header left for later)
-- [ ] Step 12: privileged suite on both VMs (Phase 2 exit)
+- [x] Step 12: privileged suite on both VMs (Phase 2 exit)
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement

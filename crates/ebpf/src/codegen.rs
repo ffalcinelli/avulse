@@ -28,7 +28,7 @@
 use core::fmt;
 
 use avulse_filter::Layer;
-use avulse_filter::fields::{Field, def};
+use avulse_filter::fields::{Field, Origin, Ty, def, lookup};
 use avulse_filter::ir::{self, ArithOp, CmpOp, Lit, Quant, SetItem, Slice, SliceEnd, Test, Value};
 
 use crate::facts::{
@@ -199,8 +199,10 @@ pub struct Superset {
     pub exact: bool,
 }
 
-/// Widens `test`: each test the generator does not support becomes `true`, or `false` under an
-/// odd number of `not`s (`xor` and conditionals are first written with `and`, `or` and `not`).
+/// Widens `test`: each test the generator does not support becomes the presence of the protocols
+/// whose fields it reads (`icmp.seq == 1` becomes `icmp`), or `true` when there are none, and
+/// `false` under an odd number of `not`s (`xor` and conditionals are first written with `and`,
+/// `or` and `not`). A protocol another test of the same `and` already requires is left out.
 pub fn superset(test: &Test, env: &Env<'_>) -> Superset {
     if supported(test, env) {
         return Superset {
@@ -258,6 +260,19 @@ fn widen(test: &Test, up: bool, env: &Env<'_>) -> (Test, bool) {
         }
         Test::And(xs) => {
             let (v, e) = all(xs);
+            // The leaves kept as they are already require some protocols: the widened ones need
+            // not test them again (`tcp.dstport == 80 and tcp` is `tcp.dstport == 80`).
+            let known: Vec<Field> = xs
+                .iter()
+                .zip(&v)
+                .filter(|(x, w)| x == w)
+                .flat_map(|(x, _)| protocols(x))
+                .collect();
+            let v = xs
+                .iter()
+                .zip(v)
+                .map(|(x, w)| if *x == w { w } else { prune(w, &known) })
+                .collect();
             (Test::And(v), e)
         }
         Test::Or(xs) => {
@@ -281,7 +296,70 @@ fn widen(test: &Test, up: bool, env: &Env<'_>) -> (Test, bool) {
             up,
             env,
         ),
-        _ => (Test::Const(up), false),
+        _ if up => (presence(test, env), false),
+        _ => (Test::Const(false), false),
+    }
+}
+
+/// A test that holds whenever the leaf `test` does: its [`protocols`] are present.
+fn presence(test: &Test, env: &Env<'_>) -> Test {
+    Test::And(
+        protocols(test)
+            .into_iter()
+            .map(|f| Test::Exists(Value::Field(f)))
+            .filter(|t| supported(t, env))
+            .collect(),
+    )
+}
+
+/// The protocols that must be present for the leaf `test` to hold: a test is false when a field
+/// it reads has no occurrence. Only Wireshark's fields, whose names start with their protocol's
+/// (`icmp.seq` is in `icmp`).
+fn protocols(test: &Test) -> Vec<Field> {
+    fn walk(v: &Value, out: &mut Vec<Field>) {
+        match v {
+            Value::Field(f) | Value::Layer(f, _) | Value::Raw(f, _) => {
+                let d = def(*f);
+                let proto = d.name.split_once('.').and_then(|(p, _)| lookup(p));
+                if let Some(p) = proto.filter(|p| {
+                    d.origin == Origin::Wireshark && p.ty == Ty::Proto && !out.contains(&p.field)
+                }) {
+                    out.push(p.field);
+                }
+            }
+            Value::Slice(v, _)
+            | Value::Len(v)
+            | Value::Neg(v)
+            | Value::Abs(v)
+            | Value::Case { value: v, .. } => walk(v, out),
+            Value::BitAnd(a, b) | Value::Arith(_, a, b) => {
+                walk(a, out);
+                walk(b, out);
+            }
+            // A count has a value when its field has none; `max`/`min` skip absent arguments.
+            Value::Count(_) | Value::Extreme { .. } | Value::Lit(_) => {}
+        }
+    }
+    let mut out = Vec::new();
+    match test {
+        Test::Exists(v) | Test::Truthy(v) => walk(v, &mut out),
+        Test::Member { lhs, .. } | Test::Matches { lhs, .. } => walk(lhs, &mut out),
+        Test::Cmp { lhs, rhs, .. } | Test::Contains { lhs, rhs, .. } => {
+            walk(lhs, &mut out);
+            walk(rhs, &mut out);
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Drops from the widened `w` the presence tests of `known` protocols.
+fn prune(w: Test, known: &[Field]) -> Test {
+    let redundant = |t: &Test| matches!(t, Test::Exists(Value::Field(f)) if known.contains(f));
+    match w {
+        Test::And(xs) => Test::And(xs.into_iter().filter(|t| !redundant(t)).collect()),
+        t if redundant(&t) => Test::Const(true),
+        t => t,
     }
 }
 
