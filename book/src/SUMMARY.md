@@ -30,6 +30,7 @@
 
 - [Rust crates](libraries/rust.md)
 - [Handles and addresses](libraries/handles.md)
+- [C](libraries/c.md)
 - [Python](libraries/python.md)
 
 # Project

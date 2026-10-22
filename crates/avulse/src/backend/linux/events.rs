@@ -239,20 +239,6 @@ fn matchers(spec: &Spec<'_>) -> Result<Vec<(EventHook, codegen::Matcher)>> {
     Ok(out)
 }
 
-/// The event of number `n`.
-fn event(n: u8) -> Option<Event> {
-    Some(match n {
-        1 => Event::FlowEstablished,
-        2 => Event::FlowDeleted,
-        3 => Event::SocketBind,
-        4 => Event::SocketConnect,
-        5 => Event::SocketListen,
-        6 => Event::SocketAccept,
-        7 => Event::SocketClose,
-        _ => return None,
-    })
-}
-
 fn is_loopback(a: &[u8; 16]) -> bool {
     Ipv6Addr::from(*a).to_canonical().is_loopback()
 }
@@ -261,7 +247,7 @@ fn is_loopback(a: &[u8; 16]) -> bool {
 pub(super) fn address(r: &EventRecord, layer: Layer, sniffed: bool) -> Option<Address> {
     let mut addr = Address::new(layer);
     addr.timestamp = r.timestamp as i64;
-    addr.event = event(r.event)?;
+    addr.event = Event::try_from(r.event).ok()?;
     addr.outbound = r.flags & EV_OUTBOUND != 0;
     addr.loopback = is_loopback(&r.local_addr) || is_loopback(&r.remote_addr);
     addr.ipv6 = r.family == 6;
@@ -284,6 +270,10 @@ pub(super) fn address(r: &EventRecord, layer: Layer, sniffed: bool) -> Option<Ad
 impl Opened for EventHandle {
     fn recv(&self, buf: &mut [u8], timeout: Option<Duration>) -> Result<(usize, Address)> {
         self.rx.recv(buf, timeout, || self.drain())
+    }
+
+    fn recv_ready(&self, buf: &mut [u8]) -> Result<Option<(usize, Address)>> {
+        self.rx.ready(buf, || self.drain())
     }
 
     fn send(&self, _: &[u8], _: &Address) -> Result<usize> {

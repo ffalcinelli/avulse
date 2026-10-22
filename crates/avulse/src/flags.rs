@@ -97,6 +97,7 @@ impl fmt::Debug for Flags {
 /// Received packets wait in a queue until `recv` takes them. Packets that arrive when the queue is
 /// full, or that waited too long, are dropped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Param {
     /// Most packets in the queue: 32 to 16,384, default 4,096.
     QueueLength,

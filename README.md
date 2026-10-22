@@ -103,7 +103,8 @@ assert!(filter.matches(&packet, &Meta { outbound: true, ..Meta::default() }));
 | [`avulse-wasm`](crates/wasm) | The engine compiled to WebAssembly, for the playground. |
 | [`avulse`](crates/avulse) | The handle API (preview): handles, flags, parameters, the packet address, and the platform backends. Linux works at every layer; the other platforms are to come. |
 | `avulse-ebpf` | The Linux kernel side: TC programs, the event programs, filter IR to eBPF, the loader. |
-| `avulse-capi`, `avulse-windivert-compat` | Placeholders for the coming phases. |
+| `avulse-capi` | The C interface, `libavulse` (preview), with the header `include/avulse.h`. |
+| `avulse-windivert-compat` | Placeholder for the WinDivert-compatible shim (Phase 4). |
 | [`bindings/python`](bindings/python) | The `avulse` PyPI package: a placeholder. |
 
 ## Related projects

@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-22, Phase 2 done: Steps 1 to 13 and Spikes A and B, Spike C partly done; Phase 3: Steps 14 to 17 done, next Step 18)
+## Status (2026-10-22, Phase 2 done: Steps 1 to 13 and Spikes A and B, Spike C partly done; Phase 3: Steps 14 to 18 done, next Step 19)
 
 | Area | State |
 | --- | --- |
@@ -19,7 +19,8 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `spikes/macos` | Spike C (partial, `docs/spikes/macos.md`): probes of bpf, raw-socket and `utun` injection, pf and the filter engine's speed, and a `NEFilterPacketProvider` system extension around a Rust static library; run on GitHub's macOS runners by `.github/workflows/macos-spike.yml` (on changes to the spike). Outside the workspace. |
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
 | `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Steps 15 to 17: the FLOW, SOCKET and REFLECT layers (`events.rs`, `reflect.rs`), SOCKET refusing binds and connects in the kernel; `Address` version 2 (216 bytes) with the process name. Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
-| `crates/{capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
+| `crates/capi` (`avulse-capi`) | Step 18: the C ABI, `libavulse.so`/`.a`, header `include/avulse.h` (hand-written, layout pinned by asserts), 20 functions, tested from C (`tests/c.rs`, `tests/c/abi.c`). |
+| `crates/windivert-compat` | Empty stub (one doc line, `publish = false`). |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
 | CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
 | Release (`.github/workflows/release.yml`) | Builds and publishes the Python placeholder on `v*` tags. **No crates.io job yet.** |
@@ -1339,7 +1340,59 @@ handle opened and closed by another process, and one that dies (CLOSE once it is
 **Acceptance.** Those pass on both VMs. `capabilities()` reports FLOW, SOCKET and REFLECT on
 Linux.
 
-### Step 18: API v0.1 and the C ABI
+### Step 18: API v0.1 and the C ABI (done)
+
+**Outcome.** The API was reviewed for 0.1, and `crates/capi` is `libavulse`. Host tests,
+`tests/kernel.rs` (20) and `tests/capture.rs` (46) pass on 6.8 and 5.15, and so does the C
+program's capture part.
+
+- **API review (decisions).**
+  - `Handle::recv_batch(buf, addrs, lens, timeout)` waits for the first packet as `recv` does.
+    Then it takes the packets already there, back to back in `buf`, and returns how many.
+    Parallel slices, so the C call is the same shape.
+    - What does not fit stays queued for the next call. To support that, the backends implement
+      `Opened::recv_ready` (`Rx::ready`, `Queue::unpop`; the default returns nothing).
+  - `Handle::send_batch(packets, addrs)` sends in order. It returns how many were sent, and the
+    error only if the first one fails.
+  - `#[non_exhaustive]` on `Param` (WinDivert also has version parameters) and `Syntax` (a
+    tcpdump front-end may come). It was already on `Address`, `Flow`, `Reflect`, `LayerSupport`
+    and `Error`. `Shutdown` and the flag set stay closed.
+  - `Layer` and `Event` (`avulse-filter`) implement `TryFrom<u8>`, which replaces three
+    hand-written mappings.
+  - The `Error` variants stay as they are.
+- **The C ABI** (`crates/capi`): a `cdylib` and a `staticlib` named `avulse`, without an
+  `rlib`, which would collide with the facade's. The facade is the dependency `avulse-rs`.
+  - 20 functions:
+    - open (with `struct avulse_open_options`), recv and recv_batch (timeouts in milliseconds),
+      send and send_batch, shutdown, the parameters, `avulse_fd`, close;
+    - `avulse_address_init`, cleanup, version;
+    - the filter helpers: check, format, convert, eval.
+  - Statuses are `AVULSE_E_*`, not errno, because Windows lacks some errno values.
+    `avulse_last_error` (the rendered diagnostic for a filter) and `avulse_last_os_error` are
+    per thread.
+  - `avulse_address` has `Address`'s layout, 216 bytes, but integers for its `bool`s and enums.
+    It is converted field by field with checks, so no value from C is undefined behaviour.
+  - **The header is written by hand, not by cbindgen (deviation).** cbindgen is not installed,
+    and it handles types from other crates and their `#[repr]` poorly. Instead, the header's
+    `_Static_assert`s and `src/tests.rs` pin the same offsets on `avulse_address` and
+    `avulse::Address`, which is an exact check of the ABI.
+- **Tests.**
+  - Unit tests: layouts, address round trips and refusals, filter helpers, argument checks.
+  - `tests/c.rs` builds the library (tests do not build a `cdylib`), compiles `tests/c/abi.c`
+    with `-Wall -Wextra -Werror` into `target/<profile>/avulse-c-test` (rpath `$ORIGIN`), and
+    runs it. In a VM, `sudo AVULSE_BPF=1 /vagrant/target/debug/avulse-c-test` also runs a
+    handle on `lo`:
+    - receive with a timeout, and readiness through `avulse_fd` and `poll`;
+    - divert and send back;
+    - three datagrams through `recv_batch` and `send_batch`;
+    - `AVULSE_E_BUFFER` with the needed length;
+    - shutdown.
+  - The facade's `batches` test runs on the fake backend.
+- **Guide:** `libraries/c.md`, whose example compiles.
+- **Moved to Step 19:** building `libavulse.so` in the `manylinux_2_28` containers. It belongs
+  with the release job that ships the tarballs.
+
+The original plan of the step follows.
 
 **Why.** The roadmap freezes the Rust API and the C ABI as 0.x before the release.
 
@@ -1385,6 +1438,10 @@ Linux.
   that the shipped objects match a fresh build.
 - Tarballs `avulse-v0.1.0-linux-{amd64,arm64}.tar.gz`, with `libavulse.so`, `avulse.h` and the
   `avulse` CLI. They are signed with cosign (keyless) and come with an SBOM.
+  - Build them in `quay.io/pypa/manylinux_2_28_{x86_64,aarch64}` (moved here from Step 18), with
+    Rust and clang installed in the container. aya is pure Rust, so glibc 2.28 is the only
+    requirement.
+  - Run `avulse-c-test` against the built library.
 - Version 0.1.0 across the workspace, a CHANGELOG, and the tag `v0.1.0`. The Python placeholder
   job stays as it is.
 
@@ -1418,6 +1475,6 @@ pre-release tag) passes, then the v0.1.0 tag publishes. The guide and README say
 - [x] Step 15: FLOW layer
 - [x] Step 16: SOCKET layer, with blocking
 - [x] Step 17: `process.name` and REFLECT
-- [ ] Step 18: API v0.1 and the C ABI (`libavulse.so`)
+- [x] Step 18: API v0.1 and the C ABI (`libavulse.so`)
 - [ ] Step 19: release v0.1 (crates.io, tarballs)
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement

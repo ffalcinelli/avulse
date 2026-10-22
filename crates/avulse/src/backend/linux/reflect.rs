@@ -31,19 +31,6 @@ struct Seen {
     handles: HashMap<u64, registry::Entry>,
 }
 
-/// The layer of number `n`.
-fn layer(n: u8) -> Option<Layer> {
-    Some(match n {
-        0 => Layer::Network,
-        1 => Layer::NetworkForward,
-        2 => Layer::Flow,
-        3 => Layer::Socket,
-        4 => Layer::Reflect,
-        5 => Layer::Ethernet,
-        _ => return None,
-    })
-}
-
 /// The REFLECT event of the handle registered as `e`, and its data: the filter.
 pub(super) fn event(e: &registry::Entry, event: Event, now: i64) -> Option<Entry> {
     let mut addr = Address::new(Layer::Reflect);
@@ -55,7 +42,7 @@ pub(super) fn event(e: &registry::Entry, event: Event, now: i64) -> Option<Entry
     r.flags = Flags::from_bits(e.flags)?;
     r.process_id = e.pid;
     r.priority = e.priority;
-    r.layer = layer(e.layer)?;
+    r.layer = Layer::try_from(e.layer).ok()?;
     Some(Entry {
         addr,
         data: e.filter.as_bytes().to_vec(),
@@ -152,6 +139,10 @@ impl ReflectHandle {
 impl Opened for ReflectHandle {
     fn recv(&self, buf: &mut [u8], timeout: Option<Duration>) -> Result<(usize, Address)> {
         self.rx.recv(buf, timeout, || self.drain())
+    }
+
+    fn recv_ready(&self, buf: &mut [u8]) -> Result<Option<(usize, Address)>> {
+        self.rx.ready(buf, || self.drain())
     }
 
     fn send(&self, _: &[u8], _: &Address) -> Result<usize> {

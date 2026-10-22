@@ -48,6 +48,44 @@ pub enum Event {
     ReflectClose = 9,
 }
 
+impl TryFrom<u8> for Layer {
+    type Error = u8;
+
+    /// The layer of number `n` (WinDivert's numbering); `Err(n)` if there is none.
+    fn try_from(n: u8) -> Result<Layer, u8> {
+        Ok(match n {
+            0 => Layer::Network,
+            1 => Layer::NetworkForward,
+            2 => Layer::Flow,
+            3 => Layer::Socket,
+            4 => Layer::Reflect,
+            5 => Layer::Ethernet,
+            _ => return Err(n),
+        })
+    }
+}
+
+impl TryFrom<u8> for Event {
+    type Error = u8;
+
+    /// The event of number `n` (WinDivert's numbering); `Err(n)` if there is none.
+    fn try_from(n: u8) -> Result<Event, u8> {
+        Ok(match n {
+            0 => Event::Packet,
+            1 => Event::FlowEstablished,
+            2 => Event::FlowDeleted,
+            3 => Event::SocketBind,
+            4 => Event::SocketConnect,
+            5 => Event::SocketListen,
+            6 => Event::SocketAccept,
+            7 => Event::SocketClose,
+            8 => Event::ReflectOpen,
+            9 => Event::ReflectClose,
+            _ => return Err(n),
+        })
+    }
+}
+
 /// Endpoints of a flow or socket event (FLOW and SOCKET layers have no packet).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FlowTuple {

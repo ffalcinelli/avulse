@@ -5,6 +5,7 @@ use std::mem::{align_of, offset_of, size_of};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[cfg(unix)]
 use std::os::fd::{AsFd, BorrowedFd};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -82,6 +83,7 @@ impl Backend for Fake {
         });
         Ok(Box::new(FakeHandle {
             log: self.log.clone(),
+            ready: AtomicUsize::new(2),
             #[cfg(unix)]
             fd: std::fs::File::open("/dev/null").unwrap(),
         }))
@@ -90,6 +92,8 @@ impl Backend for Fake {
 
 struct FakeHandle {
     log: Arc<Mutex<Log>>,
+    /// Packets already there, after the one `recv` waits for: their length is 4 + the count.
+    ready: AtomicUsize,
     #[cfg(unix)]
     fd: std::fs::File,
 }
@@ -109,6 +113,17 @@ impl Opened for FakeHandle {
         let mut addr = Address::new(Layer::Network);
         addr.outbound = true;
         Ok((packet.len(), addr))
+    }
+
+    fn recv_ready(&self, buf: &mut [u8]) -> Result<Option<(usize, Address)>> {
+        let left = self.ready.load(Ordering::Relaxed);
+        let n = 4 + left;
+        if left == 0 || buf.len() < n {
+            return Ok(None);
+        }
+        self.ready.store(left - 1, Ordering::Relaxed);
+        buf[..n].fill(left as u8);
+        Ok(Some((n, Address::new(Layer::Network))))
     }
 
     fn send(&self, packet: &[u8], addr: &Address) -> Result<usize> {
@@ -525,4 +540,64 @@ fn errors_display() {
     );
     let e = Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
     assert!(std::error::Error::source(&e).is_some());
+}
+
+#[test]
+fn batches() {
+    let fake = Fake::new();
+    let h = fake.open("ip", Layer::Network, Flags::NONE).unwrap();
+    let mut buf = [0u8; 64];
+    let mut addrs = [Address::default(); 4];
+    let mut lens = [0; 4];
+    // The packet it waits for, then the two already there, back to back.
+    let n = h.recv_batch(&mut buf, &mut addrs, &mut lens, None).unwrap();
+    assert_eq!((n, &lens[..n]), (3, &[4, 6, 5][..]));
+    assert_eq!(
+        &buf[..15],
+        &[0x45, 0, 0, 20, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1]
+    );
+    assert!(addrs[0].outbound && !addrs[1].outbound);
+    // Room for one address only, or none.
+    let h = fake.open("ip", Layer::Network, Flags::NONE).unwrap();
+    assert_eq!(
+        h.recv_batch(&mut buf, &mut addrs[..1], &mut lens, None)
+            .unwrap(),
+        1
+    );
+    assert!(matches!(
+        h.recv_batch(&mut buf, &mut [], &mut lens, None),
+        Err(Error::InvalidArgument(_))
+    ));
+    // What does not fit waits.
+    assert_eq!(
+        h.recv_batch(&mut buf[..9], &mut addrs, &mut lens, None)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        h.recv_batch(&mut buf, &mut addrs, &mut lens, None).unwrap(),
+        3
+    );
+
+    let a = Address::new(Layer::Network);
+    let p: &[u8] = &[0x45, 0, 0, 20];
+    assert_eq!(h.send_batch(&[p, p], &[a, a]).unwrap(), 2);
+    assert_eq!(fake.log().sent.len(), 2);
+    assert!(matches!(
+        h.send_batch(&[p], &[a, a]),
+        Err(Error::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        h.send_batch(&[], &[]),
+        Err(Error::InvalidArgument(_))
+    ));
+    // The second packet is refused: one was sent.
+    let other = Address::new(Layer::Ethernet);
+    assert_eq!(h.send_batch(&[p, p], &[a, other]).unwrap(), 1);
+    assert!(h.send_batch(&[p], &[other]).is_err());
+    let r = fake.open("ip", Layer::Network, Flags::RECV_ONLY).unwrap();
+    assert!(matches!(
+        r.send_batch(&[p], &[a]),
+        Err(Error::InvalidArgument(_))
+    ));
 }

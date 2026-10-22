@@ -61,6 +61,12 @@ impl Queue {
         None
     }
 
+    /// Puts back a packet [`pop`](Queue::pop) took, first in line.
+    pub fn unpop(&mut self, e: Entry) {
+        self.bytes += e.data.len() as u64;
+        self.entries.push_front(e);
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

@@ -17,6 +17,7 @@ pub const PRIORITY_LOWEST: i16 = -30_000;
 
 /// The language of a handle's filter.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Syntax {
     /// Avulse's language, a subset of Wireshark's display filters
     /// ([`Filter::compile`]).
@@ -237,6 +238,41 @@ impl Handle {
         self.inner().recv(buf, Some(timeout))
     }
 
+    /// Receives several packets or events at once: it waits for the first as
+    /// [`recv`](Handle::recv) does (at most `timeout`, or forever with `None`), then takes those
+    /// already there, as long as `buf` and the slices have room. The packets are stored back to
+    /// back in `buf`; packet `i` has length `lens[i]` and address `addrs[i]`. Returns how many
+    /// there are, at least 1. A packet that does not fit what is left of `buf` waits for the
+    /// next call; the first one, if it does not fit, is dropped ([`Error::BufferTooSmall`]).
+    pub fn recv_batch(
+        &self,
+        buf: &mut [u8],
+        addrs: &mut [Address],
+        lens: &mut [usize],
+        timeout: Option<Duration>,
+    ) -> Result<usize> {
+        self.check_recv()?;
+        let max = addrs.len().min(lens.len());
+        if max == 0 {
+            return Err(Error::InvalidArgument(
+                "recv_batch needs room for at least one address and length",
+            ));
+        }
+        let (n, addr) = self.inner().recv(buf, timeout)?;
+        (lens[0], addrs[0]) = (n, addr);
+        let (mut used, mut count) = (n, 1);
+        while count < max {
+            // What was received is kept even when a later call fails.
+            let Ok(Some((n, addr))) = self.inner().recv_ready(&mut buf[used..]) else {
+                break;
+            };
+            (lens[count], addrs[count]) = (n, addr);
+            used += n;
+            count += 1;
+        }
+        Ok(count)
+    }
+
     fn check_recv(&self) -> Result<()> {
         if self.flags.contains(Flags::SEND_ONLY) {
             return Err(Error::InvalidArgument(
@@ -272,6 +308,23 @@ impl Handle {
             return Err(Error::InvalidArgument("the packet is empty or too long"));
         }
         self.inner().send(packet, addr)
+    }
+
+    /// Sends several packets, in order: packet `i` with address `addrs[i]` ([`send`](Handle::send)
+    /// for each). Returns how many were sent; when a packet fails, the ones after it are not
+    /// sent, and the error is returned only if it was the first.
+    pub fn send_batch(&self, packets: &[&[u8]], addrs: &[Address]) -> Result<usize> {
+        if packets.is_empty() || packets.len() != addrs.len() {
+            return Err(Error::InvalidArgument(
+                "send_batch needs as many addresses as packets, and at least one",
+            ));
+        }
+        for (i, (packet, addr)) in packets.iter().zip(addrs).enumerate() {
+            if let Err(e) = self.send(packet, addr) {
+                return if i == 0 { Err(e) } else { Ok(i) };
+            }
+        }
+        Ok(packets.len())
     }
 
     /// Stops receiving, sending, or both. It cannot be undone.

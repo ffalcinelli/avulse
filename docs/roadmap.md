@@ -254,8 +254,8 @@ cleanup, and exact in-kernel match versus interpreter (`BPF_PROG_TEST_RUN`).
 
 Progress (steps in `docs/implementation-plan.md`): the event programs (Step 14), the FLOW layer (Step 15) and the
 SOCKET layer, which refuses binds and connects with eBPF matchers generated for the cgroup programs (Step 16), and
-`process.name` with the REFLECT layer (Step 17) are done: every layer works on Linux. Left: the API freeze, the C ABI
-and the release.
+`process.name` with the REFLECT layer (Step 17) are done: every layer works on Linux. The API is reviewed for 0.1
+(batch calls, `#[non_exhaustive]`) and the C ABI is `crates/capi` (Step 18). Left: the release.
 
 Exit: Linux release v0.1.
 

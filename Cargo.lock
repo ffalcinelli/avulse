@@ -77,6 +77,11 @@ dependencies = [
 [[package]]
 name = "avulse-capi"
 version = "0.0.0"
+dependencies = [
+ "avulse",
+ "avulse-filter",
+ "avulse-proto",
+]
 
 [[package]]
 name = "avulse-cli"

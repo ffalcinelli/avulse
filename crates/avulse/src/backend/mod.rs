@@ -44,6 +44,13 @@ pub(crate) trait Backend: Sync {
 pub(crate) trait Opened: Send + Sync {
     /// Waits for a packet, at most `timeout` if there is one.
     fn recv(&self, buf: &mut [u8], timeout: Option<Duration>) -> Result<(usize, Address)>;
+    /// A packet that is already there and fits `buf`, without waiting; `None` otherwise, and a
+    /// packet that does not fit stays first in line (for [`Handle::recv_batch`]).
+    ///
+    /// [`Handle::recv_batch`]: crate::Handle::recv_batch
+    fn recv_ready(&self, _buf: &mut [u8]) -> Result<Option<(usize, Address)>> {
+        Ok(None)
+    }
     fn send(&self, packet: &[u8], addr: &Address) -> Result<usize>;
     fn shutdown(&self, how: Shutdown) -> Result<()>;
     /// Applies a parameter; `value` is in range.

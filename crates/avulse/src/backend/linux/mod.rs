@@ -492,6 +492,36 @@ impl<R> Rx<R> {
         }
     }
 
+    /// A packet or event that is already there (queued, or in the ring: `drain` moves it to the
+    /// queue) and fits `buf`; `None` otherwise, and one that does not fit stays first in line.
+    fn ready(&self, buf: &mut [u8], drain: impl Fn() -> usize) -> Result<Option<(usize, Address)>> {
+        for first in [true, false] {
+            {
+                let mut q = lock(&self.queue);
+                let e = q.queue.pop(sys::now_ns());
+                let got = e.and_then(|e| match buf.get_mut(..e.data.len()) {
+                    Some(dst) => {
+                        dst.copy_from_slice(&e.data);
+                        Some((e.data.len(), e.addr))
+                    }
+                    None => {
+                        q.queue.unpop(e);
+                        None
+                    }
+                });
+                let empty = q.queue.is_empty();
+                self.update(&mut q);
+                if got.is_some() || !empty {
+                    return Ok(got);
+                }
+            }
+            if !first || drain() == 0 {
+                break;
+            }
+        }
+        Ok(None)
+    }
+
     /// Makes `ready` say whether `recv` would return at once.
     fn update(&self, q: &mut QueueState) {
         let want = q.shut || !q.queue.is_empty();
@@ -562,6 +592,10 @@ impl Handle {
 impl Opened for Handle {
     fn recv(&self, buf: &mut [u8], timeout: Option<Duration>) -> Result<(usize, Address)> {
         self.rx.recv(buf, timeout, || self.drain())
+    }
+
+    fn recv_ready(&self, buf: &mut [u8]) -> Result<Option<(usize, Address)>> {
+        self.rx.ready(buf, || self.drain())
     }
 
     fn send(&self, packet: &[u8], addr: &Address) -> Result<usize> {
