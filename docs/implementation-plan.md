@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-22, Phase 2 done: Steps 1 to 13 and Spikes A and B, Spike C partly done; next: Phase 3, Step 14)
+## Status (2026-10-22, Phase 2 done: Steps 1 to 13 and Spikes A and B, Spike C partly done; Phase 3: Step 14 done, next Step 15)
 
 | Area | State |
 | --- | --- |
@@ -15,7 +15,7 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `fuzz/` | cargo-fuzz targets `bytecode` (verifier and interpreter on arbitrary programs), `filter` (parser, `fmt` round trip, checker, evaluator, bytecode agreement) and `windivert` (front-end, bytecode and native agreement). Outside the workspace. |
 | `crates/wasm` (`avulse-wasm`) | The filter engine for the website's playground (wasm-bindgen, `publish = false`). |
 | Docs and website | README (front page), guide (`book/`, mdBook), `site/` with the playground, rustdoc and pdoc, built by `scripts/build-site.sh` and deployed by `pages.yml` to <https://ffalcinelli.github.io/avulse/>. Every public item is documented (`missing_docs`). |
-| `crates/ebpf` (`avulse-ebpf`) | Step 10: the generator covers metadata (through `Env`: layer, priority, interface names), IPv6 and MAC addresses, VLAN fields, TCP options (`avulse_options`, behind `CFG_TCP_OPTIONS`), byte order and `contains` in headers, arithmetic, field-to-field comparisons, set trees, `xor` through a slot; `superset`/`compile_superset` widen the rest, and `Matcher::exact` says when user space filters again. Step 9: `avulse_ingress` redirects the inbound packets user space injects through `lo` (`MARK_REDIRECT`, `PRIO_INJECTED`); test runs return the context (`Classifier::run_ctx`). Step 8: the loader attaches through Netlink (`Classifier::attach`, `Attachment::detach`) and opens raw BPF hash maps (`HashMap`, for the registry). Step 7: the capture side of the static TC programs (`avulse_ingress`/`avulse_egress` → matcher → `avulse_act`): per-handle configuration, metadata facts, ring buffer records, divert/sniff/drop, marks, loopback, NETWORK/FORWARD/ETHERNET selection, fragments, the forwarding check, fail-open; `abi.rs` mirrors `bpf/abi.h`. Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Needs clang on Linux. |
+| `crates/ebpf` (`avulse-ebpf`) | Step 10: the generator covers metadata (through `Env`: layer, priority, interface names), IPv6 and MAC addresses, VLAN fields, TCP options (`avulse_options`, behind `CFG_TCP_OPTIONS`), byte order and `contains` in headers, arithmetic, field-to-field comparisons, set trees, `xor` through a slot; `superset`/`compile_superset` widen the rest, and `Matcher::exact` says when user space filters again. Step 9: `avulse_ingress` redirects the inbound packets user space injects through `lo` (`MARK_REDIRECT`, `PRIO_INJECTED`); test runs return the context (`Classifier::run_ctx`). Step 8: the loader attaches through Netlink (`Classifier::attach`, `Attachment::detach`) and opens raw BPF hash maps (`HashMap`, for the registry). Step 7: the capture side of the static TC programs (`avulse_ingress`/`avulse_egress` → matcher → `avulse_act`): per-handle configuration, metadata facts, ring buffer records, divert/sniff/drop, marks, loopback, NETWORK/FORWARD/ETHERNET selection, fragments, the forwarding check, fail-open; `abi.rs` mirrors `bpf/abi.h`. Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Step 14: the event programs of the FLOW and SOCKET layers (`bpf/events.bpf.c`, `loader::Events`, records in `abi::EventRecord`). Needs clang on Linux. |
 | `spikes/macos` | Spike C (partial, `docs/spikes/macos.md`): probes of bpf, raw-socket and `utun` injection, pf and the filter engine's speed, and a `NEFilterPacketProvider` system extension around a Rust static library; run on GitHub's macOS runners by `.github/workflows/macos-spike.yml` (on changes to the spike). Outside the workspace. |
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
 | `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
@@ -1091,7 +1091,48 @@ explains them. As in Phase 2, port the logic, not the layout.
   filter text in native syntax, from the registry entry; the compat shim (Phase 4) serializes
   WinDivert's filter object instead.
 
-### Step 14: The event programs and records
+### Step 14: The event programs and records (done)
+
+**Outcome.** `crates/ebpf/bpf/events.bpf.c`, the event record in `bpf/abi.h` (`struct
+avulse_event`, 88 bytes, mirrored by `abi::EventRecord`), and `loader::Events`
+(`src/loader/events.rs`: `load_with_ring`, `attach(layer)`, `take_ring`, `records`,
+`config_writer`, `set_config`, `stats`, and `cgroup_root`). `tests/kernel.rs` (19 tests) passes on
+6.8 and 5.15.
+
+- **One object, nine programs:** `sock_create`, `post_bind4/6`, `connect4/6`, `sock_release`,
+  `sockops`, `cgroup_skb` egress/ingress. `attach` links the ones the layer needs to the cgroup
+  v2 root (the mount from `/proc/self/mountinfo`). The links always allow other programs and the
+  kernel refuses attach flags with them, so the mode is aya's `Single` (flags 0); every
+  supported kernel (5.7 and later) takes the link path. The links go with the process.
+- **The configuration is the TC programs' `struct avulse_config`** (layer FLOW or SOCKET,
+  `CFG_SHUTDOWN`, the heartbeat; `CFG_SNIFF` for Step 16), so `Beat` and `ConfigWriter` serve both
+  kinds of handle. `loader.rs`'s configuration, statistics and ring functions are shared. The
+  event programs count `RING_FULL` and `OWNER_GONE`.
+- **The record** carries the timestamp, the socket's cookie (the endpoint), the parent endpoint
+  (always 0: Linux does not say which socket a socket came from), PID, event, protocol, family,
+  flags (`EV_OUTBOUND`: a connect, an active TCP flow, a UDP flow sent first; `EV_BLOCKED` for
+  Step 16; `EV_RELEASED`, a UDP socket's end at FLOW, which user space turns into DELETED for each
+  of its flows), ports (host order), addresses (network order, IPv4 mapped) and the process's
+  `comm`.
+- **Socket storage** (`BPF_MAP_TYPE_SK_STORAGE`, cloned to accepted sockets) keeps the PID and
+  name from `sock_create`, and the endpoints, which `sock_release` cannot read.
+- **The task's PID and name** come from `bpf_get_current_pid_tgid`/`bpf_get_current_comm` behind
+  a load-time constant (`avulse_have_task`). `load_with_ring` loads again without them when the
+  kernel refuses them. Both 5.15 and 6.8 allow them in cgroup socket programs. `comm` is the
+  thread's name.
+- **Tests** (in the kernel, in this process):
+  - SOCKET over IPv4 and IPv6: BIND, LISTEN, CONNECT, ACCEPT and CLOSE of a TCP listener and
+    client, with their endpoints, PID, name, timestamps and directions; each socket closes
+    once. UDP: bind, connect, close.
+  - FLOW: a TCP connection established and deleted on both ends (active outbound, passive
+    inbound); UDP flows once per 5-tuple and socket, and one release per socket.
+  - Shut down or with a stale heartbeat, nothing is reported.
+- **Also:** GitHub's runners moved to Linux 7.0, whose `BPF_PROG_TEST_RUN` refuses an IPv4 or
+  IPv6 frame with a truncated IP header (`EINVAL`). The kernel tests now leave such frames out
+  (`common::test_runnable`); the emulator keeps them. The privileged workflow passes on 7.0,
+  the tun and ipip tests included.
+
+The original plan of the step follows.
 
 **Why.** FLOW and SOCKET share the programs, the records and the socket-local state.
 
@@ -1245,7 +1286,7 @@ pre-release tag) passes, then the v0.1.0 tag publishes. The guide and README say
 - [x] Step 12: privileged suite on both VMs (Phase 2 exit)
 - [x] Step 13: devices without an Ethernet header (tun, WireGuard, PPP, IP tunnels) at the NETWORK
   layers
-- [ ] Step 14: event programs and records
+- [x] Step 14: event programs and records
 - [ ] Step 15: FLOW layer
 - [ ] Step 16: SOCKET layer, with blocking
 - [ ] Step 17: `process.name` and REFLECT

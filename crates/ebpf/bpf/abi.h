@@ -1,16 +1,20 @@
 /* SPDX-License-Identifier: LGPL-3.0-or-later OR GPL-2.0-or-later */
 /*
- * What the capture programs share with user space (`crates/ebpf/src/abi.rs`): the handle's
- * configuration, the ring buffer records, the statistics and the packet marks.
+ * What the programs share with user space (`crates/ebpf/src/abi.rs`): the handle's
+ * configuration, the ring buffer records (packets, and the events of the FLOW and SOCKET
+ * layers), the statistics and the packet marks.
  */
 #ifndef AVULSE_ABI_H
 #define AVULSE_ABI_H
 
 #include <linux/types.h>
 
-/* Layers (`avulse_filter::Layer`) the TC programs serve. */
+/* Layers (`avulse_filter::Layer`): the TC programs serve the packet layers, the event
+ * programs (events.bpf.c) FLOW and SOCKET. */
 #define LAYER_NETWORK 0
 #define LAYER_FORWARD 1
+#define LAYER_FLOW 2
+#define LAYER_SOCKET 3
 #define LAYER_ETHERNET 5
 
 /* avulse_config.flags */
@@ -23,7 +27,8 @@
 #define CFG_TCP_OPTIONS (1u << 6) /* the matcher reads TCP options: find them (avulse_options) */
 
 /* The handle's configuration: the one entry of the `avulse_config` array. User space writes
- * it whole; the heartbeat refreshes `heartbeat_ns`. */
+ * it whole; the heartbeat refreshes `heartbeat_ns`. The event programs read the heartbeat,
+ * CFG_SHUTDOWN, CFG_SNIFF and the layer. */
 struct avulse_config {
     __u64 heartbeat_ns;         /* bpf_ktime_get_ns() of the last refresh */
     __u64 heartbeat_timeout_ns; /* pass everything once the heartbeat is older; 0: no check */
@@ -59,6 +64,41 @@ struct avulse_record {
 };
 
 _Static_assert(sizeof(struct avulse_record) == 40, "abi.rs");
+
+/* Events (`avulse_filter::Event`): what an event record reports. */
+#define EVENT_FLOW_ESTABLISHED 1
+#define EVENT_FLOW_DELETED     2
+#define EVENT_SOCKET_BIND      3
+#define EVENT_SOCKET_CONNECT   4
+#define EVENT_SOCKET_LISTEN    5
+#define EVENT_SOCKET_ACCEPT    6
+#define EVENT_SOCKET_CLOSE     7
+
+/* avulse_event.flags */
+#define EV_OUTBOUND (1u << 0) /* the local end opened it: connect, an active flow, UDP sent first */
+#define EV_BLOCKED  (1u << 1) /* the call was refused */
+#define EV_RELEASED (1u << 2) /* FLOW: a UDP socket went away, so its flows are deleted */
+
+/* An event record of the FLOW and SOCKET layers. Addresses are in network byte order, IPv4 as
+ * ::ffff:a.b.c.d; ports are in host byte order. */
+struct avulse_event {
+    __u64 timestamp;       /* bpf_ktime_get_ns() */
+    __u64 endpoint;        /* the socket's cookie */
+    __u64 parent_endpoint; /* 0: Linux does not say which socket a socket came from */
+    __u32 pid;             /* the process (tgid) that made the socket; 0 when unknown */
+    __u8 event;            /* EVENT_* */
+    __u8 protocol;         /* IPPROTO_* */
+    __u8 family;           /* 4 or 6 */
+    __u8 flags;            /* EV_* */
+    __u16 local_port;
+    __u16 remote_port;
+    __u8 local_addr[16];
+    __u8 remote_addr[16];
+    char comm[16];         /* the process's name (its `comm`), NUL-padded; empty when unknown */
+    __u32 reserved;
+};
+
+_Static_assert(sizeof(struct avulse_event) == 88, "abi.rs");
 
 /* Statistics: a per-CPU array of __u64. */
 #define S_DIVERTED   0 /* stolen and copied to the ring */

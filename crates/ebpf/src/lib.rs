@@ -11,7 +11,9 @@
 //! - [`codegen`] turns a filter's IR into that matcher, with the assembler in [`insn`]; what it
 //!   cannot compile it widens to a superset ([`codegen::compile_superset`]), which user space
 //!   filters again;
-//! - `loader` (Linux only) loads the static object with `aya` and the matcher with the `bpf()`
+//! - `bpf/events.bpf.c`, the event programs of the FLOW and SOCKET layers, on the cgroup v2
+//!   root and `sockops`: they report what sockets do as [`abi::EventRecord`]s;
+//! - `loader` (Linux only) loads the static objects with `aya` and the matcher with the `bpf()`
 //!   system call, and runs them with `BPF_PROG_TEST_RUN`.
 //!
 //! See `docs/spikes/ebpf-codegen.md` for what the spike found.

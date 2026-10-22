@@ -24,6 +24,10 @@ use crate::abi::{self, Config};
 use crate::codegen::Matcher;
 use crate::facts::{Facts, SLOT_ACTION, SLOT_MATCHER, SLOT_OPTIONS};
 
+mod events;
+
+pub use events::{Events, cgroup_root};
+
 /// The static programs, built from `bpf/tc.bpf.c`.
 pub static TC_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tc.bpf.o"));
 
@@ -392,50 +396,22 @@ impl Classifier {
 
     /// A writer of the configuration that does not borrow the classifier, for a heartbeat thread.
     pub fn config_writer(&self) -> Result<ConfigWriter, Error> {
-        let fd = self
-            .map_data("avulse_config")?
-            .fd()
-            .as_fd()
-            .try_clone_to_owned()
-            .map_err(|e| Error::Sys("dup", e))?;
-        Ok(ConfigWriter(fd))
+        config_writer(&self.ebpf)
     }
 
     /// Writes the handle's configuration.
     pub fn set_config(&mut self, config: &Config) -> Result<(), Error> {
-        let map = self
-            .ebpf
-            .map_mut("avulse_config")
-            .ok_or_else(|| Error::Aya("no map avulse_config".into()))?;
-        let mut array: Array<&mut MapData, Config> =
-            map.try_into().map_err(aya("avulse_config"))?;
-        array.set(0, config, 0).map_err(aya("avulse_config"))
+        set_config(&mut self.ebpf, config)
     }
 
     /// The statistics, summed over the CPUs, indexed by [`abi::stat`].
     pub fn stats(&self) -> Result<[u64; abi::stat::COUNT], Error> {
-        let map = self
-            .ebpf
-            .map("avulse_stats")
-            .ok_or_else(|| Error::Aya("no map avulse_stats".into()))?;
-        let map: PerCpuArray<&MapData, u64> = map.try_into().map_err(aya("avulse_stats"))?;
-        let mut out = [0; abi::stat::COUNT];
-        for (i, total) in out.iter_mut().enumerate() {
-            let values = map.get(&(i as u32), 0).map_err(aya("avulse_stats"))?;
-            *total = values.iter().sum();
-        }
-        Ok(out)
+        stats(&self.ebpf)
     }
 
     /// Takes every record in the ring buffer (see [`abi::Record::parse`]).
     pub fn records(&mut self) -> Vec<Vec<u8>> {
-        let mut out = Vec::new();
-        if let Some(ring) = &mut self.ring {
-            while let Some(item) = ring.next() {
-                out.push(item.to_vec());
-            }
-        }
-        out
+        drain(&mut self.ring)
     }
 
     /// Runs the ingress program on `frame` (an Ethernet frame of at least 14 bytes) with
@@ -485,6 +461,47 @@ impl Classifier {
             .copied()
             .ok_or_else(|| Error::Aya(format!("no CPU {cpu}")))
     }
+}
+
+/// A writer of the `avulse_config` map of `ebpf`.
+fn config_writer(ebpf: &Ebpf) -> Result<ConfigWriter, Error> {
+    let fd = match ebpf.map("avulse_config") {
+        Some(Map::Array(d)) => d.fd().as_fd().try_clone_to_owned(),
+        _ => return Err(Error::Aya("no map avulse_config".into())),
+    };
+    Ok(ConfigWriter(fd.map_err(|e| Error::Sys("dup", e))?))
+}
+
+fn set_config(ebpf: &mut Ebpf, config: &Config) -> Result<(), Error> {
+    let map = ebpf
+        .map_mut("avulse_config")
+        .ok_or_else(|| Error::Aya("no map avulse_config".into()))?;
+    let mut array: Array<&mut MapData, Config> = map.try_into().map_err(aya("avulse_config"))?;
+    array.set(0, config, 0).map_err(aya("avulse_config"))
+}
+
+fn stats(ebpf: &Ebpf) -> Result<[u64; abi::stat::COUNT], Error> {
+    let map = ebpf
+        .map("avulse_stats")
+        .ok_or_else(|| Error::Aya("no map avulse_stats".into()))?;
+    let map: PerCpuArray<&MapData, u64> = map.try_into().map_err(aya("avulse_stats"))?;
+    let mut out = [0; abi::stat::COUNT];
+    for (i, total) in out.iter_mut().enumerate() {
+        let values = map.get(&(i as u32), 0).map_err(aya("avulse_stats"))?;
+        *total = values.iter().sum();
+    }
+    Ok(out)
+}
+
+/// Every record in the ring buffer, if it is still there.
+fn drain(ring: &mut Option<Ring>) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    if let Some(ring) = ring {
+        while let Some(item) = ring.next() {
+            out.push(item.to_vec());
+        }
+    }
+    out
 }
 
 /// The index of the interface named `ifname`.

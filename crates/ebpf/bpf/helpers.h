@@ -29,5 +29,15 @@ static void (*bpf_ringbuf_discard)(void *data, __u64 flags) = (void *)BPF_FUNC_r
 static long (*bpf_redirect)(__u32 ifindex, __u64 flags) = (void *)BPF_FUNC_redirect;
 static long (*bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params, int plen,
                               __u32 flags) = (void *)BPF_FUNC_fib_lookup;
+static long (*bpf_map_update_elem)(void *map, const void *key, const void *value,
+                                   __u64 flags) = (void *)BPF_FUNC_map_update_elem;
+static __u64 (*bpf_get_socket_cookie)(void *ctx) = (void *)BPF_FUNC_get_socket_cookie;
+static void *(*bpf_sk_storage_get)(void *map, void *sk, void *value,
+                                   __u64 flags) = (void *)BPF_FUNC_sk_storage_get;
+static __u64 (*bpf_get_current_pid_tgid)(void) = (void *)BPF_FUNC_get_current_pid_tgid;
+static long (*bpf_get_current_comm)(void *buf, __u32 size) = (void *)BPF_FUNC_get_current_comm;
+static long (*bpf_sock_ops_cb_flags_set)(struct bpf_sock_ops *skops,
+                                         int flags) = (void *)BPF_FUNC_sock_ops_cb_flags_set;
+static struct bpf_sock *(*bpf_sk_fullsock)(struct bpf_sock *sk) = (void *)BPF_FUNC_sk_fullsock;
 
 #endif

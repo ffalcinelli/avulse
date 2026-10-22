@@ -20,16 +20,23 @@
 
 mod common;
 
-use avulse_ebpf::abi::{self, Config, Record, stat};
+use avulse_ebpf::abi::{self, Config, EventRecord, Record, stat};
 use avulse_ebpf::codegen;
 use avulse_ebpf::facts::{
     F_IPV4, F_IPV6, F_UDP, Facts, M_FORWARD, M_IMPOSTOR, M_LOOPBACK, M_OUTBOUND, M_SNIFFED,
 };
-use avulse_ebpf::loader::{Classifier, Hook, SkbCtx};
-use avulse_filter::{Filter, Layer};
+use avulse_ebpf::loader::{self, Classifier, Events, Hook, SkbCtx};
+use avulse_filter::{Event, Filter, Layer};
 use avulse_proto::{Link, Packet};
 
 const TC_ACT_SHOT: i32 = 2;
+const EVENT_FLOW_ESTABLISHED: u8 = Event::FlowEstablished as u8;
+const EVENT_FLOW_DELETED: u8 = Event::FlowDeleted as u8;
+const EVENT_SOCKET_BIND: u8 = Event::SocketBind as u8;
+const EVENT_SOCKET_CONNECT: u8 = Event::SocketConnect as u8;
+const EVENT_SOCKET_LISTEN: u8 = Event::SocketListen as u8;
+const EVENT_SOCKET_ACCEPT: u8 = Event::SocketAccept as u8;
+const EVENT_SOCKET_CLOSE: u8 = Event::SocketClose as u8;
 const TC_ACT_STOLEN: i32 = 4;
 const TC_ACT_REDIRECT: i32 = 7;
 const TC_ACT_UNSPEC: i32 = -1;
@@ -868,4 +875,270 @@ fn tshark_filters_in_the_kernel() {
         n += 1;
     }
     eprintln!("tshark filters: {n} load at both layers");
+}
+
+/// The event programs, with the configuration of a live handle at `layer` (no heartbeat check),
+/// attached to the cgroup root.
+fn events(layer: Layer) -> Events {
+    let mut ev = Events::load_with_ring(1 << 20).unwrap();
+    ev.set_config(&Config {
+        layer: layer as u8,
+        ..Config::default()
+    })
+    .unwrap();
+    ev.attach(layer).unwrap();
+    ev
+}
+
+/// The event records of this process's sockets whose ports include one of `ports`.
+fn event_records(ev: &mut Events, ports: &[u16]) -> Vec<EventRecord> {
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    ev.records()
+        .iter()
+        .map(|r| EventRecord::parse(r).expect("an event record"))
+        .filter(|e| ports.contains(&e.local_port) || ports.contains(&e.remote_port))
+        .collect()
+}
+
+/// `addr` as the programs report it: IPv4 as `::ffff:a.b.c.d`.
+fn mapped(addr: std::net::IpAddr) -> [u8; 16] {
+    match addr {
+        std::net::IpAddr::V4(a) => a.to_ipv6_mapped().octets(),
+        std::net::IpAddr::V6(a) => a.octets(),
+    }
+}
+
+/// The current thread's name, which `bpf_get_current_comm` reports.
+fn thread_comm() -> String {
+    std::fs::read_to_string("/proc/thread-self/comm")
+        .unwrap()
+        .trim_end()
+        .to_owned()
+}
+
+#[test]
+fn event_programs_load_and_attach() {
+    if !enabled() {
+        return;
+    }
+    for layer in [Layer::Flow, Layer::Socket] {
+        let ev = events(layer);
+        eprintln!(
+            "{layer:?}: programs attached, the task's PID and name {}",
+            if ev.have_task() { "known" } else { "unknown" }
+        );
+    }
+    assert!(loader::cgroup_root().unwrap().is_dir());
+}
+
+/// SOCKET: a TCP listener and a client over IPv4 and IPv6 (BIND, LISTEN, CONNECT, ACCEPT,
+/// CLOSE), and a UDP socket that binds and connects.
+#[test]
+fn socket_events() {
+    use std::net::{TcpListener, TcpStream, UdpSocket};
+    if !enabled() {
+        return;
+    }
+    let mut ev = events(Layer::Socket);
+    let (pid, comm) = (std::process::id(), thread_comm());
+    for host in ["127.0.0.1", "::1"] {
+        let before = monotonic_ns();
+        let listener = TcpListener::bind((host, 0)).unwrap();
+        let server = listener.local_addr().unwrap();
+        let client = TcpStream::connect(server).unwrap();
+        let (accepted, peer) = listener.accept().unwrap();
+        drop((client, accepted, listener));
+        let got = event_records(&mut ev, &[server.port(), peer.port()]);
+        let family = if server.is_ipv4() { 4 } else { 6 };
+        let find = |event: u8, local: u16| {
+            got.iter()
+                .find(|e| e.event == event && e.local_port == local)
+                .unwrap_or_else(|| panic!("no event {event} on port {local}: {got:#?}"))
+        };
+        let bind = find(EVENT_SOCKET_BIND, server.port());
+        let listen = find(EVENT_SOCKET_LISTEN, server.port());
+        let accept = find(EVENT_SOCKET_ACCEPT, server.port());
+        let connect = got
+            .iter()
+            .find(|e| e.event == EVENT_SOCKET_CONNECT)
+            .unwrap_or_else(|| panic!("no connect: {got:#?}"));
+        for e in [bind, listen, accept, connect] {
+            assert_eq!((e.protocol, e.family), (6, family), "{e:?}");
+            assert!(e.timestamp >= before && e.timestamp <= monotonic_ns());
+            assert_ne!(e.endpoint, 0);
+            if ev.have_task() {
+                assert_eq!(e.pid, pid, "{e:?}");
+                assert_eq!(e.comm(), Some(comm.as_str()), "{e:?}");
+            }
+        }
+        assert_eq!(bind.local_addr, mapped(server.ip()));
+        assert_eq!(bind.endpoint, listen.endpoint);
+        assert_eq!(
+            (connect.remote_addr, connect.remote_port),
+            (mapped(server.ip()), server.port())
+        );
+        assert_eq!(connect.flags & abi::EV_OUTBOUND, abi::EV_OUTBOUND);
+        assert_eq!(
+            (accept.remote_addr, accept.remote_port),
+            (mapped(peer.ip()), peer.port())
+        );
+        assert_eq!(accept.flags & abi::EV_OUTBOUND, 0);
+        // Each socket closes once: the listener, the client and the accepted one.
+        let closes: Vec<_> = got
+            .iter()
+            .filter(|e| e.event == EVENT_SOCKET_CLOSE)
+            .map(|e| e.endpoint)
+            .collect();
+        for e in [bind.endpoint, connect.endpoint, accept.endpoint] {
+            assert_eq!(closes.iter().filter(|&&c| c == e).count(), 1, "{got:#?}");
+        }
+    }
+
+    // UDP: bind, then connect (no handshake), then close.
+    let a = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let b = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let (pa, pb) = (
+        a.local_addr().unwrap().port(),
+        b.local_addr().unwrap().port(),
+    );
+    a.connect(("127.0.0.1", pb)).unwrap();
+    drop((a, b));
+    let got = event_records(&mut ev, &[pa, pb]);
+    let kinds: Vec<_> = got
+        .iter()
+        .filter(|e| e.local_port == pa)
+        .map(|e| (e.event, e.protocol))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (EVENT_SOCKET_BIND, 17),
+            (EVENT_SOCKET_CONNECT, 17),
+            (EVENT_SOCKET_CLOSE, 17)
+        ],
+        "{got:#?}"
+    );
+}
+
+/// FLOW: a TCP connection is established and deleted on both ends; a UDP datagram establishes
+/// a flow on each socket, and their release ends them.
+#[test]
+fn flow_events() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream, UdpSocket};
+    if !enabled() {
+        return;
+    }
+    let mut ev = events(Layer::Flow);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let server = listener.local_addr().unwrap().port();
+    let mut client = TcpStream::connect(("127.0.0.1", server)).unwrap();
+    let (mut accepted, peer) = listener.accept().unwrap();
+    client.write_all(b"ping").unwrap();
+    accepted.read_exact(&mut [0; 4]).unwrap();
+    drop((client, accepted, listener));
+    let got = event_records(&mut ev, &[server]);
+    let established: Vec<_> = got
+        .iter()
+        .filter(|e| e.event == EVENT_FLOW_ESTABLISHED)
+        .collect();
+    assert_eq!(established.len(), 2, "{got:#?}");
+    let active = established
+        .iter()
+        .find(|e| e.flags & abi::EV_OUTBOUND != 0)
+        .expect("the client's flow");
+    let passive = established
+        .iter()
+        .find(|e| e.flags & abi::EV_OUTBOUND == 0)
+        .expect("the server's flow");
+    assert_eq!(
+        (active.local_port, active.remote_port),
+        (peer.port(), server)
+    );
+    assert_eq!(
+        (passive.local_port, passive.remote_port),
+        (server, peer.port())
+    );
+    assert!(established.iter().all(|e| e.protocol == 6 && e.family == 4));
+    let deleted: Vec<_> = got
+        .iter()
+        .filter(|e| e.event == EVENT_FLOW_DELETED)
+        .map(|e| e.endpoint)
+        .collect();
+    assert_eq!(deleted.len(), 2, "{got:#?}");
+    assert!(deleted.contains(&active.endpoint) && deleted.contains(&passive.endpoint));
+    if ev.have_task() {
+        let pid = std::process::id();
+        assert!(got.iter().all(|e| e.pid == pid), "{got:#?}");
+    }
+
+    let a = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let b = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let (pa, pb) = (
+        a.local_addr().unwrap().port(),
+        b.local_addr().unwrap().port(),
+    );
+    for _ in 0..3 {
+        a.send_to(b"hello", ("127.0.0.1", pb)).unwrap();
+        b.recv_from(&mut [0; 16]).unwrap();
+    }
+    let got = event_records(&mut ev, &[pa, pb]);
+    let flows: Vec<_> = got
+        .iter()
+        .map(|e| (e.event, e.local_port, e.remote_port, e.flags))
+        .collect();
+    // Once per 5-tuple and socket: the sender's, outbound, and the receiver's.
+    assert_eq!(
+        flows,
+        [
+            (EVENT_FLOW_ESTABLISHED, pa, pb, abi::EV_OUTBOUND),
+            (EVENT_FLOW_ESTABLISHED, pb, pa, 0)
+        ],
+        "{got:#?}"
+    );
+    let endpoints: Vec<_> = got.iter().map(|e| e.endpoint).collect();
+    drop((a, b));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let released: Vec<_> = ev
+        .records()
+        .iter()
+        .map(|r| EventRecord::parse(r).unwrap())
+        .filter(|e| endpoints.contains(&e.endpoint))
+        .collect();
+    assert_eq!(released.len(), 2, "{released:#?}");
+    assert!(
+        released
+            .iter()
+            .all(|e| e.event == EVENT_FLOW_DELETED && e.flags == abi::EV_RELEASED)
+    );
+}
+
+/// Shut down, or with a stale heartbeat, the event programs report nothing.
+#[test]
+fn events_fail_open() {
+    use std::net::UdpSocket;
+    if !enabled() {
+        return;
+    }
+    let mut ev = events(Layer::Socket);
+    for config in [
+        Config {
+            layer: Layer::Socket as u8,
+            flags: abi::CFG_SHUTDOWN,
+            ..Config::default()
+        },
+        Config {
+            layer: Layer::Socket as u8,
+            heartbeat_ns: 1,
+            heartbeat_timeout_ns: 1,
+            ..Config::default()
+        },
+    ] {
+        ev.set_config(&config).unwrap();
+        let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = s.local_addr().unwrap().port();
+        drop(s);
+        assert_eq!(event_records(&mut ev, &[port]), []);
+    }
+    assert!(ev.stats().unwrap()[stat::OWNER_GONE] > 0);
 }

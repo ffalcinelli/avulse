@@ -10,11 +10,19 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
         return;
     }
-    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("tc.bpf.o");
+    for name in ["tc", "events"] {
+        compile(name);
+    }
+}
+
+/// Compiles `bpf/{name}.bpf.c` to `{name}.bpf.o` in `OUT_DIR`.
+fn compile(name: &str) {
+    let src = format!("bpf/{name}.bpf.c");
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join(format!("{name}.bpf.o"));
     let clang = env::var("CLANG").unwrap_or_else(|_| "clang".into());
     let mut cmd = Command::new(&clang);
     cmd.args(["-O2", "-g", "-target", "bpf", "-Wall", "-Werror", "-c"])
-        .arg("bpf/tc.bpf.c")
+        .arg(&src)
         .arg("-o")
         .arg(&out);
     // Debian and Ubuntu keep `asm/types.h` in the multiarch directory, which `-target bpf` does
@@ -26,7 +34,7 @@ fn main() {
     }
     match cmd.status() {
         Ok(s) if s.success() => {}
-        Ok(s) => panic!("{clang} failed to compile bpf/tc.bpf.c: {s}"),
+        Ok(s) => panic!("{clang} failed to compile {src}: {s}"),
         Err(e) => panic!(
             "cannot run {clang} ({e}): building avulse-ebpf on Linux needs clang with the BPF \
              target and the kernel UAPI headers (set CLANG to pick another compiler)"

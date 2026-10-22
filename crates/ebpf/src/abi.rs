@@ -1,5 +1,6 @@
-//! What the capture programs share with user space, as laid out in `bpf/abi.h`: the handle's
-//! configuration, the ring buffer records, the statistics and the packet marks.
+//! What the programs share with user space, as laid out in `bpf/abi.h`: the handle's
+//! configuration, the ring buffer records (packets, and the events of the FLOW and SOCKET
+//! layers), the statistics and the packet marks.
 
 /// Copy matching packets to the ring; they go on.
 pub const CFG_SNIFF: u32 = 1 << 0;
@@ -35,7 +36,8 @@ pub struct Config {
     pub lo_ifindex: u32,
     /// With [`CFG_SNIFF`], copy at most this many bytes; 0 copies everything.
     pub snaplen: u32,
-    /// The layer (`avulse_filter::Layer` as a number): NETWORK, NETWORK_FORWARD or ETHERNET.
+    /// The layer (`avulse_filter::Layer` as a number): NETWORK, NETWORK_FORWARD or ETHERNET for
+    /// the TC programs, FLOW or SOCKET for the event programs.
     pub layer: u8,
     /// Padding.
     pub pad: [u8; 7],
@@ -101,6 +103,81 @@ impl<'a> Record<'a> {
     }
 }
 
+/// The local end opened it: a connect, an active TCP flow, a UDP flow it sent first.
+pub const EV_OUTBOUND: u8 = 1 << 0;
+/// The call was refused.
+pub const EV_BLOCKED: u8 = 1 << 1;
+/// FLOW: a UDP socket went away, so each of its flows is deleted. Not an event of its own.
+pub const EV_RELEASED: u8 = 1 << 2;
+
+/// Size of an event record.
+pub const EVENT_RECORD: usize = 88;
+
+/// An event record of the FLOW and SOCKET layers, as `struct avulse_event` describes it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EventRecord {
+    /// `bpf_ktime_get_ns()` when it happened.
+    pub timestamp: u64,
+    /// The socket's cookie.
+    pub endpoint: u64,
+    /// The socket it came from; always 0 on Linux.
+    pub parent_endpoint: u64,
+    /// The process (thread group) that made the socket; 0 when unknown.
+    pub pid: u32,
+    /// The event (`avulse_filter::Event` as a number).
+    pub event: u8,
+    /// The IP protocol.
+    pub protocol: u8,
+    /// 4 or 6.
+    pub family: u8,
+    /// `EV_*` bits.
+    pub flags: u8,
+    /// The local port.
+    pub local_port: u16,
+    /// The remote port.
+    pub remote_port: u16,
+    /// The local address, IPv4 as `::ffff:a.b.c.d`.
+    pub local_addr: [u8; 16],
+    /// The remote address, IPv4 as `::ffff:a.b.c.d`.
+    pub remote_addr: [u8; 16],
+    /// The process's name (its `comm`), NUL-padded; empty when unknown.
+    pub comm: [u8; 16],
+}
+
+impl EventRecord {
+    /// Reads an event record from the ring buffer's bytes; `None` if it is too short.
+    pub fn parse(b: &[u8]) -> Option<EventRecord> {
+        let b: &[u8; EVENT_RECORD] = b.get(..EVENT_RECORD)?.try_into().ok()?;
+        let u16_at = |at: usize| u16::from_ne_bytes([b[at], b[at + 1]]);
+        let u32_at = |at: usize| u32::from_ne_bytes(b[at..at + 4].try_into().unwrap());
+        let u64_at = |at: usize| u64::from_ne_bytes(b[at..at + 8].try_into().unwrap());
+        let bytes16 = |at: usize| -> [u8; 16] { b[at..at + 16].try_into().unwrap() };
+        Some(EventRecord {
+            timestamp: u64_at(0),
+            endpoint: u64_at(8),
+            parent_endpoint: u64_at(16),
+            pid: u32_at(24),
+            event: b[28],
+            protocol: b[29],
+            family: b[30],
+            flags: b[31],
+            local_port: u16_at(32),
+            remote_port: u16_at(34),
+            local_addr: bytes16(36),
+            remote_addr: bytes16(52),
+            comm: bytes16(68),
+        })
+    }
+
+    /// The process's name, if the kernel told it.
+    pub fn comm(&self) -> Option<&str> {
+        let n = self.comm.iter().position(|&c| c == 0).unwrap_or(16);
+        std::str::from_utf8(&self.comm[..n])
+            .ok()
+            .filter(|s| !s.is_empty())
+    }
+}
+
 /// Indexes of the per-CPU statistics in `avulse_stats`.
 pub mod stat {
     /// Stolen and copied to the ring.
@@ -157,6 +234,31 @@ mod tests {
         assert_eq!(r.data, [1, 2, 3]);
         assert_eq!(Record::parse(&b[..RECORD_HEADER + 2]), None);
         assert_eq!(Record::parse(&b[..10]), None);
+    }
+
+    #[test]
+    fn event_records_parse() {
+        let mut b = vec![0u8; EVENT_RECORD];
+        b[0..8].copy_from_slice(&9u64.to_ne_bytes());
+        b[8..16].copy_from_slice(&0x1234u64.to_ne_bytes());
+        b[24..28].copy_from_slice(&42u32.to_ne_bytes());
+        b[28..32].copy_from_slice(&[4, 6, 4, EV_OUTBOUND]);
+        b[32..34].copy_from_slice(&5000u16.to_ne_bytes());
+        b[34..36].copy_from_slice(&80u16.to_ne_bytes());
+        b[36 + 15] = 1;
+        b[52 + 15] = 2;
+        b[68..72].copy_from_slice(b"curl");
+        let e = EventRecord::parse(&b).unwrap();
+        assert_eq!((e.timestamp, e.endpoint, e.pid), (9, 0x1234, 42));
+        assert_eq!(
+            (e.event, e.protocol, e.family, e.flags),
+            (4, 6, 4, EV_OUTBOUND)
+        );
+        assert_eq!((e.local_port, e.remote_port), (5000, 80));
+        assert_eq!((e.local_addr[15], e.remote_addr[15]), (1, 2));
+        assert_eq!(e.comm(), Some("curl"));
+        assert_eq!(EventRecord::parse(&b[..EVENT_RECORD - 1]), None);
+        assert_eq!(EventRecord::default().comm(), None);
     }
 
     #[test]
