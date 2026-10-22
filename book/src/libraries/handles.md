@@ -1,7 +1,7 @@
 # Handles and addresses
 
 > **Preview.** Only Linux has a backend so far, for the packet layers (`Network`,
-> `NetworkForward` and `Ethernet`), `Flow` and `Socket`. Elsewhere, `Handle::open` returns
+> `NetworkForward` and `Ethernet`) and the event layers (`Flow`, `Socket` and `Reflect`). Elsewhere, `Handle::open` returns
 > `Error::Unsupported`. The API may still change before version 0.1.
 
 The model is WinDivert's. You open a **handle** at a **layer**, with a filter, a priority and
@@ -75,7 +75,7 @@ versioned (`ADDRESS_VERSION`), so the C API can expose it as it is.
 | `ip_checksum`, `tcp_checksum`, `udp_checksum` | The checksum is known to be valid. When sending, `false` asks for it to be computed |
 | `if_idx`, `sub_if_idx` | The interface |
 | `vlan`, `vlan_tci` | The outer VLAN tag the packet carried, also at the NETWORK layers |
-| `flow` | FLOW and SOCKET events: process ID, endpoint IDs, local and remote address and port, protocol |
+| `flow` | FLOW and SOCKET events: process ID and name (`flow.process_name()`), endpoint IDs, local and remote address and port, protocol |
 | `reflect` | REFLECT events: the other handle's process, layer, flags, priority and opening time |
 | `context` | Opaque: what the backend needs to reinject a captured packet unchanged |
 
@@ -93,7 +93,9 @@ Sending follows WinDivert's rules:
   handles that keep reinjecting each other's packets cannot loop forever.
 
 `Address::meta()` gives the metadata a filter sees, so `Filter::matches` can check a received
-packet against another filter.
+packet against another filter. Only `iface` is missing: the address has the interface's index,
+not its name. At the `Reflect` layer, `layer` and `priority` are those of the handle the event is
+about.
 
 ## Capabilities
 
@@ -167,9 +169,20 @@ of kind `PermissionDenied`. Kernel 5.10 or later with BTF is supported (tested o
     `event`, keeps those events out.
   - The kernel decides each call, so the filter must compile exactly to eBPF. It can test
     `event`, `local.*`, `remote.*`, `protocol`, `process.pid`, `inbound`, `outbound` and
-    `loopback`, with comparisons, sets, arithmetic and the handle's constants. A test of a
-    packet field, such as `tcp`, is false. Anything else (`process.name`, `endpoint.id`,
-    `timestamp`, `random*`) fails to open without `SNIFF`.
+    `loopback`, with comparisons, sets, arithmetic and the handle's constants. It can also test
+    `process.name` with `==`, `!=` and sets. A test of a packet field, such as `tcp`, is
+    false. Anything else fails to open without `SNIFF`: `contains`, ordering and `upper()`
+    on `process.name`, `endpoint.id`, `timestamp` and `random*`.
+- **The process name** is the `comm` of the thread that made the socket, at most 15 bytes,
+  which threads can change. A name that is not UTF-8 is absent in user space, but the kernel
+  compares its bytes.
+- **The `Reflect` layer** reports the handles of every process, as the registry lists them,
+  every 100 ms.
+  - At first, it reports every open handle, itself included, as `ReflectOpen`.
+  - Then it reports a handle when it opens, and `ReflectClose` when it closes or its owner dies.
+  - The data is the handle's filter, in native syntax. `Address::reflect` has its process,
+    layer, flags, priority and opening time.
+  - Processes in another PID namespace, or that use another bpffs, are not seen.
 
 ### Where filters run
 

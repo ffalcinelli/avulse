@@ -15,10 +15,11 @@ use avulse_proto::{Link, Packet, checksum};
 use super::events::{self, UdpFlows};
 use super::queue::Queue;
 use super::record::{self, Ctx, Entry};
+use super::reflect;
 use super::registry;
 use super::send::{self, Path};
 use super::{Targets, after, sys, targets};
-use crate::{Address, Context, Error, Param};
+use crate::{Address, Context, Error, Flags, Param};
 
 const MAC: [u8; 12] = [2, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 2];
 
@@ -616,8 +617,8 @@ fn event_addresses() {
     assert_eq!(f.remote_addr(), Ipv4Addr::new(10, 0, 0, 2));
 
     // What filters at this layer see: no packet, the flow's endpoints and process.
-    let mut meta = a.meta();
-    meta.process_name = r.comm();
+    assert_eq!(a.flow.process_name(), Some("curl"));
+    let meta = a.meta();
     let matches = |src: &str| {
         Filter::compile(src)
             .unwrap()
@@ -676,4 +677,68 @@ fn udp_flows_end_with_their_socket() {
     }
     // Once: the socket's flows are forgotten.
     assert_eq!(udp.events(release), []);
+}
+
+fn registered(pid: u32, timestamp: i64, layer: Layer, filter: &str) -> registry::Entry {
+    registry::Entry {
+        pid,
+        start_time: 0,
+        tc_priority: 0,
+        timestamp,
+        flags: Flags::SNIFF.bits(),
+        layer: layer as u8,
+        priority: -7,
+        attachments: Vec::new(),
+        filter: filter.into(),
+    }
+}
+
+#[test]
+fn reflect_events() {
+    use std::collections::HashMap;
+    let mut seen = HashMap::new();
+    let now: HashMap<u64, registry::Entry> = [
+        (1, registered(10, 200, Layer::Network, "tcp")),
+        (2, registered(11, 100, Layer::Flow, "true")),
+    ]
+    .into();
+    // At first, every handle, oldest first.
+    let got = reflect::diff(&mut seen, now.clone(), 999);
+    let opened: Vec<_> = got
+        .iter()
+        .map(|e| (e.addr.event, e.addr.reflect.process_id))
+        .collect();
+    assert_eq!(opened, [(Event::ReflectOpen, 11), (Event::ReflectOpen, 10)]);
+    let a = got[1].addr;
+    assert_eq!(
+        (a.layer, a.timestamp, got[1].data.as_slice()),
+        (Layer::Reflect, 999, &b"tcp"[..])
+    );
+    let r = a.reflect;
+    assert_eq!(
+        (r.timestamp, r.flags, r.priority, r.layer),
+        (200, Flags::SNIFF, -7, Layer::Network)
+    );
+    // What a filter sees: the reflected handle's layer, priority and process.
+    let meta = a.meta();
+    assert_eq!(
+        (meta.layer, meta.priority, meta.process_id),
+        (Layer::Network, -7, Some(10))
+    );
+    // Nothing changed, then one goes and one comes.
+    assert!(reflect::diff(&mut seen, now, 1000).is_empty());
+    let next = [
+        (2, registered(11, 100, Layer::Flow, "true")),
+        (3, registered(12, 300, Layer::Socket, "x")),
+    ];
+    let got = reflect::diff(&mut seen, next.into(), 1001);
+    let kinds: Vec<_> = got
+        .iter()
+        .map(|e| (e.addr.event, e.addr.reflect.process_id))
+        .collect();
+    assert_eq!(kinds, [(Event::ReflectClose, 10), (Event::ReflectOpen, 12)]);
+    // An entry that does not decode to flags and a layer is not reported.
+    let mut bad = registered(13, 1, Layer::Network, "");
+    bad.layer = 9;
+    assert!(reflect::event(&bad, Event::ReflectOpen, 0).is_none());
 }

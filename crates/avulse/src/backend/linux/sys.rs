@@ -37,6 +37,49 @@ pub fn now_ns() -> i64 {
     ns
 }
 
+/// A periodic `timerfd`: readable once each period has passed, until [`expired`](Timer::expired).
+pub struct Timer(OwnedFd);
+
+impl Timer {
+    /// A timer that expires at once, then every `period`.
+    pub fn periodic(period: std::time::Duration) -> io::Result<Timer> {
+        // SAFETY: no pointers.
+        let fd = owned(unsafe {
+            libc::timerfd_create(
+                libc::CLOCK_MONOTONIC,
+                libc::TFD_NONBLOCK | libc::TFD_CLOEXEC,
+            )
+        })?;
+        let spec = libc::itimerspec {
+            it_interval: libc::timespec {
+                tv_sec: period.as_secs() as _,
+                tv_nsec: period.subsec_nanos() as _,
+            },
+            it_value: libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 1,
+            },
+        };
+        // SAFETY: `spec` is a valid itimerspec; the old value is not asked for.
+        check(unsafe { libc::timerfd_settime(fd.as_raw_fd(), 0, &spec, std::ptr::null_mut()) })?;
+        Ok(Timer(fd))
+    }
+
+    /// Whether a period has passed since the last call.
+    pub fn expired(&self) -> bool {
+        let mut n = 0u64;
+        // SAFETY: reads 8 bytes into `n`.
+        let r = unsafe { libc::read(self.0.as_raw_fd(), (&mut n as *mut u64).cast(), 8) };
+        r == 8
+    }
+}
+
+impl AsFd for Timer {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+
 /// An `eventfd` used as a flag: readable while it is set.
 pub struct Flag(OwnedFd);
 

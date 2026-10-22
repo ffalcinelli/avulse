@@ -14,6 +14,7 @@ mod events;
 mod heartbeat;
 mod queue;
 mod record;
+mod reflect;
 mod registry;
 mod send;
 mod sys;
@@ -71,6 +72,10 @@ impl Backend for Linux {
             drop: true,
             ..LayerSupport::default()
         };
+        c.layers[Layer::Reflect as usize] = LayerSupport {
+            open: true,
+            ..LayerSupport::default()
+        };
         c
     }
 
@@ -80,7 +85,7 @@ impl Backend for Linux {
                 Ok(Box::new(Handle::open(spec)?))
             }
             Layer::Flow | Layer::Socket => Ok(Box::new(events::EventHandle::open(spec)?)),
-            Layer::Reflect => Err(Error::Unsupported("the REFLECT layer (Phase 3)")),
+            Layer::Reflect => Ok(Box::new(reflect::ReflectHandle::open(spec)?)),
         }
     }
 

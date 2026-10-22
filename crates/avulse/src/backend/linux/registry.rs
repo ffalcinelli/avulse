@@ -126,7 +126,7 @@ impl Entry {
         })
     }
 
-    fn alive(&self) -> bool {
+    pub fn alive(&self) -> bool {
         sys::alive(self.pid, self.start_time)
     }
 }

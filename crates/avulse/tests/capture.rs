@@ -2217,7 +2217,7 @@ fn socket_filters_the_kernel_cannot_refuse() {
     for filter in [
         "remote.port == 443",
         "event == accept",
-        "event == connect and process.name == \"curl\"",
+        "event == connect and process.name contains \"ur\"",
         "event == connect and endpoint.id == 1",
     ] {
         let r = Handle::open(filter, Layer::Socket, 0, Flags::RECV_ONLY);
@@ -2239,4 +2239,119 @@ fn socket_dead_owner() {
     child.wait().unwrap();
     assert!(!refused(TcpStream::connect(("127.0.0.1", 9103))));
     assert!(avulse::cleanup().unwrap() >= 1);
+}
+
+// `process.name` and the REFLECT layer (Step 17).
+
+/// Runs `f` in a thread named `name`, which `process.name` sees (a thread's `comm`).
+fn in_thread<R: Send>(name: &str, f: impl FnOnce() -> R + Send) -> R {
+    thread::scope(|s| {
+        thread::Builder::new()
+            .name(name.into())
+            .spawn_scoped(s, f)
+            .unwrap()
+            .join()
+            .unwrap()
+    })
+}
+
+/// The kernel refuses calls by process name, and FLOW reports the name.
+#[test]
+fn process_names() {
+    if !enabled() {
+        return;
+    }
+    let listener = TcpListener::bind("127.0.0.1:9106").unwrap();
+    let h = open_socket(
+        "event == connect and remote.port == 9106 and process.name == \"avulse-deny\"",
+        Flags::NONE,
+    );
+    let flow = open_flow("process.name == \"avulse-allow\" and remote.port == 9106");
+    assert!(refused(in_thread("avulse-deny", || {
+        TcpStream::connect(("127.0.0.1", 9106))
+    })));
+    let s = in_thread("avulse-allow", || TcpStream::connect(("127.0.0.1", 9106))).unwrap();
+    drop((s, listener));
+    let got = drain(&h);
+    assert_eq!(got.len(), 1, "{got:#?}");
+    assert_eq!(got[0].1.flow.process_name(), Some("avulse-deny"));
+    let flows = drain(&flow);
+    assert_eq!(flows.len(), 2, "{flows:#?}");
+    assert!(
+        flows
+            .iter()
+            .all(|(_, a)| a.flow.process_name() == Some("avulse-allow"))
+    );
+}
+
+/// REFLECT reports the handles there are (itself included), then those that open, and close
+/// or lose their owner; its filter sees the reflected handle's layer.
+#[test]
+fn reflect_layer() {
+    use avulse::Event::{ReflectClose, ReflectOpen};
+    if !enabled() {
+        return;
+    }
+    let pid = std::process::id();
+    let all = Handle::open("true", Layer::Reflect, 0, Flags::SNIFF | Flags::RECV_ONLY).unwrap();
+    let flows = Handle::open(
+        "layer == flow",
+        Layer::Reflect,
+        0,
+        Flags::SNIFF | Flags::RECV_ONLY,
+    )
+    .unwrap();
+    let first = drain(&all);
+    let me = first
+        .iter()
+        .find(|(_, a)| a.reflect.process_id == pid && a.reflect.layer == Layer::Reflect)
+        .unwrap_or_else(|| panic!("itself: {first:#?}"));
+    assert_eq!(me.1.event, ReflectOpen);
+    assert!(me.1.sniffed);
+    assert_eq!(me.1.reflect.flags, Flags::SNIFF | Flags::RECV_ONLY);
+    assert!(
+        drain(&flows)
+            .iter()
+            .all(|(_, a)| a.reflect.layer == Layer::Flow)
+    );
+
+    let mut child = spawn_owner_of("flow");
+    let opened = drain(&all);
+    let theirs: Vec<_> = opened
+        .iter()
+        .filter(|(_, a)| a.reflect.process_id == child.id())
+        .collect();
+    assert_eq!(theirs.len(), 1, "{opened:#?}");
+    let (data, a) = theirs[0];
+    assert_eq!(a.event, ReflectOpen);
+    assert_eq!(a.reflect.layer, Layer::Flow);
+    assert_eq!(a.reflect.flags, Flags::SNIFF | Flags::RECV_ONLY);
+    assert_eq!(
+        data.as_slice(),
+        Filter::compile("true")
+            .unwrap()
+            .ir()
+            .native()
+            .to_string()
+            .as_bytes()
+    );
+    assert!(a.reflect.timestamp <= a.timestamp);
+    let seen = drain(&flows);
+    assert!(
+        seen.iter()
+            .any(|(_, a)| a.reflect.process_id == child.id() && a.event == ReflectOpen),
+        "{seen:#?}"
+    );
+
+    // SAFETY: plain system call.
+    unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
+    child.wait().unwrap();
+    let closed = drain(&all);
+    let theirs: Vec<_> = closed
+        .iter()
+        .filter(|(_, a)| a.reflect.process_id == child.id())
+        .map(|(_, a)| a.event)
+        .collect();
+    assert_eq!(theirs, [ReflectClose], "{closed:#?}");
+    let _ = avulse::cleanup();
 }

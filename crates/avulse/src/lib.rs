@@ -38,7 +38,9 @@ mod handle;
 #[cfg(test)]
 mod tests;
 
-pub use address::{ADDRESS_VERSION, Address, CONTEXT_LEN, Context, Flow, Reflect};
+pub use address::{
+    ADDRESS_VERSION, Address, CONTEXT_LEN, Context, Flow, PROCESS_NAME_LEN, Reflect,
+};
 pub use avulse_filter as filter;
 pub use avulse_filter::{Diagnostic, Event, Filter, Layer};
 pub use avulse_proto as proto;

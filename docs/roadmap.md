@@ -253,8 +253,9 @@ cleanup, and exact in-kernel match versus interpreter (`BPF_PROG_TEST_RUN`).
 2. Freeze the Rust API and C ABI as 0.x, publish `libavulse.so` (static, manylinux_2_28).
 
 Progress (steps in `docs/implementation-plan.md`): the event programs (Step 14), the FLOW layer (Step 15) and the
-SOCKET layer, which refuses binds and connects with eBPF matchers generated for the cgroup programs (Step 16), are
-done.
+SOCKET layer, which refuses binds and connects with eBPF matchers generated for the cgroup programs (Step 16), and
+`process.name` with the REFLECT layer (Step 17) are done: every layer works on Linux. Left: the API freeze, the C ABI
+and the release.
 
 Exit: Linux release v0.1.
 

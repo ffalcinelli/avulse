@@ -1019,6 +1019,9 @@ enum Region {
     ArpMac(bool),
     /// Bytes of the facts of an event, at an offset: an IPv6 address.
     Fact(i16, usize),
+    /// A NUL-padded string of at most this many bytes in the facts of an event, at an offset
+    /// (the process name), absent when empty.
+    FactStr(i16, usize),
 }
 
 impl Region {
@@ -1039,7 +1042,7 @@ impl Region {
             Region::At(_, _, len) => Some(len as usize),
             Region::Tag(..) => Some(4),
             Region::ArpMac(_) => Some(6),
-            Region::Fact(_, len) => Some(len),
+            Region::Fact(_, len) | Region::FactStr(_, len) => Some(len),
             Region::Ipv4Hdr | Region::TcpHdr => Some(60),
             Region::TcpOpts | Region::Opt(_) => Some(40),
             _ => None,
@@ -1054,6 +1057,7 @@ impl Region {
                 | Region::Opt(_)
                 | Region::Tag(..)
                 | Region::ArpMac(_)
+                | Region::FactStr(..)
         )
     }
 }
@@ -1437,6 +1441,7 @@ fn event_regions(f: Field) -> Option<(u32, Vec<Region>)> {
     match f {
         Field::Ipv6Src => Some((ev::EF_LOCAL6, vec![Region::Fact(ev::LOCAL_ADDR, 16)])),
         Field::Ipv6Dst => Some((ev::EF_REMOTE6, vec![Region::Fact(ev::REMOTE_ADDR, 16)])),
+        Field::ProcessName => Some((0, vec![Region::FactStr(ev::COMM, 16)])),
         _ => None,
     }
 }
@@ -2810,6 +2815,23 @@ impl Gen {
             Region::Fact(off, len) => {
                 self.a.alu64_imm(Alu::Mov, VAL, off as i32);
                 self.a.alu64_imm(Alu::Mov, LEN, len as i32);
+            }
+            Region::FactStr(off, max) => {
+                // The length is where the first NUL is, if there is one.
+                let a = &mut self.a;
+                let done = a.label();
+                for i in 0..max {
+                    let next = a.label();
+                    a.load(Size::B, 1, FACTS, off + i as i16);
+                    a.jmp_imm(Cond::Ne, 1, 0, next);
+                    a.alu64_imm(Alu::Mov, LEN, i as i32);
+                    a.ja(done);
+                    a.bind(next);
+                }
+                a.alu64_imm(Alu::Mov, LEN, max as i32);
+                a.bind(done);
+                a.jmp_imm(Cond::Eq, LEN, 0, absent);
+                a.alu64_imm(Alu::Mov, VAL, off as i32);
             }
             Region::ArpMac(target) => {
                 self.need(F_ARP, absent);

@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-22, Phase 2 done: Steps 1 to 13 and Spikes A and B, Spike C partly done; Phase 3: Steps 14 to 16 done, next Step 17)
+## Status (2026-10-22, Phase 2 done: Steps 1 to 13 and Spikes A and B, Spike C partly done; Phase 3: Steps 14 to 17 done, next Step 18)
 
 | Area | State |
 | --- | --- |
@@ -18,7 +18,7 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `crates/ebpf` (`avulse-ebpf`) | Step 10: the generator covers metadata (through `Env`: layer, priority, interface names), IPv6 and MAC addresses, VLAN fields, TCP options (`avulse_options`, behind `CFG_TCP_OPTIONS`), byte order and `contains` in headers, arithmetic, field-to-field comparisons, set trees, `xor` through a slot; `superset`/`compile_superset` widen the rest, and `Matcher::exact` says when user space filters again. Step 9: `avulse_ingress` redirects the inbound packets user space injects through `lo` (`MARK_REDIRECT`, `PRIO_INJECTED`); test runs return the context (`Classifier::run_ctx`). Step 8: the loader attaches through Netlink (`Classifier::attach`, `Attachment::detach`) and opens raw BPF hash maps (`HashMap`, for the registry). Step 7: the capture side of the static TC programs (`avulse_ingress`/`avulse_egress` → matcher → `avulse_act`): per-handle configuration, metadata facts, ring buffer records, divert/sniff/drop, marks, loopback, NETWORK/FORWARD/ETHERNET selection, fragments, the forwarding check, fail-open; `abi.rs` mirrors `bpf/abi.h`. Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Step 14: the event programs of the FLOW and SOCKET layers (`bpf/events.bpf.c`, `loader::Events`, records in `abi::EventRecord`). Needs clang on Linux. |
 | `spikes/macos` | Spike C (partial, `docs/spikes/macos.md`): probes of bpf, raw-socket and `utun` injection, pf and the filter engine's speed, and a `NEFilterPacketProvider` system extension around a Rust static library; run on GitHub's macOS runners by `.github/workflows/macos-spike.yml` (on changes to the spike). Outside the workspace. |
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
-| `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Steps 15 and 16: the FLOW and SOCKET layers (`events.rs`), SOCKET refusing binds and connects in the kernel. Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
+| `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Steps 15 to 17: the FLOW, SOCKET and REFLECT layers (`events.rs`, `reflect.rs`), SOCKET refusing binds and connects in the kernel; `Address` version 2 (216 bytes) with the process name. Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
 | `crates/{capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
 | CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
@@ -1283,7 +1283,45 @@ with `EPERM`, and report the event with the blocked bit), and the backend.
 
 **Acceptance.** Those pass on both VMs.
 
-### Step 17: `process.name` and the REFLECT layer
+### Step 17: `process.name` and the REFLECT layer (done)
+
+**Outcome.** Every layer works on Linux. `tests/emu.rs`, `tests/kernel.rs` (20) and
+`tests/capture.rs` (46) pass on 6.8 and 5.15.
+
+- **`process.name` in the kernel.** The SOCKET matchers read the event's `comm` (16 bytes in
+  the facts) as `Region::FactStr`. Its length is the first NUL, found by an unrolled forward
+  scan, and the name is absent when it is empty. `==`, `!=` and sets reuse the byte predicates.
+  `contains`, ordering and `upper()`/`lower()` are unsupported. The emulator corpus varies the
+  name (`test`, `curl`, empty, 16 bytes without a NUL), and six new table filters agree with
+  the evaluator.
+  - A name that is not UTF-8 is absent in user space, while the kernel compares its bytes.
+    This is documented.
+- **The address carries the name (decision).** `Flow` gains a 32-byte, NUL-padded process name
+  (`Flow::process_name`, `set_process_name`, cut at a character boundary; `PROCESS_NAME_LEN`),
+  after `reserved`. `Flow` is 96 bytes and `Address` 216. `ADDRESS_VERSION` is 2.
+  - `Address::meta()` now sets `process_name`, so `Filter::matches` on a received address sees
+    it; only `iface` is missing. The FLOW/SOCKET backend sets the name from the record.
+  - 32 bytes rather than Linux's 16, for the other platforms' longer names.
+  - At REFLECT, `meta()` gives the reflected handle's `layer`, besides its priority and
+    process, as WinDivert does.
+- **REFLECT** (`backend/linux/reflect.rs`).
+  - The handle registers itself, then reads the registry every 100 ms, on a periodic
+    `timerfd` in its epoll set (`sys::Timer`).
+  - It compares the live entries (whose owners are alive) with what it saw (`reflect::diff`):
+    CLOSE for those gone, then OPEN for the new ones, oldest first. At first it reports
+    everything, itself included.
+  - The data is the registered filter text.
+  - Filters see an empty packet and the reflected handle's metadata.
+- **Tests.**
+  - Unit tests: `reflect_events` (the diff, the address, the metadata), the `Flow` name
+    accessors, and the address layout.
+  - Capture tests:
+    - `process_names`: a connect from a thread named `avulse-deny` is refused by name, one
+      from `avulse-allow` goes through, and FLOW reports its name;
+    - `reflect_layer`: itself at first, a child's FLOW handle opening and its owner killed, and
+      a filter on `layer`.
+
+The original plan of the step follows.
 
 **Where.**
 - `process.name` is the task's `comm`, recorded at `sock_create` (`bpf_get_current_comm`) in the
@@ -1379,7 +1417,7 @@ pre-release tag) passes, then the v0.1.0 tag publishes. The guide and README say
 - [x] Step 14: event programs and records
 - [x] Step 15: FLOW layer
 - [x] Step 16: SOCKET layer, with blocking
-- [ ] Step 17: `process.name` and REFLECT
+- [x] Step 17: `process.name` and REFLECT
 - [ ] Step 18: API v0.1 and the C ABI (`libavulse.so`)
 - [ ] Step 19: release v0.1 (crates.io, tarballs)
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement

@@ -714,12 +714,20 @@ pub const EVENT_FILTERS: &[&str] = &[
     "not tcp and remote.port == 53",
     "frame.len > 0 or remote.port == 22",
     "iface == \"lo\" or remote.port == 22",
+    "process.name == \"curl\"",
+    "process.name in {\"curl\" \"wget\"}",
+    "process.name != \"curl\"",
+    "process.name",
+    "not process.name",
+    "event == connect and process.name == \"test\" and remote.port == 443",
 ];
 
 /// SOCKET-layer filters it does not compile: a blocking handle refuses them.
 pub const EVENT_UNSUPPORTED: &[&str] = &[
     "endpoint.id == 5",
-    "process.name == \"curl\"",
+    "process.name contains \"ur\"",
+    "upper(process.name) == \"CURL\"",
+    "process.name > \"a\"",
     "timestamp > 0",
     "random8 < 10",
     "len(remote.addr) == 4",
@@ -761,7 +769,12 @@ pub fn event_records() -> Vec<avulse_ebpf::abi::EventRecord> {
                     local_port,
                     remote_port,
                     endpoint: (i * 8 + j) as u64,
-                    comm: *b"test\0\0\0\0\0\0\0\0\0\0\0\0",
+                    comm: [
+                        *b"test\0\0\0\0\0\0\0\0\0\0\0\0",
+                        *b"curl\0\0\0\0\0\0\0\0\0\0\0\0",
+                        [0; 16],
+                        *b"0123456789abcdef",
+                    ][(i + 2 * j) % 4],
                     ..EventRecord::default()
                 };
                 // A bind has a local address only; a connect has the bound one, if any.

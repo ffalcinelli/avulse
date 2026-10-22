@@ -146,7 +146,7 @@ fn invalid(r: Result<Handle>) -> &'static str {
 
 #[test]
 fn address_layout() {
-    assert_eq!(size_of::<Address>(), 184);
+    assert_eq!(size_of::<Address>(), 216);
     assert_eq!(align_of::<Address>(), 8);
     assert_eq!(offset_of!(Address, timestamp), 0);
     assert_eq!(offset_of!(Address, version), 8);
@@ -159,9 +159,10 @@ fn address_layout() {
     assert_eq!(offset_of!(Address, vlan_tci), 28);
     assert_eq!(offset_of!(Address, vlan), 30);
     assert_eq!(offset_of!(Address, flow), 32);
-    assert_eq!(offset_of!(Address, reflect), 96);
-    assert_eq!(offset_of!(Address, context), 120);
-    assert_eq!(size_of::<Flow>(), 64);
+    assert_eq!(offset_of!(Address, reflect), 128);
+    assert_eq!(offset_of!(Address, context), 152);
+    assert_eq!(size_of::<Flow>(), 96);
+    assert_eq!(offset_of!(Flow, process_name), 64);
     assert_eq!(offset_of!(Flow, local_addr), 24);
     assert_eq!(offset_of!(Flow, protocol), 56);
     assert_eq!(size_of::<Reflect>(), 24);
@@ -197,6 +198,16 @@ fn flow_addresses() {
     );
     assert_eq!(f.local_addr(), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
     assert_eq!(f.remote_addr(), IpAddr::V6(Ipv6Addr::LOCALHOST));
+
+    // The process name: none, then one, then one cut at a character boundary.
+    assert_eq!(f.process_name(), None);
+    f.set_process_name("curl");
+    assert_eq!(f.process_name(), Some("curl"));
+    let long = format!("{}é", "x".repeat(31));
+    f.set_process_name(&long);
+    assert_eq!(f.process_name(), Some("x".repeat(31).as_str()));
+    f.set_process_name(&"y".repeat(40));
+    assert_eq!(f.process_name(), Some("y".repeat(32).as_str()));
 }
 
 #[test]
@@ -209,7 +220,9 @@ fn meta_of_an_address() {
     a.flow.protocol = 6;
     a.flow
         .set_remote_addr(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
+    a.flow.set_process_name("curl");
     let m = a.meta();
+    assert_eq!(m.process_name, Some("curl"));
     assert_eq!(m.layer, Layer::Socket);
     assert_eq!(m.event, Event::SocketConnect);
     assert_eq!(m.process_id, Some(42));
@@ -460,19 +473,13 @@ fn the_linux_backend() {
     assert!(flow.open && !flow.divert && !flow.drop && !flow.inject && !flow.modify);
     let socket = capabilities().layer(Layer::Socket);
     assert!(socket.open && socket.divert && socket.drop && !socket.inject && !socket.modify);
-    assert_eq!(
-        capabilities().layer(Layer::Reflect),
-        LayerSupport::default()
-    );
-    // Refused before anything is loaded, so these need no privileges.
-    assert!(matches!(
-        Handle::open("true", Layer::Reflect, 0, Flags::SNIFF | Flags::RECV_ONLY),
-        Err(Error::Unsupported(_))
-    ));
-    // Refusing calls: Linux cannot refuse a listen or an accept, and the kernel decides.
+    let reflect = capabilities().layer(Layer::Reflect);
+    assert!(reflect.open && !reflect.divert && !reflect.drop && !reflect.inject);
+    // Refused before anything is loaded, so these need no privileges. Refusing calls: Linux
+    // cannot refuse a listen or an accept, and the kernel decides.
     for filter in [
         "remote.port == 443",
-        "event == connect and process.name == \"curl\"",
+        "event == connect and endpoint.id == 1",
     ] {
         assert!(
             matches!(

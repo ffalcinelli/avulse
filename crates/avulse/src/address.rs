@@ -8,7 +8,7 @@ use avulse_filter::{Event, FlowTuple, Layer, Meta};
 use crate::Flags;
 
 /// The version of the [`Address`] layout. It changes whenever a field is added, moved or resized.
-pub const ADDRESS_VERSION: u16 = 1;
+pub const ADDRESS_VERSION: u16 = 2;
 
 /// Size of the reinjection context ([`Context`]).
 pub const CONTEXT_LEN: usize = 64;
@@ -110,8 +110,8 @@ impl Address {
 
     /// The metadata a filter sees for this packet or event, as
     /// [`Filter::matches`](avulse_filter::Filter::matches) takes it. The interface name and the
-    /// process name are not part of the address, so `iface` and `process.name` never match.
-    pub fn meta(&self) -> Meta<'static> {
+    /// The interface name is not part of the address, so `iface` never matches.
+    pub fn meta(&self) -> Meta<'_> {
         let mut meta = Meta {
             layer: self.layer,
             event: self.event,
@@ -127,6 +127,7 @@ impl Address {
             Layer::Flow | Layer::Socket => {
                 let f = &self.flow;
                 meta.process_id = Some(f.process_id);
+                meta.process_name = f.process_name();
                 meta.endpoint_id = Some(f.endpoint_id);
                 meta.parent_endpoint_id = Some(f.parent_endpoint_id);
                 meta.flow = Some(FlowTuple {
@@ -137,9 +138,11 @@ impl Address {
                     protocol: f.protocol,
                 });
             }
+            // The handle the event is about: WinDivert's `layer` and `priority` at REFLECT.
             Layer::Reflect => {
                 meta.process_id = Some(self.reflect.process_id);
                 meta.priority = self.reflect.priority;
+                meta.layer = self.reflect.layer;
             }
             Layer::Network | Layer::NetworkForward | Layer::Ethernet => {}
         }
@@ -175,7 +178,12 @@ pub struct Flow {
     /// IP protocol number.
     pub protocol: u8,
     reserved: [u8; 7],
+    /// The name of the process, UTF-8 and NUL-padded ([`process_name`](Flow::process_name)).
+    pub(crate) process_name: [u8; PROCESS_NAME_LEN],
 }
+
+/// The room for a process name in a [`Flow`].
+pub const PROCESS_NAME_LEN: usize = 32;
 
 impl Flow {
     const EMPTY: Flow = Flow {
@@ -188,6 +196,7 @@ impl Flow {
         remote_addr: [0; 16],
         protocol: 0,
         reserved: [0; 7],
+        process_name: [0; PROCESS_NAME_LEN],
     };
 
     /// The local address, IPv4-mapped addresses as IPv4.
@@ -208,6 +217,29 @@ impl Flow {
     /// Sets the remote address.
     pub fn set_remote_addr(&mut self, addr: IpAddr) {
         self.remote_addr = mapped(addr);
+    }
+
+    /// The name of the process that owns the socket, when the backend knows it (on Linux, its
+    /// `comm`: at most 15 bytes).
+    pub fn process_name(&self) -> Option<&str> {
+        let n = self
+            .process_name
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(PROCESS_NAME_LEN);
+        core::str::from_utf8(&self.process_name[..n])
+            .ok()
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Sets the process name, cut to [`PROCESS_NAME_LEN`] bytes at a character boundary.
+    pub fn set_process_name(&mut self, name: &str) {
+        let mut n = name.len().min(PROCESS_NAME_LEN);
+        while !name.is_char_boundary(n) {
+            n -= 1;
+        }
+        self.process_name = [0; PROCESS_NAME_LEN];
+        self.process_name[..n].copy_from_slice(&name.as_bytes()[..n]);
     }
 }
 

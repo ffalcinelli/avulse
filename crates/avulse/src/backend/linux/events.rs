@@ -195,7 +195,6 @@ impl EventHandle {
     fn entry(&self, r: &EventRecord) -> Option<Entry> {
         let addr = address(r, self.layer, self.sniff)?;
         let mut meta = addr.meta();
-        meta.process_name = r.comm();
         meta.priority = self.priority;
         meta.hash = record::hash(&r.endpoint.to_ne_bytes());
         self.filter
@@ -276,6 +275,9 @@ pub(super) fn address(r: &EventRecord, layer: Layer, sniffed: bool) -> Option<Ad
     f.local_addr = r.local_addr;
     f.remote_addr = r.remote_addr;
     f.protocol = r.protocol;
+    if let Some(name) = r.comm() {
+        f.set_process_name(name);
+    }
     Some(addr)
 }
 
