@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-22, Phase 2 done: Steps 1 to 13 and Spikes A and B, Spike C partly done; next: Phase 3)
+## Status (2026-10-22, Phase 2 done: Steps 1 to 13 and Spikes A and B, Spike C partly done; next: Phase 3, Step 14)
 
 | Area | State |
 | --- | --- |
@@ -435,8 +435,8 @@ equivalent on the vector packets.
 
 ### After that
 
-Phase 2 is expanded below. Then follow the roadmap: Phase 3 (events, API v0.1, crates.io release
-job) → 4 (compat shim + pydivert/jdivert suites) → 5 (Windows driver; read the Spike B note's
+Phase 2 and Phase 3 are expanded below. Then follow the roadmap: Phase 3 (events, API v0.1,
+crates.io release job; Steps 14 to 19) → 4 (compat shim + pydivert/jdivert suites) → 5 (Windows driver; read the Spike B note's
 requirements first) → 6 (macOS, after Spike C) → 7 (bindings, 1.0). Before starting each phase,
 expand it into steps in this file, in the same format as above.
 
@@ -1046,6 +1046,183 @@ and `tests/kernel.rs` (15) pass on 6.8 and 5.15.
     cannot drive the `_ip` programs; it still checks that the verifier loads them on both
     kernels.
 
+## Phase 3: Linux event layers and API v0.1
+
+**Goal** (roadmap, Phase 3): the FLOW, SOCKET and REFLECT layers on Linux, `process.name`, then the
+Rust API and the C ABI frozen as 0.x and released. **Exit:** Linux release v0.1 (crates.io, and
+`libavulse.so` tarballs).
+
+**What to port.** ebpfdivert's `src/ebpfdivert_events.bpf.c` (cgroup and sockops programs),
+and the events, REFLECT and blocking parts of `src/handle.c`; its `docs/architecture.md` section 3
+explains them. As in Phase 2, port the logic, not the layout.
+
+**Decisions for this phase** (change them here, with a reason, if the work proves them wrong):
+
+- **One instance per handle,** as at the packet layers. The event programs live in their own
+  object (`crates/ebpf/bpf/events.bpf.c`), with their own configuration (heartbeat, shutdown,
+  layer, flags) and ring buffer. They attach to the cgroup v2 root through `bpf_link`s, so they
+  go with the process that owns them. The heartbeat and fail-open rules are the packet layers'
+  (a stale or shut-down configuration lets every socket call through). Without a cgroup v2
+  mount, opening at these layers is `Error::Unsupported`.
+- **No packet.** Events reach user space as records of their own (event, protocol, family,
+  local and remote address and port, PID, endpoint and parent endpoint, the process name, and a
+  blocked bit). `Address::flow` is filled from them, and so is `Meta`'s flow tuple. A filter is
+  evaluated against an empty packet (`Link::Ip`), so `ip`/`tcp`… are false: that is WinDivert's
+  quirk, and `local.*`, `remote.*`, `protocol`, `event`, `process.*` and `endpoint.*` are what
+  these layers filter on.
+- **User space filters what it only reports.** Events are rare next to packets, so FLOW events,
+  and SOCKET events with `SNIFF`, all go to user space, which runs `Filter::matches`. The code
+  generator is only needed where the kernel has to decide.
+- **Blocking needs the decision in the kernel.** A SOCKET handle without `SNIFF` refuses the
+  BIND and CONNECT events its filter matches (`EPERM`), so the filter must be exact in the
+  kernel. A superset would refuse too much, and a subset too little. `codegen` gains an event
+  `Env`: the facts are the event's (a per-CPU map, as for packets), and `event` is decided per
+  program. A program array holds programs of one type only, so each hook type has its own
+  matcher, compiled from the same IR:
+  - `cgroup/connect4`/`connect6` (`cgroup_sock_addr`);
+  - `cgroup/post_bind4`/`post_bind6` (`cgroup_sock`).
+
+  If the filter does not compile exactly, the open fails with `Error::Unsupported` and a hint to
+  add `SNIFF`. Linux cannot refuse LISTEN and ACCEPT. A blocking filter that can match them (it
+  does not fold to `false` with `event` set to them) is `Error::Unsupported` too, as in
+  ebpfdivert.
+- **REFLECT has no BPF program.** It diffs the registry (`registry.rs`) every 100 ms, as
+  ebpfdivert does, and reports OPEN/CLOSE with `Address::reflect`. The data is the handle's
+  filter text in native syntax, from the registry entry; the compat shim (Phase 4) serializes
+  WinDivert's filter object instead.
+
+### Step 14: The event programs and records
+
+**Why.** FLOW and SOCKET share the programs, the records and the socket-local state.
+
+**Where.**
+- `crates/ebpf/bpf/events.bpf.c` and `bpf/events.h`, mirrored in `src/events.rs`:
+  - the programs: `cgroup/sock_create`, `post_bind4/6`, `connect4/6`, `sock_release`, `sockops`
+    and `cgroup_skb` ingress/egress;
+  - `BPF_MAP_TYPE_SK_STORAGE` for each socket's PID, name and endpoints;
+  - an LRU hash of the UDP 5-tuples already reported;
+  - the configuration and the ring.
+- `loader.rs`: `Events::load`/`attach`, through aya's cgroup program types with links.
+- `ebpfdivert` probes whether `bpf_get_current_pid_tgid` is allowed in cgroup socket programs.
+  Do the same with a load-time constant, and check what 5.15 allows.
+
+**Tests.** `tests/kernel.rs` loads and attaches the programs on both VMs, with sockets created,
+bound, connected and closed in a child process, and checks the records (endpoints, PID, cookie
+as the endpoint ID, the order of events). The record layout is mirrored on both sides, which
+assert its size.
+
+**Acceptance.** The verifier accepts every program on 5.15 and 6.8, and the records of a TCP
+connect, a TCP accept, a UDP exchange and a bind match what the test did.
+
+### Step 15: The FLOW layer
+
+**Where.** `backend/linux/events.rs` (open, receive, close). The `Opened` handle for events
+shares the queue (`queue.rs`), the heartbeat and the registry with the packet layers.
+- TCP: ESTABLISHED from `sockops` (active and passive established, which then ask for state
+  callbacks), DELETED when the state goes to CLOSE.
+- UDP: ESTABLISHED on the first packet of a 5-tuple (`cgroup_skb`), DELETED for each of the
+  socket's flows when it is released.
+- `Address::flow` carries the endpoint, parent endpoint, PID, addresses, ports and protocol, and
+  `outbound` says who opened the flow.
+- FLOW requires `SNIFF` and `RECV_ONLY`, which `handle.rs` already checks.
+
+**Tests** (`tests/capture.rs`): TCP to the peer server and back, both directions; UDP echo; a
+filter on `remote.port` and `process.pid` (the test's own); loopback; a dead owner (the programs
+fail open, the links go with the process).
+
+**Acceptance.** Those pass on both VMs. The guide documents the layer and its fields.
+
+### Step 16: The SOCKET layer, with blocking
+
+**Where.** `codegen.rs` (the event `Env`: event facts, `event` decided per program, the fields of
+these layers), `events.bpf.c` (tail calls into the per-type matchers, and the verdict: refuse
+with `EPERM`, and report the event with the blocked bit), and the backend.
+- BIND, CONNECT, LISTEN, ACCEPT and CLOSE.
+- `connect` knows the local endpoint only when the socket was bound before (from the socket's
+  storage). Document this.
+
+**Tests.**
+- The emulator tests the event matchers against the evaluator on generated events.
+- In the VMs: a blocking handle refuses `connect` to one port and lets another through, refuses
+  `bind` to a port, does not block what it does not match, and stops blocking once its owner
+  dies (heartbeat).
+- A `SNIFF` handle sees every event.
+- Opening a blocking handle with a filter that is not exact, or that can match LISTEN/ACCEPT,
+  fails.
+
+**Acceptance.** Those pass on both VMs.
+
+### Step 17: `process.name` and the REFLECT layer
+
+**Where.**
+- `process.name` is the task's `comm`, recorded at `sock_create` (`bpf_get_current_comm`) in the
+  socket's storage, so it survives the process. It goes to the records, `Meta::process_name`
+  and, for the SOCKET matcher, the event facts (16 bytes, compared as a string).
+- `Address` has no room for the name. Decide whether to add it (`ADDRESS_VERSION` 2) or to leave
+  it to filters. Leaning towards adding it, because WinDivert users ask for it through
+  `/proc/<pid>/comm`, which races with the process's exit.
+- REFLECT: `backend/linux/reflect.rs`, the registry diff, with `Address::reflect` (timestamp,
+  flags, PID, priority, layer) and the filter text as the data.
+
+**Tests.** Filters on `process.name` at FLOW and SOCKET (the test binary's name). REFLECT sees a
+handle opened and closed by another process, and one that dies (CLOSE once it is reaped).
+
+**Acceptance.** Those pass on both VMs. `capabilities()` reports FLOW, SOCKET and REFLECT on
+Linux.
+
+### Step 18: API v0.1 and the C ABI
+
+**Why.** The roadmap freezes the Rust API and the C ABI as 0.x before the release.
+
+**Where.**
+- `crates/avulse`: review the public surface before 0.1:
+  - batch `recv`/`send`;
+  - the `Error` variants;
+  - `OpenOptions`;
+  - `Address`, whose `ADDRESS_VERSION` and size are pinned by `tests.rs`;
+  - `capabilities()`.
+
+  Mark what may still change with `#[non_exhaustive]`.
+- `crates/capi`: a `cdylib` and `staticlib` with a cbindgen header (`include/avulse.h`):
+  - an opaque handle, with `avulse_open`, `avulse_recv`/`_ex` (batch), `avulse_send`/`_ex`,
+    `avulse_shutdown`, `avulse_close`, `avulse_set_param`, `avulse_fd`;
+  - `struct avulse_address` (the `#[repr(C)]` `Address`);
+  - the filter helpers: compile and check with the diagnostic as text, `format`, `explain`,
+    `eval` on a packet;
+  - errors as negative errno values.
+- `libavulse.so` built in `quay.io/pypa/manylinux_2_28_{x86_64,aarch64}`. aya is pure Rust, so
+  the only dependency is glibc 2.28.
+
+**Tests.**
+- A C program under `crates/capi/tests/`, compiled with `cc` by an integration test, opens a
+  handle with a bad filter (an error and its text), checks the address layout against the
+  header, and runs the filter helpers.
+- Its capture part (open, recv, send) runs in the VMs.
+
+**Acceptance.**
+- The header is generated and checked in, and CI fails when it is stale.
+- The C test passes on the host, and in a VM for the capture part.
+- The guide gets a C API page.
+
+### Step 19: Release v0.1
+
+**Where.** `.github/workflows/release.yml` and the crates' metadata.
+- A crates.io job (`rust-lang/crates-io-auth-action`, environment `crates-io`, `id-token:
+  write`). Publish in dependency order: `avulse-proto`, `avulse-filter`, `avulse-ebpf`, `avulse`,
+  then `avulse-cli`.
+- **Owner action:** a trusted publisher for every crate except `avulse`, which already has one.
+- `avulse-ebpf` ships `tc.bpf.o` and `events.bpf.o` prebuilt in the package. `build.rs` uses
+  them when clang is missing or `AVULSE_PREBUILT_BPF` is set, so users need no clang. CI checks
+  that the shipped objects match a fresh build.
+- Tarballs `avulse-v0.1.0-linux-{amd64,arm64}.tar.gz`, with `libavulse.so`, `avulse.h` and the
+  `avulse` CLI. They are signed with cosign (keyless) and come with an SBOM.
+- Version 0.1.0 across the workspace, a CHANGELOG, and the tag `v0.1.0`. The Python placeholder
+  job stays as it is.
+
+**Acceptance.** A dry run (`cargo publish --dry-run` for each crate, and the workflow on a
+pre-release tag) passes, then the v0.1.0 tag publishes. The guide and README say what 0.1 covers
+(Linux only).
+
 ## Checklist
 
 - [x] Phase 0.1: repo, workspace, CI, names claimed (GitHub, crates.io, PyPI), trusted publishers
@@ -1068,4 +1245,10 @@ and `tests/kernel.rs` (15) pass on 6.8 and 5.15.
 - [x] Step 12: privileged suite on both VMs (Phase 2 exit)
 - [x] Step 13: devices without an Ethernet header (tun, WireGuard, PPP, IP tunnels) at the NETWORK
   layers
+- [ ] Step 14: event programs and records
+- [ ] Step 15: FLOW layer
+- [ ] Step 16: SOCKET layer, with blocking
+- [ ] Step 17: `process.name` and REFLECT
+- [ ] Step 18: API v0.1 and the C ABI (`libavulse.so`)
+- [ ] Step 19: release v0.1 (crates.io, tarballs)
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement
