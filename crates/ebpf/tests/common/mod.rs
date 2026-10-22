@@ -22,6 +22,7 @@ pub fn env(layer: Layer) -> Env<'static> {
         layer,
         priority: 0,
         ifindex: &ifindex,
+        event: None,
     }
 }
 
@@ -541,7 +542,7 @@ pub const SUPPORTED: &[&str] = &[
     "remote.addr == 2001:db8::2",
     "local.addr in {172.16.0.0/12 fe80::/10}",
     "remote.addr not in {192.168.1.1 2001:db8::2}",
-    "local.addr",
+    "local.addr and remote.port == 443",
     "remote.port",
     // IPv6 addresses.
     "ipv6.src == fe80::1",
@@ -672,5 +673,139 @@ pub fn random_filter(rng: &mut Rng, pool: &[&str], depth: usize) -> String {
         1 => format!("({a} and {})", random_filter(rng, pool, depth - 1)),
         2 => format!("({a} or {})", random_filter(rng, pool, depth - 1)),
         _ => format!("({a} xor {})", random_filter(rng, pool, depth - 1)),
+    }
+}
+
+/// SOCKET-layer filters the generator compiles exactly, for the events of `connect` and `bind`.
+pub const EVENT_FILTERS: &[&str] = &[
+    "remote.port == 443",
+    "local.port in {80 443 1000..2000}",
+    "local.port == 0",
+    "protocol == 6",
+    "protocol in {17}",
+    "process.pid == 1234",
+    "process.pid != 1234",
+    "outbound",
+    "inbound and not loopback",
+    "loopback",
+    "remote.addr == 10.0.0.1",
+    "remote.addr in {10.0.0.0/8 fd00::/8}",
+    "remote.addr not in {192.168.0.0/16}",
+    "local.addr != 127.0.0.1",
+    "local.addr == 0.0.0.0",
+    "remote.addr == ::1",
+    "remote.addr == 2001:db8::/32",
+    "remote.addr != 2001:db8::1",
+    "remote.addr > 10.0.0.0",
+    "remote.addr in {fd00::1..fd00::ff}",
+    "local.addr and remote.port == 443",
+    "event == connect",
+    "event == bind and local.port < 1024",
+    "event in {bind accept}",
+    "layer == socket and priority == 0 and remote.port == 53",
+    "remote.port > local.port",
+    "remote.port + 1 == 444",
+    "remote.port % 2 == 0 and protocol == 6",
+    "max(remote.port, local.port) >= 1000",
+    "(remote.port == 443 xor protocol == 17) or process.pid == 0",
+    "ifidx == 0 and subifidx == 0 and not impostor and protocol == 6",
+    "not fragment and protocol == 17",
+    "tcp or ip or udp.port == 53 or remote.port == 53",
+    "not tcp and remote.port == 53",
+    "frame.len > 0 or remote.port == 22",
+    "iface == \"lo\" or remote.port == 22",
+];
+
+/// SOCKET-layer filters it does not compile: a blocking handle refuses them.
+pub const EVENT_UNSUPPORTED: &[&str] = &[
+    "endpoint.id == 5",
+    "process.name == \"curl\"",
+    "timestamp > 0",
+    "random8 < 10",
+    "len(remote.addr) == 4",
+];
+
+/// Events of `connect` and `bind`, over both families, loopback and unknown endpoints.
+pub fn event_records() -> Vec<avulse_ebpf::abi::EventRecord> {
+    use avulse_ebpf::abi::{EV_OUTBOUND, EventRecord};
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    let v4 = |a: [u8; 4]| Ipv4Addr::from(a).to_ipv6_mapped().octets();
+    let v6 = |s: &str| s.parse::<Ipv6Addr>().unwrap().octets();
+    let addrs = [
+        v4([10, 0, 0, 1]),
+        v4([127, 0, 0, 1]),
+        v4([192, 168, 1, 5]),
+        v4([0, 0, 0, 0]),
+        v6("::1"),
+        v6("fd00::7"),
+        v6("2001:db8::1"),
+        v6("::"),
+    ];
+    let mut out = Vec::new();
+    for (i, &remote) in addrs.iter().enumerate() {
+        for (j, &(local_port, remote_port)) in [(0, 443), (50000, 53), (80, 22), (1500, 1500)]
+            .iter()
+            .enumerate()
+        {
+            for event in [4u8, 3] {
+                let mut r = EventRecord {
+                    event,
+                    protocol: [6, 17][(i + j) % 2],
+                    family: if remote[..12] == v4([0; 4])[..12] {
+                        4
+                    } else {
+                        6
+                    },
+                    pid: [0, 1234, 99][(i + j) % 3],
+                    flags: if event == 4 { EV_OUTBOUND } else { 0 },
+                    local_port,
+                    remote_port,
+                    endpoint: (i * 8 + j) as u64,
+                    comm: *b"test\0\0\0\0\0\0\0\0\0\0\0\0",
+                    ..EventRecord::default()
+                };
+                // A bind has a local address only; a connect has the bound one, if any.
+                if event == 3 {
+                    r.local_addr = remote;
+                    r.remote_addr = if r.family == 4 { v4([0; 4]) } else { v6("::") };
+                } else {
+                    r.remote_addr = remote;
+                    r.local_addr = addrs[(i + j) % addrs.len()];
+                }
+                out.push(r);
+            }
+        }
+    }
+    out
+}
+
+/// What a SOCKET handle's filter sees of `r`, as the backend builds it.
+pub fn event_meta(r: &avulse_ebpf::abi::EventRecord) -> Meta<'_> {
+    use avulse_ebpf::abi::EV_OUTBOUND;
+    use avulse_ebpf::facts::ev::is_loopback;
+    use avulse_filter::{Event, FlowTuple};
+    use std::net::Ipv6Addr;
+    let event = match r.event {
+        3 => Event::SocketBind,
+        _ => Event::SocketConnect,
+    };
+    Meta {
+        layer: Layer::Socket,
+        event,
+        outbound: r.flags & EV_OUTBOUND != 0,
+        loopback: is_loopback(&r.local_addr) || is_loopback(&r.remote_addr),
+        process_id: Some(r.pid),
+        process_name: r.comm(),
+        endpoint_id: Some(r.endpoint),
+        parent_endpoint_id: Some(r.parent_endpoint),
+        flow: Some(FlowTuple {
+            local_addr: Ipv6Addr::from(r.local_addr).to_canonical(),
+            remote_addr: Ipv6Addr::from(r.remote_addr).to_canonical(),
+            local_port: r.local_port,
+            remote_port: r.remote_port,
+            protocol: r.protocol,
+        }),
+        timestamp: r.timestamp as i64,
+        ..Meta::default()
     }
 }

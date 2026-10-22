@@ -26,7 +26,7 @@ pub enum Outcome {
 struct Machine<'a> {
     regs: [Option<u64>; 11],
     stack: [u8; STACK_SIZE as usize],
-    facts: [u8; facts::SIZE],
+    facts: Vec<u8>,
     frame: &'a [u8],
 }
 
@@ -39,8 +39,8 @@ impl Machine<'_> {
         if (STACK_TOP - STACK_SIZE..STACK_TOP).contains(&addr) && addr + n as u64 <= STACK_TOP {
             let at = (addr - (STACK_TOP - STACK_SIZE)) as usize;
             &mut self.stack[at..at + n]
-        } else if (FACTS_ADDR..FACTS_ADDR + facts::SIZE as u64).contains(&addr)
-            && addr + n as u64 <= FACTS_ADDR + facts::SIZE as u64
+        } else if (FACTS_ADDR..FACTS_ADDR + self.facts.len() as u64).contains(&addr)
+            && addr + n as u64 <= FACTS_ADDR + self.facts.len() as u64
         {
             let at = (addr - FACTS_ADDR) as usize;
             &mut self.facts[at..at + n]
@@ -114,10 +114,19 @@ pub fn check_shape(insns: &[Insn]) {
 
 /// Runs `insns` (with the fds set to [`FACTS_FD`] and [`PROGS_FD`]) on `frame` with `facts`.
 pub fn run(insns: &[Insn], facts: &Facts, frame: &[u8]) -> Outcome {
+    run_bytes(insns, &facts.to_bytes(), frame)
+}
+
+/// Runs an event matcher on the facts of an event ([`facts::ev`]), with no packet.
+pub fn run_event(insns: &[Insn], facts: &[u8; facts::ev::SIZE]) -> Outcome {
+    run_bytes(insns, facts, &[])
+}
+
+fn run_bytes(insns: &[Insn], facts: &[u8], frame: &[u8]) -> Outcome {
     let mut m = Machine {
         regs: [None; 11],
         stack: [0; STACK_SIZE as usize],
-        facts: facts.to_bytes(),
+        facts: facts.to_vec(),
         frame,
     };
     m.regs[1] = Some(CTX_ADDR);

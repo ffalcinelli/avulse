@@ -458,12 +458,30 @@ fn the_linux_backend() {
     }
     let flow = capabilities().layer(Layer::Flow);
     assert!(flow.open && !flow.divert && !flow.drop && !flow.inject && !flow.modify);
-    assert_eq!(capabilities().layer(Layer::Socket), LayerSupport::default());
+    let socket = capabilities().layer(Layer::Socket);
+    assert!(socket.open && socket.divert && socket.drop && !socket.inject && !socket.modify);
+    assert_eq!(
+        capabilities().layer(Layer::Reflect),
+        LayerSupport::default()
+    );
     // Refused before anything is loaded, so these need no privileges.
     assert!(matches!(
-        Handle::open("true", Layer::Socket, 0, Flags::SNIFF | Flags::RECV_ONLY),
+        Handle::open("true", Layer::Reflect, 0, Flags::SNIFF | Flags::RECV_ONLY),
         Err(Error::Unsupported(_))
     ));
+    // Refusing calls: Linux cannot refuse a listen or an accept, and the kernel decides.
+    for filter in [
+        "remote.port == 443",
+        "event == connect and process.name == \"curl\"",
+    ] {
+        assert!(
+            matches!(
+                Handle::open(filter, Layer::Socket, 0, Flags::RECV_ONLY),
+                Err(Error::Unsupported(_))
+            ),
+            "{filter}"
+        );
+    }
     assert!(matches!(
         Handle::open("true", Layer::Flow, 0, Flags::RECV_ONLY),
         Err(Error::InvalidArgument(_))

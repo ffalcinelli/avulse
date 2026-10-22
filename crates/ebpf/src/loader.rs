@@ -26,7 +26,7 @@ use crate::facts::{Facts, SLOT_ACTION, SLOT_MATCHER, SLOT_OPTIONS};
 
 mod events;
 
-pub use events::{Events, cgroup_root};
+pub use events::{EventHook, Events, cgroup_root};
 
 /// The static programs, built from `bpf/tc.bpf.c`.
 pub static TC_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tc.bpf.o"));
@@ -780,16 +780,26 @@ struct ProgLoadAttr {
     expected_attach_type: u32,
 }
 
-/// Loads a matcher. On success the log holds the verifier's statistics; on failure the verifier
-/// runs again with a full log.
+/// Loads a matcher of the TC programs. On success the log holds the verifier's statistics; on
+/// failure the verifier runs again with a full log.
 fn prog_load(insns: &[crate::insn::Insn]) -> Result<(OwnedFd, String), Error> {
+    prog_load_as(insns, BPF_PROG_TYPE_SCHED_CLS, 0)
+}
+
+/// [`prog_load`], as a program of type `prog_type` for the attach type `attach`.
+fn prog_load_as(
+    insns: &[crate::insn::Insn],
+    prog_type: u32,
+    attach: u32,
+) -> Result<(OwnedFd, String), Error> {
     let bytes: Vec<u8> = insns.iter().flat_map(|i| i.to_bytes()).collect();
     let license = c"GPL";
     let mut log = vec![0u8; LOG_SIZE];
     let mut name = [0u8; 16];
     name[..14].copy_from_slice(b"avulse_matcher");
     let mut attr = ProgLoadAttr {
-        prog_type: BPF_PROG_TYPE_SCHED_CLS,
+        prog_type,
+        expected_attach_type: attach,
         insn_cnt: insns.len() as u32,
         insns: bytes.as_ptr() as u64,
         license: license.as_ptr() as u64,

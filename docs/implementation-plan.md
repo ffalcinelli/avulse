@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-22, Phase 2 done: Steps 1 to 13 and Spikes A and B, Spike C partly done; Phase 3: Steps 14 and 15 done, next Step 16)
+## Status (2026-10-22, Phase 2 done: Steps 1 to 13 and Spikes A and B, Spike C partly done; Phase 3: Steps 14 to 16 done, next Step 17)
 
 | Area | State |
 | --- | --- |
@@ -18,7 +18,7 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `crates/ebpf` (`avulse-ebpf`) | Step 10: the generator covers metadata (through `Env`: layer, priority, interface names), IPv6 and MAC addresses, VLAN fields, TCP options (`avulse_options`, behind `CFG_TCP_OPTIONS`), byte order and `contains` in headers, arithmetic, field-to-field comparisons, set trees, `xor` through a slot; `superset`/`compile_superset` widen the rest, and `Matcher::exact` says when user space filters again. Step 9: `avulse_ingress` redirects the inbound packets user space injects through `lo` (`MARK_REDIRECT`, `PRIO_INJECTED`); test runs return the context (`Classifier::run_ctx`). Step 8: the loader attaches through Netlink (`Classifier::attach`, `Attachment::detach`) and opens raw BPF hash maps (`HashMap`, for the registry). Step 7: the capture side of the static TC programs (`avulse_ingress`/`avulse_egress` → matcher → `avulse_act`): per-handle configuration, metadata facts, ring buffer records, divert/sniff/drop, marks, loopback, NETWORK/FORWARD/ETHERNET selection, fragments, the forwarding check, fail-open; `abi.rs` mirrors `bpf/abi.h`. Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Step 14: the event programs of the FLOW and SOCKET layers (`bpf/events.bpf.c`, `loader::Events`, records in `abi::EventRecord`). Needs clang on Linux. |
 | `spikes/macos` | Spike C (partial, `docs/spikes/macos.md`): probes of bpf, raw-socket and `utun` injection, pf and the filter engine's speed, and a `NEFilterPacketProvider` system extension around a Rust static library; run on GitHub's macOS runners by `.github/workflows/macos-spike.yml` (on changes to the spike). Outside the workspace. |
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
-| `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Step 15: the FLOW layer (`events.rs`). Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
+| `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Steps 15 and 16: the FLOW and SOCKET layers (`events.rs`), SOCKET refusing binds and connects in the kernel. Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
 | `crates/{capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
 | CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
@@ -1207,7 +1207,63 @@ fail open, the links go with the process).
 
 **Acceptance.** Those pass on both VMs. The guide documents the layer and its fields.
 
-### Step 16: The SOCKET layer, with blocking
+### Step 16: The SOCKET layer, with blocking (done)
+
+**Outcome.** SOCKET handles open on Linux (`capabilities()`: open, divert, drop). With `SNIFF`
+they report. Without it they refuse the binds and connects their filter matches (`EPERM`) and
+report them. With `DROP` they refuse silently. `tests/emu.rs` (event matchers), `tests/kernel.rs`
+(20) and `tests/capture.rs` (44) pass on 6.8 and 5.15.
+
+- **Kernel side.**
+  - `bind` and `connect` write the event's facts (`struct avulse_ev_facts` in `facts.h`, 72
+    bytes, mirrored by `facts::ev`) and its record to the per-CPU `avulse_ev_state`. Then they
+    tail-call the matcher of their kind.
+  - A program array holds one program type, so each of connect4, connect6, post_bind4 and
+    post_bind6 has its own array (`avulse_progs_*`), action program (`avulse_ev_act_*`) and
+    matcher (`loader::EventHook`, `Events::set_matcher`).
+  - The action reports the event with `EV_BLOCKED` when the verdict is 1, and returns 0 to
+    refuse.
+  - Without a matcher, the call goes through.
+- **The event facts** share only `flags` and `verdict` with the TC facts, which is what the
+  generated prologue, presence tests and epilogue use. `EF_LOCAL4/6` and `EF_REMOTE4/6` say
+  whether each address is IPv4-mapped. The meta byte has `M_OUTBOUND` and `M_LOOPBACK` (either
+  address, as user space computes it).
+- **The code generator's event mode** (`Env::event`, layers FLOW and SOCKET):
+  - `lower_event` decides every leaf that reads no field of the event. It uses the bytecode
+    interpreter on the empty packet with the handle's constants (`constant`), so `tcp` is false
+    and `frame.len == 0` is true, exactly as the evaluator says.
+  - `local.addr`/`remote.addr` become tests of stand-ins: `ip.src`/`ip.dst` for IPv4-mapped
+    addresses (a big-endian word of the facts, `Scalar::FactBe`), `ipv6.src`/`ipv6.dst` for the
+    others (`Region::Fact`). The other family gives `!=` and `not in`.
+  - `operand(…, ev)` reads the event's ports, protocol, PID, direction and loopback from the
+    facts.
+  - `Gen::copy` copies bytes from the facts where packets use `bpf_skb_load_bytes`.
+  - The matcher returns 1 (through) when it cannot reach the action.
+  - `process.name`, `endpoint.id`, `timestamp` and `random*` are unsupported.
+- **Opening a refusing handle.** `codegen::decide_for` must say that the filter never matches
+  LISTEN or ACCEPT, which Linux cannot refuse. Each matcher must compile exactly and pass the
+  verifier. Otherwise the open fails with `Error::Unsupported`, which suggests `SNIFF`. Both
+  checks run before anything is loaded.
+- **Tests.**
+  - The emulator runs 36 SOCKET filters as connect and bind matchers on the facts of 64
+    events (both families, loopback, unknown endpoints), against the evaluator on the same
+    events, and refuses the unsupported ones.
+  - In the kernel, all 36 load for the four kinds of program (at most 125 instructions
+    processed).
+  - Capture tests:
+    - `socket_events`: bind, listen, connect, accept, three closes;
+    - `socket_refuses_calls`: connect and bind refused over IPv4 and IPv6, others through,
+      reported unsniffed, `DROP`;
+    - `socket_filters_the_kernel_cannot_refuse`;
+    - `socket_dead_owner`: refusing stops as soon as the owner is killed, since its links go
+      with it.
+- **Left:** `process.name` in the kernel (Step 17). A preemptible kernel could in principle run
+  another task's bind or connect program on the same CPU between the facts and the action,
+  since the state is per CPU and the programs run with migration disabled, not preemption.
+  Ubuntu's kernels preempt voluntarily, which does not happen inside a BPF program. Revisit if
+  it shows.
+
+The original plan of the step follows.
 
 **Where.** `codegen.rs` (the event `Env`: event facts, `event` decided per program, the fields of
 these layers), `events.bpf.c` (tail calls into the per-type matchers, and the verdict: refuse
@@ -1322,7 +1378,7 @@ pre-release tag) passes, then the v0.1.0 tag publishes. The guide and README say
   layers
 - [x] Step 14: event programs and records
 - [x] Step 15: FLOW layer
-- [ ] Step 16: SOCKET layer, with blocking
+- [x] Step 16: SOCKET layer, with blocking
 - [ ] Step 17: `process.name` and REFLECT
 - [ ] Step 18: API v0.1 and the C ABI (`libavulse.so`)
 - [ ] Step 19: release v0.1 (crates.io, tarballs)

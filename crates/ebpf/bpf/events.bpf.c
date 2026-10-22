@@ -15,13 +15,23 @@
  * name, which later events (sockops, sock_release, packets) cannot ask the current task for,
  * and its endpoints, which sock_release cannot read.
  *
+ * A SOCKET handle without SNIFF refuses the binds and connects its filter matches. The filter
+ * runs in the kernel: bind and connect write the event's facts (struct avulse_ev_facts) and its
+ * record to the per-CPU `avulse_ev_state`, and tail-call the matcher generated for their kind of
+ * program (a program array holds programs of one type, so each of connect4, connect6,
+ * post_bind4 and post_bind6 has its own array, matcher and action program). The matcher writes
+ * its verdict and tail-calls the action, which reports the event, marked EV_BLOCKED when it
+ * refuses it, and returns 0 (the call fails with EPERM) or 1.
+ *
  * Like the TC programs, they fail open: without a configuration, once it is shut down, or once
- * the owner's heartbeat is stale, they report nothing and let every call through.
+ * the owner's heartbeat is stale, they report nothing and let every call through; without a
+ * matcher, the call goes through and is reported.
  */
 #include <linux/bpf.h>
 
 #include "helpers.h"
 #include "abi.h"
+#include "facts.h"
 
 #define AF_INET 2
 #define AF_INET6 10
@@ -56,6 +66,33 @@ struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 1 << 20);
 } avulse_ring SEC(".maps");
+
+/* The event a matcher decides, and its record, which the action reports. */
+struct ev_state {
+    struct avulse_ev_facts f;
+    struct avulse_event e;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct ev_state);
+} avulse_ev_state SEC(".maps");
+
+/* The matcher (SLOT_MATCHER) and the action (SLOT_ACTION) of each kind of program. */
+#define PROG_ARRAY(name)                                                                      \
+    struct {                                                                                  \
+        __uint(type, BPF_MAP_TYPE_PROG_ARRAY);                                                \
+        __uint(max_entries, 2);                                                               \
+        __uint(key_size, sizeof(__u32));                                                      \
+        __uint(value_size, sizeof(__u32));                                                    \
+    } name SEC(".maps")
+
+PROG_ARRAY(avulse_progs_connect4);
+PROG_ARRAY(avulse_progs_connect6);
+PROG_ARRAY(avulse_progs_bind4);
+PROG_ARRAY(avulse_progs_bind6);
 
 /* What a socket's later events need to know. */
 struct sock_info {
@@ -200,6 +237,109 @@ static __always_inline void submit(const struct avulse_event *e)
     bpf_ringbuf_submit(out, 0);
 }
 
+static __always_inline int mapped(const __u8 *a)
+{
+    __u64 hi;
+    __u16 mid;
+
+    __builtin_memcpy(&hi, a, 8);
+    __builtin_memcpy(&mid, a + 8, 2);
+    return hi == 0 && mid == 0 && a[10] == 0xff && a[11] == 0xff;
+}
+
+/* As user space sees it: ::1, or an IPv4-mapped 127.0.0.0/8 address. */
+static __always_inline int is_loopback(const __u8 *a)
+{
+    __u64 hi, lo;
+
+    if (mapped(a))
+        return a[12] == 127;
+    __builtin_memcpy(&hi, a, 8);
+    __builtin_memcpy(&lo, a + 8, 8);
+    return hi == 0 && lo == __builtin_bswap64(1);
+}
+
+/* facts::ev::from_record. */
+static __always_inline void fill_facts(struct avulse_ev_facts *f, const struct avulse_event *e)
+{
+    f->pid = e->pid;
+    f->flags = (mapped(e->local_addr) ? EF_LOCAL4 : EF_LOCAL6) |
+               (mapped(e->remote_addr) ? EF_REMOTE4 : EF_REMOTE6);
+    f->local_port = e->local_port;
+    f->remote_port = e->remote_port;
+    __builtin_memcpy(f->local_addr, e->local_addr, 16);
+    f->protocol = e->protocol;
+    f->event = e->event;
+    f->verdict = 0;
+    f->meta = ((e->flags & EV_OUTBOUND) ? M_OUTBOUND : 0) |
+              ((is_loopback(e->local_addr) || is_loopback(e->remote_addr)) ? M_LOOPBACK : 0);
+    __builtin_memcpy(f->remote_addr, e->remote_addr, 16);
+    f->endpoint = e->endpoint;
+    __builtin_memcpy(f->comm, e->comm, 16);
+}
+
+/*
+ * Reports `e`, or, for a handle that refuses calls, hands it to the matcher in `progs`, which
+ * does not return. Returns what the call gets when there is no matcher: through.
+ */
+static __always_inline int decide(void *ctx, struct avulse_config *cfg, void *progs,
+                                  const struct avulse_event *e)
+{
+    __u32 zero = 0;
+    struct ev_state *s;
+
+    if (!(cfg->flags & CFG_SNIFF) && (s = bpf_map_lookup_elem(&avulse_ev_state, &zero))) {
+        fill_facts(&s->f, e);
+        __builtin_memcpy(&s->e, e, sizeof(*e));
+        bpf_tail_call(ctx, progs, SLOT_MATCHER);
+        count(S_NO_MATCHER);
+    }
+    submit(e);
+    return 1;
+}
+
+/* After the matcher: refuse what it matched, and report the event. */
+static __always_inline int act(void)
+{
+    __u32 zero = 0;
+    struct ev_state *s = bpf_map_lookup_elem(&avulse_ev_state, &zero);
+    int refuse;
+
+    if (!s)
+        return 1;
+    refuse = s->f.verdict != 0;
+    if (refuse) {
+        s->e.flags |= EV_BLOCKED;
+        count(S_DROPPED);
+    }
+    submit(&s->e);
+    return !refuse;
+}
+
+SEC("cgroup/connect4")
+int avulse_ev_act_connect4(struct bpf_sock_addr *ctx)
+{
+    return act();
+}
+
+SEC("cgroup/connect6")
+int avulse_ev_act_connect6(struct bpf_sock_addr *ctx)
+{
+    return act();
+}
+
+SEC("cgroup/post_bind4")
+int avulse_ev_act_bind4(struct bpf_sock *sk)
+{
+    return act();
+}
+
+SEC("cgroup/post_bind6")
+int avulse_ev_act_bind6(struct bpf_sock *sk)
+{
+    return act();
+}
+
 /* Socket ownership: the process and its name, kept for the socket's later events. */
 SEC("cgroup/sock_create")
 int avulse_ev_create(struct bpf_sock *sk)
@@ -239,8 +379,7 @@ static __always_inline int on_bind(struct bpf_sock *sk, int v6)
     owner(&e, info);
     e.pid = current_pid() ?: e.pid;
     remember(info, &e);
-    submit(&e);
-    return 1;
+    return decide(sk, cfg, v6 ? (void *)&avulse_progs_bind6 : (void *)&avulse_progs_bind4, &e);
 }
 
 SEC("cgroup/post_bind4")
@@ -285,8 +424,8 @@ static __always_inline int on_connect(struct bpf_sock_addr *ctx, int v6)
     owner(&e, info);
     e.pid = current_pid() ?: e.pid;
     remember(info, &e);
-    submit(&e);
-    return 1;
+    return decide(ctx, cfg, v6 ? (void *)&avulse_progs_connect6 : (void *)&avulse_progs_connect4,
+                  &e);
 }
 
 SEC("cgroup/connect4")

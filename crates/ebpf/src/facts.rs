@@ -246,3 +246,98 @@ impl Facts {
         b
     }
 }
+
+/// The facts of an event, which the event programs leave for the matchers of a SOCKET handle
+/// that refuses calls: `struct avulse_ev_facts` in `bpf/facts.h`. Only [`off::FLAGS`] and
+/// [`off::VERDICT`] are shared with [`Facts`].
+pub mod ev {
+    use crate::abi::{EV_OUTBOUND, EventRecord};
+
+    use super::{M_LOOPBACK, M_OUTBOUND};
+
+    /// The local address is IPv4 (IPv4-mapped).
+    pub const EF_LOCAL4: u32 = 1 << 0;
+    /// The local address is IPv6.
+    pub const EF_LOCAL6: u32 = 1 << 1;
+    /// The remote address is IPv4 (IPv4-mapped).
+    pub const EF_REMOTE4: u32 = 1 << 2;
+    /// The remote address is IPv6.
+    pub const EF_REMOTE6: u32 = 1 << 3;
+
+    /// The process ID (`u32`).
+    pub const PID: i16 = 0;
+    /// `EF_*` bits (`u32`), at [`off::FLAGS`](super::off::FLAGS).
+    pub const FLAGS: i16 = 4;
+    /// The local port (`u16`).
+    pub const LOCAL_PORT: i16 = 8;
+    /// The remote port (`u16`).
+    pub const REMOTE_PORT: i16 = 10;
+    /// The local address (16 bytes, network byte order, IPv4 mapped).
+    pub const LOCAL_ADDR: i16 = 12;
+    /// The IP protocol (`u8`).
+    pub const PROTOCOL: i16 = 28;
+    /// The event (`u8`).
+    pub const EVENT: i16 = 29;
+    /// The matcher's verdict (`u8`), at [`off::VERDICT`](super::off::VERDICT).
+    pub const VERDICT: i16 = 30;
+    /// [`M_OUTBOUND`] and [`M_LOOPBACK`] (`u8`).
+    pub const META: i16 = 31;
+    /// The remote address (16 bytes).
+    pub const REMOTE_ADDR: i16 = 32;
+    /// The endpoint (`u64`).
+    pub const ENDPOINT: i16 = 48;
+    /// The process name (16 bytes, NUL-padded).
+    pub const COMM: i16 = 56;
+    /// The size of the facts.
+    pub const SIZE: usize = 72;
+
+    fn mapped(a: &[u8; 16]) -> bool {
+        a[..10] == [0; 10] && a[10..12] == [0xff, 0xff]
+    }
+
+    /// Whether `a` is a loopback address as user space sees it (`Ipv6Addr::to_canonical`, then
+    /// `is_loopback`): `::1`, or an IPv4-mapped `127.0.0.0/8` address.
+    pub fn is_loopback(a: &[u8; 16]) -> bool {
+        if mapped(a) {
+            a[12] == 127
+        } else {
+            *a == core::net::Ipv6Addr::LOCALHOST.octets()
+        }
+    }
+
+    /// The facts the event programs write for the event of `r`: the contract with the generated
+    /// matchers.
+    pub fn from_record(r: &EventRecord) -> [u8; SIZE] {
+        let mut b = [0; SIZE];
+        let mut flags = 0;
+        flags |= if mapped(&r.local_addr) {
+            EF_LOCAL4
+        } else {
+            EF_LOCAL6
+        };
+        flags |= if mapped(&r.remote_addr) {
+            EF_REMOTE4
+        } else {
+            EF_REMOTE6
+        };
+        let mut meta = 0;
+        if r.flags & EV_OUTBOUND != 0 {
+            meta |= M_OUTBOUND;
+        }
+        if is_loopback(&r.local_addr) || is_loopback(&r.remote_addr) {
+            meta |= M_LOOPBACK;
+        }
+        b[0..4].copy_from_slice(&r.pid.to_ne_bytes());
+        b[4..8].copy_from_slice(&flags.to_ne_bytes());
+        b[8..10].copy_from_slice(&r.local_port.to_ne_bytes());
+        b[10..12].copy_from_slice(&r.remote_port.to_ne_bytes());
+        b[12..28].copy_from_slice(&r.local_addr);
+        b[28] = r.protocol;
+        b[29] = r.event;
+        b[31] = meta;
+        b[32..48].copy_from_slice(&r.remote_addr);
+        b[48..56].copy_from_slice(&r.endpoint.to_ne_bytes());
+        b[56..72].copy_from_slice(&r.comm);
+        b
+    }
+}

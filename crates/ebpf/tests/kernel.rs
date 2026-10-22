@@ -25,7 +25,7 @@ use avulse_ebpf::codegen;
 use avulse_ebpf::facts::{
     F_IPV4, F_IPV6, F_UDP, Facts, M_FORWARD, M_IMPOSTOR, M_LOOPBACK, M_OUTBOUND, M_SNIFFED,
 };
-use avulse_ebpf::loader::{self, Classifier, Events, Hook, SkbCtx};
+use avulse_ebpf::loader::{self, Classifier, EventHook, Events, Hook, SkbCtx};
 use avulse_filter::{Event, Filter, Layer};
 use avulse_proto::{Link, Packet};
 
@@ -1141,4 +1141,33 @@ fn events_fail_open() {
         assert_eq!(event_records(&mut ev, &[port]), []);
     }
     assert!(ev.stats().unwrap()[stat::OWNER_GONE] > 0);
+}
+
+/// Every SOCKET filter of the emulator's table loads as the matcher of each kind of program
+/// that refuses calls.
+#[test]
+fn event_matchers_load() {
+    if !enabled() {
+        return;
+    }
+    let mut ev = Events::load_with_ring(1 << 20).unwrap();
+    let mut most = 0;
+    for src in common::EVENT_FILTERS {
+        let filter = Filter::compile(src).unwrap();
+        for hook in EventHook::ALL {
+            let env = codegen::Env {
+                event: Some(hook.event()),
+                ..common::env(Layer::Socket)
+            };
+            let m = codegen::compile(filter.ir(), &env).unwrap();
+            let stats = ev
+                .set_matcher(hook, &m)
+                .unwrap_or_else(|e| panic!("{src} ({hook:?}): {e}"));
+            most = most.max(processed(&stats.log));
+        }
+    }
+    eprintln!(
+        "{} SOCKET filters load for 4 kinds of program; at most {most} instructions processed",
+        common::EVENT_FILTERS.len()
+    );
 }

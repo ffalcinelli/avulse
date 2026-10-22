@@ -24,16 +24,24 @@
 //! Anything else is [`Error::Unsupported`]. [`compile_superset`] then replaces each unsupported
 //! test by `true` or `false`, so that the kernel takes a superset of the packets, and the
 //! backend filters them exactly in user space.
+//!
+//! At the event layers (FLOW, SOCKET) the matcher is a cgroup program: the event programs
+//! tail-call it with the facts of an event ([`facts::ev`](crate::facts::ev)) for one
+//! [`Env::event`]. There is no packet, so every test that reads no field of the event is decided
+//! when the matcher is generated (a test of a packet field is false, the packet being empty);
+//! the rest reads the event's ports, protocol, process ID, direction, loopback and addresses. The
+//! matcher passes (returns 1) when it cannot reach the action program.
 
 use core::fmt;
 
-use avulse_filter::Layer;
 use avulse_filter::fields::{Field, Origin, Ty, def, lookup};
 use avulse_filter::ir::{self, ArithOp, CmpOp, Lit, Quant, SetItem, Slice, SliceEnd, Test, Value};
+use avulse_filter::{Event, FlowTuple, Layer, Meta, bytecode};
+use avulse_proto::{Link, Packet};
 
 use crate::facts::{
     F_ARP, F_ETH, F_FRAG, F_ICMP, F_ICMPV6, F_IPV4, F_IPV6, F_MORE, F_TCP, F_UDP, M_IMPOSTOR,
-    M_LOOPBACK, M_OUTBOUND, M_VLAN, M_VLAN_AD, SLOT_ACTION, off,
+    M_LOOPBACK, M_OUTBOUND, M_VLAN, M_VLAN_AD, SLOT_ACTION, ev, off,
 };
 use crate::insn::{Alu, Asm, AsmError, Cond, FP, Insn, Label, MapRef, MapRefs, Reg, Size};
 
@@ -79,6 +87,9 @@ pub struct Env<'a> {
     /// The index of an interface by name, for `iface`. Resolved when the matcher is generated:
     /// an interface renamed afterwards is not seen under its new name.
     pub ifindex: &'a dyn Fn(&str) -> Option<u32>,
+    /// At the event layers, the event the matcher decides (each kind of event program has a
+    /// matcher of its own); `None` at the packet layers.
+    pub event: Option<Event>,
 }
 
 fn no_interfaces(_: &str) -> Option<u32> {
@@ -93,6 +104,7 @@ impl Env<'static> {
             layer,
             priority: 0,
             ifindex: &no_interfaces,
+            event: None,
         }
     }
 }
@@ -102,6 +114,7 @@ impl fmt::Debug for Env<'_> {
         f.debug_struct("Env")
             .field("layer", &self.layer)
             .field("priority", &self.priority)
+            .field("event", &self.event)
             .finish_non_exhaustive()
     }
 }
@@ -228,6 +241,15 @@ pub fn compile_superset(test: &Test, env: &Env<'_>) -> Result<Matcher, Error> {
             Ok(m)
         }
         r => r,
+    }
+}
+
+/// What `test` gives whatever the packet or event, when the handle's constants in `env` decide
+/// it: at the event layers, `Some(false)` says that the filter never matches `env.event`.
+pub fn decide_for(test: &Test, env: &Env<'_>) -> Option<bool> {
+    match lower(test, env) {
+        Test::Const(b) => Some(b),
+        _ => None,
     }
 }
 
@@ -370,7 +392,176 @@ fn prune(w: Test, known: &[Field]) -> Test {
 /// `ifidx`, and `local.*`/`remote.*` become conditionals on the direction over the header
 /// fields, as `value::load` defines them at the packet layers.
 fn lower(test: &Test, env: &Env<'_>) -> Test {
+    if events(env.layer) {
+        return ir::simplify(lower_event(test, env));
+    }
     ir::simplify(lower_rec(test, env))
+}
+
+/// Whether the layer reports events: its matchers read the facts of an event.
+fn events(layer: Layer) -> bool {
+    matches!(layer, Layer::Flow | Layer::Socket)
+}
+
+/// The fields whose value changes from event to event; the others are constants of the handle
+/// and its event program, or of the empty packet.
+fn per_event(f: Field) -> bool {
+    matches!(
+        f,
+        Field::LocalAddr
+            | Field::RemoteAddr
+            | Field::LocalPort
+            | Field::RemotePort
+            | Field::Protocol
+            | Field::ProcessPid
+            | Field::ProcessName
+            | Field::EndpointId
+            | Field::ParentEndpointId
+            | Field::Outbound
+            | Field::Inbound
+            | Field::Loopback
+            | Field::Timestamp
+            | Field::Random8
+            | Field::Random16
+            | Field::Random32
+    )
+}
+
+/// Every field a leaf reads.
+fn leaf_fields(test: &Test) -> Vec<Field> {
+    fn walk(v: &Value, out: &mut Vec<Field>) {
+        match v {
+            Value::Field(f) | Value::Layer(f, _) | Value::Raw(f, _) => out.push(*f),
+            Value::Slice(v, _)
+            | Value::Len(v)
+            | Value::Count(v)
+            | Value::Neg(v)
+            | Value::Abs(v)
+            | Value::Case { value: v, .. } => walk(v, out),
+            Value::BitAnd(a, b) | Value::Arith(_, a, b) => {
+                walk(a, out);
+                walk(b, out);
+            }
+            Value::Extreme { args, .. } => args.iter().for_each(|a| walk(a, out)),
+            Value::Lit(_) => {}
+        }
+    }
+    let mut out = Vec::new();
+    match test {
+        Test::Exists(v) | Test::Truthy(v) => walk(v, &mut out),
+        Test::Member { lhs, .. } | Test::Matches { lhs, .. } => walk(lhs, &mut out),
+        Test::Cmp { lhs, rhs, .. } | Test::Contains { lhs, rhs, .. } => {
+            walk(lhs, &mut out);
+            walk(rhs, &mut out);
+        }
+        _ => {}
+    }
+    out
+}
+
+fn lower_event(test: &Test, env: &Env<'_>) -> Test {
+    let b = |t: &Test| Box::new(lower_event(t, env));
+    match test {
+        Test::Not(x) => Test::Not(b(x)),
+        Test::And(xs) => Test::And(xs.iter().map(|x| lower_event(x, env)).collect()),
+        Test::Or(xs) => Test::Or(xs.iter().map(|x| lower_event(x, env)).collect()),
+        Test::Xor(x, y) => Test::Xor(b(x), b(y)),
+        Test::If(c, x, y) => Test::If(b(c), b(x), b(y)),
+        Test::Const(_) => test.clone(),
+        leaf if !leaf_fields(leaf).into_iter().any(per_event) => {
+            constant(leaf, env).map_or_else(|| leaf.clone(), Test::Const)
+        }
+        leaf => match leaf_field(leaf) {
+            Some((f @ (Field::LocalAddr | Field::RemoteAddr), t)) => {
+                event_addr(&t, f == Field::LocalAddr).unwrap_or_else(|| leaf.clone())
+            }
+            _ => leaf.clone(),
+        },
+    }
+}
+
+/// The value of a leaf that reads no field of the event, for any event of the handle's event
+/// program: the empty packet's fields and the handle's constants, as the backend sets them.
+/// Evaluated by the bytecode interpreter, whose results are the evaluator's.
+fn constant(test: &Test, env: &Env<'_>) -> Option<bool> {
+    let event = env.event?;
+    let bytes = bytecode::Program::compile(test).ok()?.to_bytes();
+    let program = bytecode::verify(&bytes).ok()?;
+    let zero = core::net::IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED);
+    let meta = Meta {
+        layer: env.layer,
+        event,
+        priority: env.priority,
+        process_id: Some(0),
+        endpoint_id: Some(0),
+        parent_endpoint_id: Some(0),
+        flow: Some(FlowTuple {
+            local_addr: zero,
+            remote_addr: zero,
+            local_port: 0,
+            remote_port: 0,
+            protocol: 0,
+        }),
+        ..Meta::default()
+    };
+    Some(program.matches(&Packet::parse(&[], Link::Ip), &meta))
+}
+
+/// `local.addr`/`remote.addr` of an event: an IPv4 (IPv4-mapped) address is tested as the IPv4
+/// field `ip.src` (local) or `ip.dst` (remote) of the event's facts, an IPv6 one as `ipv6.src`
+/// or `ipv6.dst` ([`event_scalar`], [`event_regions`]). Against an address of the other family,
+/// `!=` and `not in` hold and the rest does not.
+fn event_addr(test: &Test, local: bool) -> Option<Test> {
+    let (v4, v6) = if local {
+        (Field::IpSrc, Field::Ipv6Src)
+    } else {
+        (Field::IpDst, Field::Ipv6Dst)
+    };
+    Some(match test {
+        Test::Exists(_) => Test::Const(true),
+        Test::Cmp {
+            op,
+            rhs: Value::Lit(l),
+            ..
+        } => {
+            let other = Test::Const(*op == CmpOp::Ne);
+            match l {
+                Lit::Ipv4(..) => if_then(exists(v4), with_field(test, v4), other),
+                Lit::Ipv6(..) => if_then(exists(v4), other, with_field(test, v6)),
+                _ => return None,
+            }
+        }
+        Test::Member {
+            lhs,
+            set,
+            quant,
+            negate,
+        } => {
+            let family = |six: bool, f: Field| {
+                let items = set
+                    .iter()
+                    .filter(|i| {
+                        let l = match i {
+                            SetItem::One(l) | SetItem::Range(l, _) => l,
+                        };
+                        matches!(l, Lit::Ipv6(..)) == six
+                    })
+                    .cloned()
+                    .collect();
+                with_field(
+                    &Test::Member {
+                        lhs: lhs.clone(),
+                        set: items,
+                        quant: *quant,
+                        negate: *negate,
+                    },
+                    f,
+                )
+            };
+            if_then(exists(v4), family(false, v4), family(true, v6))
+        }
+        _ => return None,
+    })
 }
 
 fn lower_rec(test: &Test, env: &Env<'_>) -> Test {
@@ -763,6 +954,8 @@ enum Scalar {
     Opt(u8, u8, Bits),
     /// `tcp.options.wscale.multiplier`: 2 to the shift, at most 2^14.
     WscaleMul,
+    /// Four bytes of the facts of an event, big-endian: an IPv4 address.
+    FactBe(i16),
 }
 
 impl Scalar {
@@ -774,6 +967,7 @@ impl Scalar {
             Scalar::ArpIp(_) => u32::MAX as i128,
             Scalar::Fact { mask, .. } => mask as i128,
             Scalar::WscaleMul => 1 << 14,
+            Scalar::FactBe(_) => u32::MAX as i128,
         }
     }
 
@@ -823,6 +1017,8 @@ enum Region {
     Arp,
     /// A MAC address of an ARP packet (the target's if `true`), when it has 6-byte ones.
     ArpMac(bool),
+    /// Bytes of the facts of an event, at an offset: an IPv6 address.
+    Fact(i16, usize),
 }
 
 impl Region {
@@ -832,6 +1028,7 @@ impl Region {
             Region::At(_, _, len) => Some(len as usize),
             Region::Tag(..) => Some(4),
             Region::ArpMac(_) => Some(6),
+            Region::Fact(_, len) => Some(len),
             _ => None,
         }
     }
@@ -842,6 +1039,7 @@ impl Region {
             Region::At(_, _, len) => Some(len as usize),
             Region::Tag(..) => Some(4),
             Region::ArpMac(_) => Some(6),
+            Region::Fact(_, len) => Some(len),
             Region::Ipv4Hdr | Region::TcpHdr => Some(60),
             Region::TcpOpts | Region::Opt(_) => Some(40),
             _ => None,
@@ -1200,9 +1398,63 @@ fn regions(f: Field) -> Option<(u32, Vec<Region>)> {
     }
 }
 
-fn operand(v: &Value) -> Result<Operand, Error> {
+/// The numeric fields of an event: [`facts::ev`](crate::facts::ev). `ip.src`/`ip.dst` stand for
+/// an IPv4 local or remote address ([`event_addr`]).
+fn event_scalar(f: Field) -> Option<(Kind, u32, Vec<Scalar>)> {
+    use Kind::*;
+    let fact = |off, size, mask, invert| Scalar::Fact {
+        off,
+        size,
+        mask,
+        invert,
+    };
+    let meta = |mask: u8, invert| (Bool, 0, vec![fact(ev::META, Size::B, mask as u32, invert)]);
+    Some(match f {
+        Field::LocalPort => (Uint, 0, vec![fact(ev::LOCAL_PORT, Size::H, 0xffff, false)]),
+        Field::RemotePort => (Uint, 0, vec![fact(ev::REMOTE_PORT, Size::H, 0xffff, false)]),
+        Field::Protocol => (Uint, 0, vec![fact(ev::PROTOCOL, Size::B, 0xff, false)]),
+        Field::ProcessPid => (Uint, 0, vec![fact(ev::PID, Size::W, u32::MAX, false)]),
+        Field::Outbound => meta(M_OUTBOUND, false),
+        Field::Inbound => meta(M_OUTBOUND, true),
+        Field::Loopback => meta(M_LOOPBACK, false),
+        Field::IpSrc => (
+            Addr,
+            ev::EF_LOCAL4,
+            vec![Scalar::FactBe(ev::LOCAL_ADDR + 12)],
+        ),
+        Field::IpDst => (
+            Addr,
+            ev::EF_REMOTE4,
+            vec![Scalar::FactBe(ev::REMOTE_ADDR + 12)],
+        ),
+        _ => return None,
+    })
+}
+
+/// The byte fields of an event: `ipv6.src`/`ipv6.dst` stand for an IPv6 local or remote address
+/// ([`event_addr`]).
+fn event_regions(f: Field) -> Option<(u32, Vec<Region>)> {
+    match f {
+        Field::Ipv6Src => Some((ev::EF_LOCAL6, vec![Region::Fact(ev::LOCAL_ADDR, 16)])),
+        Field::Ipv6Dst => Some((ev::EF_REMOTE6, vec![Region::Fact(ev::REMOTE_ADDR, 16)])),
+        _ => None,
+    }
+}
+
+/// The operand of `v`; `ev`: at an event layer, where only the fields of an event exist.
+fn operand(v: &Value, ev: bool) -> Result<Operand, Error> {
+    type Scalars = fn(Field) -> Option<(Kind, u32, Vec<Scalar>)>;
+    type Regions = fn(Field) -> Option<(u32, Vec<Region>)>;
+    let (scalar, regions): (Scalars, Regions) = if ev {
+        (event_scalar, event_regions)
+    } else {
+        (scalar, regions)
+    };
     match v {
         Value::Field(f) => {
+            if ev && matches!(f, Field::Ipv6) {
+                return unsupported(format!("the field `{}`", def(*f).name));
+            }
             if let Some((kind, need, occ)) = scalar(*f) {
                 return Ok(Operand::Num {
                     kind,
@@ -1221,7 +1473,7 @@ fn operand(v: &Value) -> Result<Operand, Error> {
                 _ => unsupported(format!("the field `{}`", def(*f).name)),
             }
         }
-        Value::Slice(base, ranges) => match (operand(base)?, ranges.as_slice()) {
+        Value::Slice(base, ranges) => match (operand(base, ev)?, ranges.as_slice()) {
             (Operand::Bytes { need, occ }, [s]) => Ok(Operand::Bytes {
                 need,
                 occ: occ
@@ -1237,7 +1489,7 @@ fn operand(v: &Value) -> Result<Operand, Error> {
             }),
             _ => unsupported("this slice"),
         },
-        Value::Len(base) => match operand(base)? {
+        Value::Len(base) => match operand(base, ev)? {
             Operand::Bytes { need, occ } => Ok(Operand::Num {
                 kind: Kind::Uint,
                 need,
@@ -1258,7 +1510,7 @@ fn operand(v: &Value) -> Result<Operand, Error> {
             if !matches!(&**base, Value::Field(_)) {
                 return unsupported("`count()` of a computed value");
             }
-            let occ = match operand(base)? {
+            let occ = match operand(base, ev)? {
                 Operand::Num { need, occ, .. } => occ
                     .into_iter()
                     .map(|x| Occ::Num(Num::need(need, x)))
@@ -1273,10 +1525,12 @@ fn operand(v: &Value) -> Result<Operand, Error> {
                 occ: vec![Num::Count(occ)],
             })
         }
-        Value::BitAnd(a, b) => binary(a, b, |x, y| Num::And(Box::new(x), Box::new(y))),
-        Value::Arith(op, a, b) => binary(a, b, |x, y| Num::Arith(*op, Box::new(x), Box::new(y))),
+        Value::BitAnd(a, b) => binary(a, b, ev, |x, y| Num::And(Box::new(x), Box::new(y))),
+        Value::Arith(op, a, b) => {
+            binary(a, b, ev, |x, y| Num::Arith(*op, Box::new(x), Box::new(y)))
+        }
         Value::Neg(a) | Value::Abs(a) => {
-            let (need, occ) = numbers(a)?;
+            let (need, occ) = numbers(a, ev)?;
             let abs = matches!(v, Value::Abs(_));
             Ok(Operand::Num {
                 kind: Kind::Int,
@@ -1297,7 +1551,7 @@ fn operand(v: &Value) -> Result<Operand, Error> {
             let mut all = Vec::new();
             for a in args {
                 // An absent argument is skipped.
-                let (need, occ) = numbers(a)?;
+                let (need, occ) = numbers(a, ev)?;
                 all.extend(occ.into_iter().map(|x| Num::need(need, x)));
             }
             Ok(Operand::Num {
@@ -1338,8 +1592,8 @@ impl Num {
 }
 
 /// The numeric occurrences of a value, and the presence bits they need.
-fn numbers(v: &Value) -> Result<(u32, Vec<Num>), Error> {
-    match operand(v)? {
+fn numbers(v: &Value, ev: bool) -> Result<(u32, Vec<Num>), Error> {
+    match operand(v, ev)? {
         Operand::Num {
             kind: Kind::Uint | Kind::Int,
             need,
@@ -1350,9 +1604,9 @@ fn numbers(v: &Value) -> Result<(u32, Vec<Num>), Error> {
 }
 
 /// Every pair of occurrences, combined; at most 4, as `value::Vals` holds.
-fn binary(a: &Value, b: &Value, f: impl Fn(Num, Num) -> Num) -> Result<Operand, Error> {
-    let (na, a) = numbers(a)?;
-    let (nb, b) = numbers(b)?;
+fn binary(a: &Value, b: &Value, ev: bool, f: impl Fn(Num, Num) -> Num) -> Result<Operand, Error> {
+    let (na, a) = numbers(a, ev)?;
+    let (nb, b) = numbers(b, ev)?;
     if a.len() * b.len() > 4 {
         return unsupported("arithmetic with more than 4 results");
     }
@@ -1617,6 +1871,7 @@ fn emit(test: &Test, env: &Env<'_>) -> Result<Matcher, Error> {
         slots: 0,
         options: false,
         ethernet: env.layer == Layer::Ethernet,
+        ev: events(env.layer),
     };
     let vlan = env.layer == Layer::Ethernet && l2_sensitive(test);
     let a = &mut g.a;
@@ -1647,7 +1902,9 @@ fn emit(test: &Test, env: &Env<'_>) -> Result<Matcher, Error> {
     a.alu64_imm(Alu::Mov, 3, SLOT_ACTION as i32);
     a.call(TAIL_CALL);
     a.bind(out);
-    a.alu64_imm(Alu::Mov, 0, TC_ACT_UNSPEC);
+    // Cgroup programs return 1 to let the call through.
+    let pass = if events(env.layer) { 1 } else { TC_ACT_UNSPEC };
+    a.alu64_imm(Alu::Mov, 0, pass);
     a.exit();
     let (insns, maps) = g.a.finish()?;
     Ok(Matcher {
@@ -1666,6 +1923,8 @@ struct Gen {
     options: bool,
     /// Whether the handle is at the ETHERNET layer, where a VLAN tag may have been offloaded.
     ethernet: bool,
+    /// Whether the handle is at an event layer: the facts are an event's, with no packet.
+    ev: bool,
 }
 
 impl Gen {
@@ -1738,7 +1997,7 @@ impl Gen {
                 self.a.bind(cf);
                 self.test(y, t, f)?;
             }
-            Test::Exists(v) => match operand(v)? {
+            Test::Exists(v) => match operand(v, self.ev)? {
                 Operand::Num { need, occ, .. } => {
                     if occ.iter().any(Num::dynamic) {
                         self.quant(need, &occ, Quant::Any, false, &Pred::Const(true), t, f)?;
@@ -1755,7 +2014,7 @@ impl Gen {
                     self.a.ja(t);
                 }
             },
-            Test::Truthy(v) => match operand(v)? {
+            Test::Truthy(v) => match operand(v, self.ev)? {
                 Operand::Num { need, occ, .. } => {
                     self.quant(need, &occ, Quant::Any, false, &Pred::Truthy, t, f)?
                 }
@@ -1772,7 +2031,7 @@ impl Gen {
                     (Value::Lit(l), v) if !matches!(v, Value::Lit(_)) => (v, mirror(*op), l),
                     _ => return self.pairs(lhs, *op, *quant, rhs, t, f),
                 };
-                match operand(v)? {
+                match operand(v, self.ev)? {
                     Operand::Num { kind, need, occ } => {
                         let p = cmp_pred(kind, op, l)?;
                         self.quant(need, &occ, *quant, false, &p, t, f)?;
@@ -1789,7 +2048,7 @@ impl Gen {
                 set,
                 quant,
                 negate,
-            } => match operand(lhs)? {
+            } => match operand(lhs, self.ev)? {
                 Operand::Num { kind, need, occ } => {
                     let items = set
                         .iter()
@@ -1811,7 +2070,7 @@ impl Gen {
                     Value::Lit(l) => lit_bytes(l)?.0,
                     _ => return unsupported("`contains` of a field"),
                 };
-                match operand(lhs)? {
+                match operand(lhs, self.ev)? {
                     Operand::Bytes { need, occ } => {
                         let p = BPred::Contains(needle);
                         self.quant_bytes(need, &occ, *quant, false, &p, t, f)?;
@@ -1956,7 +2215,7 @@ impl Gen {
         t: Label,
         f: Label,
     ) -> Result<(), Error> {
-        let side = |v: &Value| match operand(v)? {
+        let side = |v: &Value| match operand(v, self.ev)? {
             Operand::Num { kind, need, occ } => {
                 if occ.iter().any(|x| x.range().is_none()) {
                     return unsupported("arithmetic that may overflow or divide signed values");
@@ -2374,6 +2633,10 @@ impl Gen {
                 self.a.alu64_reg(Alu::Mov, 2, VAL);
                 self.read(b, fail);
             }
+            Scalar::FactBe(off) => {
+                self.a.load(Size::W, VAL, FACTS, off);
+                self.a.to_be(VAL, 32);
+            }
             Scalar::WscaleMul => {
                 self.scalar(Scalar::Opt(1, 3, whole(2, 1)), fail);
                 let a = &mut self.a;
@@ -2544,6 +2807,10 @@ impl Gen {
                 a.load(Size::W, LEN, FACTS, off::PAY);
                 a.alu64_reg(Alu::Sub, LEN, VAL);
             }
+            Region::Fact(off, len) => {
+                self.a.alu64_imm(Alu::Mov, VAL, off as i32);
+                self.a.alu64_imm(Alu::Mov, LEN, len as i32);
+            }
             Region::ArpMac(target) => {
                 self.need(F_ARP, absent);
                 self.a.load(Size::W, 2, FACTS, off::L3);
@@ -2644,15 +2911,38 @@ impl Gen {
         let Some(n) = n else {
             return unsupported("ordering of bytes of varying length");
         };
+        self.copy(0, n, fail);
+        Ok(n)
+    }
+
+    /// Copies `n` bytes (at most [`CHUNK`]) at [`VAL`]` + skip` to the stack buffer: from the
+    /// packet, or from the facts of an event, which are always there. A failed load of the
+    /// packet jumps to `fail`.
+    fn copy(&mut self, skip: i32, n: usize, fail: Label) {
         let a = &mut self.a;
+        if self.ev {
+            a.alu64_reg(Alu::Mov, 1, FACTS);
+            a.alu64_reg(Alu::Add, 1, VAL);
+            let mut at = 0;
+            while at < n {
+                let k = [8, 4, 2, 1].into_iter().find(|&k| k <= n - at).unwrap_or(1);
+                let from = i16::try_from(skip as usize + at).unwrap_or(i16::MAX);
+                a.load(Size::of(k), 2, 1, from);
+                a.store(Size::of(k), FP, BUF + at as i16, 2);
+                at += k;
+            }
+            return;
+        }
         a.alu64_reg(Alu::Mov, 1, CTX);
         a.alu64_reg(Alu::Mov, 2, VAL);
+        if skip != 0 {
+            a.alu64_imm(Alu::Add, 2, skip);
+        }
         a.alu64_reg(Alu::Mov, 3, FP);
         a.alu64_imm(Alu::Add, 3, BUF as i32);
         a.alu64_imm(Alu::Mov, 4, n as i32);
         a.call(SKB_LOAD_BYTES);
         a.jmp_imm(Cond::Ne, 0, 0, fail);
-        Ok(n)
     }
 
     /// Compares the `n` bytes in the stack buffer with `lit` lexicographically, as `value::ord`
@@ -2716,20 +3006,11 @@ impl Gen {
     ) -> Result<(), Error> {
         let len = i32::try_from(lit.len()).map_err(|_| Error::TooLarge)?;
         let nbytes = bits.div_ceil(8).min(lit.len());
-        let a = &mut self.a;
-        a.jmp_imm(Cond::Ne, LEN, len, ne);
+        self.a.jmp_imm(Cond::Ne, LEN, len, ne);
         for (i, chunk) in lit[..nbytes].chunks(CHUNK).enumerate() {
-            a.check_size()?;
-            a.alu64_reg(Alu::Mov, 1, CTX);
-            a.alu64_reg(Alu::Mov, 2, VAL);
-            if i > 0 {
-                a.alu64_imm(Alu::Add, 2, (i * CHUNK) as i32);
-            }
-            a.alu64_reg(Alu::Mov, 3, FP);
-            a.alu64_imm(Alu::Add, 3, BUF as i32);
-            a.alu64_imm(Alu::Mov, 4, chunk.len() as i32);
-            a.call(SKB_LOAD_BYTES);
-            a.jmp_imm(Cond::Ne, 0, 0, fail);
+            self.a.check_size()?;
+            self.copy((i * CHUNK) as i32, chunk.len(), fail);
+            let a = &mut self.a;
             let mut at = 0;
             while at < chunk.len() {
                 let n = [8, 4, 2, 1]
@@ -2767,12 +3048,15 @@ impl Gen {
                 at += n;
             }
         }
-        a.ja(eq);
+        self.a.ja(eq);
         Ok(())
     }
 
     /// Jumps to `t` if the range (at most `max` bytes) contains `needle`, else to `f`.
     fn contains(&mut self, needle: &[u8], max: usize, t: Label, f: Label) -> Result<(), Error> {
+        if self.ev {
+            return unsupported("`contains` at the event layers");
+        }
         let m = needle.len();
         if m == 0 {
             self.a.ja(t);

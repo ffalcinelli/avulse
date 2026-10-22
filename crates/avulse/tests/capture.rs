@@ -852,6 +852,13 @@ fn owner() {
     }
     let _h = match std::env::var("AVULSE_OWNER").as_deref() {
         Ok("flow") => open_flow("true"),
+        Ok("socket") => Handle::open(
+            "event == connect and remote.port == 9103",
+            Layer::Socket,
+            0,
+            Flags::RECV_ONLY,
+        )
+        .unwrap(),
         _ => open(PINGS, Layer::Network, 0, Flags::NONE),
     };
     println!("handle open");
@@ -2103,5 +2110,133 @@ fn flow_shutdown_and_dead_owner() {
     // SAFETY: plain system call.
     unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
     child.wait().unwrap();
+    assert!(avulse::cleanup().unwrap() >= 1);
+}
+
+// The SOCKET layer (Step 16).
+
+fn open_socket(filter: &str, flags: Flags) -> Handle {
+    Handle::open(filter, Layer::Socket, 0, flags | Flags::RECV_ONLY)
+        .unwrap_or_else(|e| panic!("opening `{filter}` at SOCKET: {e}"))
+}
+
+/// A sniffing SOCKET handle sees a listener and a client over loopback: bind, listen, connect,
+/// accept and each close, with their endpoints and process.
+#[test]
+fn socket_events() {
+    use avulse::Event::*;
+    if !enabled() {
+        return;
+    }
+    let port = 9104;
+    let h = open_socket(
+        &format!("local.port == {port} or remote.port == {port}"),
+        Flags::SNIFF,
+    );
+    let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+    let client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let (accepted, peer) = listener.accept().unwrap();
+    drop((client, accepted, listener));
+    let got = drain(&h);
+    let events: Vec<_> = got.iter().map(|(_, a)| a.event).collect();
+    for e in [SocketBind, SocketListen, SocketConnect, SocketAccept] {
+        assert_eq!(
+            events.iter().filter(|&&x| x == e).count(),
+            1,
+            "{e:?}: {got:#?}"
+        );
+    }
+    assert_eq!(
+        events.iter().filter(|&&x| x == SocketClose).count(),
+        3,
+        "{got:#?}"
+    );
+    for (p, a) in &got {
+        assert!(p.is_empty() && a.sniffed && a.loopback && a.layer == Layer::Socket);
+        assert_eq!(a.flow.process_id, std::process::id());
+        assert_eq!(a.flow.protocol, 6);
+    }
+    let connect = got.iter().find(|(_, a)| a.event == SocketConnect).unwrap();
+    assert!(connect.1.outbound);
+    assert_eq!(connect.1.flow.remote_port, port);
+    let accept = got.iter().find(|(_, a)| a.event == SocketAccept).unwrap();
+    assert_eq!(
+        (accept.1.flow.local_port, accept.1.flow.remote_port),
+        (port, peer.port())
+    );
+}
+
+fn refused(r: std::io::Result<impl Sized>) -> bool {
+    matches!(r, Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
+/// Without SNIFF, the handle refuses the connects and binds its filter matches (EPERM), over
+/// IPv4 and IPv6, reports them, and lets the others through; with DROP, it reports nothing.
+#[test]
+fn socket_refuses_calls() {
+    if !enabled() {
+        return;
+    }
+    let h = open_socket(
+        "(event == connect and remote.port == 9100) or (event == bind and local.port == 9101)",
+        Flags::NONE,
+    );
+    let listener = TcpListener::bind("127.0.0.1:9102").unwrap();
+    let listener6 = TcpListener::bind("[::1]:9102").unwrap();
+    for host in ["127.0.0.1", "::1"] {
+        assert!(refused(TcpStream::connect((host, 9100))), "{host}");
+        assert!(refused(UdpSocket::bind((host, 9101))), "{host}");
+        assert!(TcpStream::connect((host, 9102)).is_ok(), "{host}");
+        assert!(UdpSocket::bind((host, 9105)).is_ok(), "{host}");
+    }
+    drop((listener, listener6));
+    let got = drain(&h);
+    assert_eq!(got.len(), 4, "{got:#?}");
+    for (_, a) in &got {
+        assert!(!a.sniffed);
+        assert!(matches!(
+            (a.event, a.flow.local_port, a.flow.remote_port),
+            (avulse::Event::SocketConnect, _, 9100) | (avulse::Event::SocketBind, 9101, _)
+        ));
+    }
+    h.close().unwrap();
+    assert!(!refused(TcpStream::connect(("127.0.0.1", 9100))));
+
+    let d = open_socket("event == connect and remote.port == 9100", Flags::DROP);
+    assert!(refused(TcpStream::connect(("127.0.0.1", 9100))));
+    assert!(timeout(&d, 300));
+}
+
+/// A SOCKET handle that refuses calls opens only with a filter the kernel decides exactly, and
+/// that cannot match a listen or an accept; with SNIFF, any filter opens.
+#[test]
+fn socket_filters_the_kernel_cannot_refuse() {
+    if !enabled() {
+        return;
+    }
+    for filter in [
+        "remote.port == 443",
+        "event == accept",
+        "event == connect and process.name == \"curl\"",
+        "event == connect and endpoint.id == 1",
+    ] {
+        let r = Handle::open(filter, Layer::Socket, 0, Flags::RECV_ONLY);
+        assert!(matches!(r, Err(Error::Unsupported(_))), "{filter}");
+        open_socket(filter, Flags::SNIFF).close().unwrap();
+    }
+}
+
+/// Refusing stops with the owner: its programs go with its links.
+#[test]
+fn socket_dead_owner() {
+    if !enabled() {
+        return;
+    }
+    let mut child = spawn_owner_of("socket");
+    assert!(refused(TcpStream::connect(("127.0.0.1", 9103))));
+    // SAFETY: plain system call.
+    unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
+    child.wait().unwrap();
+    assert!(!refused(TcpStream::connect(("127.0.0.1", 9103))));
     assert!(avulse::cleanup().unwrap() >= 1);
 }

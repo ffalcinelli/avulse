@@ -75,4 +75,41 @@ _Static_assert(__builtin_offsetof(struct avulse_facts, vlans) == 43, "facts.rs")
 _Static_assert(__builtin_offsetof(struct avulse_facts, opts) == 44, "facts.rs");
 _Static_assert(sizeof(struct avulse_facts) == 48, "facts.rs");
 
+/*
+ * The facts the event programs leave for the matchers of a SOCKET handle that refuses calls (the
+ * events of connect and bind): one per CPU, the first part of the `avulse_ev_state` map's value.
+ * Only `flags` and `verdict` are where struct avulse_facts has them, which the generated
+ * prologue, presence tests and epilogue rely on.
+ */
+#define EF_LOCAL4  (1u << 0) /* the local address is IPv4 (IPv4-mapped) */
+#define EF_LOCAL6  (1u << 1) /* ... or IPv6 */
+#define EF_REMOTE4 (1u << 2) /* the remote address is IPv4 (IPv4-mapped) */
+#define EF_REMOTE6 (1u << 3) /* ... or IPv6 */
+
+struct avulse_ev_facts {
+    __u32 pid;            /* the process; 0 when unknown */
+    __u32 flags;          /* EF_* */
+    __u16 local_port;
+    __u16 remote_port;
+    __u8 local_addr[16];  /* network byte order, IPv4 as ::ffff:a.b.c.d */
+    __u8 protocol;
+    __u8 event;           /* EVENT_* (abi.h) */
+    __u8 verdict;         /* written by the matcher: 1 if the filter matches */
+    __u8 meta;            /* M_OUTBOUND, M_LOOPBACK (either address) */
+    __u8 remote_addr[16];
+    __u64 endpoint;
+    char comm[16];
+};
+
+_Static_assert(__builtin_offsetof(struct avulse_ev_facts, flags) ==
+               __builtin_offsetof(struct avulse_facts, flags), "facts.rs");
+_Static_assert(__builtin_offsetof(struct avulse_ev_facts, verdict) ==
+               __builtin_offsetof(struct avulse_facts, verdict), "facts.rs");
+_Static_assert(__builtin_offsetof(struct avulse_ev_facts, local_addr) == 12, "facts.rs");
+_Static_assert(__builtin_offsetof(struct avulse_ev_facts, protocol) == 28, "facts.rs");
+_Static_assert(__builtin_offsetof(struct avulse_ev_facts, meta) == 31, "facts.rs");
+_Static_assert(__builtin_offsetof(struct avulse_ev_facts, remote_addr) == 32, "facts.rs");
+_Static_assert(__builtin_offsetof(struct avulse_ev_facts, endpoint) == 48, "facts.rs");
+_Static_assert(sizeof(struct avulse_ev_facts) == 72, "facts.rs");
+
 #endif

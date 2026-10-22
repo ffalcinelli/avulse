@@ -1,8 +1,13 @@
-//! The FLOW layer: the event programs (`avulse_ebpf::loader::Events`) report what sockets do,
-//! and user space turns their records into addresses, ends the flows of the UDP sockets that go
-//! away, and evaluates the filter. Events have no packet: the filter sees an empty one, so
-//! protocol fields such as `ip` and `tcp` are false (WinDivert's rule), and it filters on
-//! `event`, `local.*`, `remote.*`, `protocol` and `process.*`.
+//! The FLOW and SOCKET layers: the event programs (`avulse_ebpf::loader::Events`) report what
+//! sockets do, and user space turns their records into addresses, ends the flows of the UDP
+//! sockets that go away, and evaluates the filter. Events have no packet: the filter sees an
+//! empty one, so protocol fields such as `ip` and `tcp` are false (WinDivert's rule), and it
+//! filters on `event`, `local.*`, `remote.*`, `protocol` and `process.*`.
+//!
+//! A SOCKET handle without `SNIFF` refuses the binds and connects its filter matches, so the
+//! filter runs in the kernel, exactly: the code generator compiles it for each kind of program
+//! (`EventHook`), or the handle does not open. Linux cannot refuse a listen or an accept, so a
+//! filter that can match those does not open either.
 
 use std::collections::HashMap;
 use std::io;
@@ -12,7 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use avulse_ebpf::abi::{self, Config, EV_OUTBOUND, EV_RELEASED, EventRecord};
-use avulse_ebpf::loader::{self, Events};
+use avulse_ebpf::codegen::{self, Env};
+use avulse_ebpf::loader::{self, EventHook, Events};
 use avulse_filter::{Event, Filter, Layer};
 use avulse_proto::{Link, Packet};
 
@@ -35,6 +41,8 @@ pub(super) struct EventHandle {
     priority: i16,
     filter: Filter,
     sniff: bool,
+    /// `DROP`: refused calls are not reported.
+    drop: bool,
     rx: Rx<EventRing>,
     beat: Arc<Beat>,
     /// The programs and their links, detached when dropped.
@@ -84,7 +92,19 @@ impl UdpFlows {
 
 impl EventHandle {
     pub(super) fn open(spec: &Spec<'_>) -> Result<EventHandle> {
+        let sniff = spec.flags.contains(Flags::SNIFF);
+        let refuses = spec.layer == Layer::Socket && !sniff;
+        let matchers = if refuses { matchers(spec)? } else { Vec::new() };
         let mut events = Events::load_with_ring(RING_BYTES).map_err(io_error)?;
+        for (hook, m) in &matchers {
+            events.set_matcher(*hook, m).map_err(|e| match e {
+                loader::Error::Rejected { .. } => Error::Unsupported(
+                    "this filter in the kernel (the verifier refuses it): open the handle with \
+                     SNIFF",
+                ),
+                e => io_error(e),
+            })?;
+        }
         let ring = events
             .take_ring()
             .ok_or_else(|| Error::Io(io::Error::other("the event programs have no ring buffer")))?;
@@ -95,7 +115,6 @@ impl EventHandle {
             udp: UdpFlows::default(),
         });
         let mut flags = 0;
-        let sniff = spec.flags.contains(Flags::SNIFF);
         if sniff {
             flags |= abi::CFG_SNIFF;
         }
@@ -118,6 +137,7 @@ impl EventHandle {
             priority: spec.priority,
             filter: spec.filter.clone(),
             sniff,
+            drop: spec.flags.contains(Flags::DROP),
             rx,
             beat,
             events: Some(events),
@@ -163,6 +183,9 @@ impl EventHandle {
                 entries.extend(self.entry(&e));
             }
         }
+        if self.drop {
+            entries.clear();
+        }
         drop(guard);
         self.rx.push(entries);
         n
@@ -182,6 +205,39 @@ impl EventHandle {
                 data: Vec::new(),
             })
     }
+}
+
+/// The matchers of a SOCKET handle that refuses calls, one per kind of program: the filter,
+/// exactly.
+fn matchers(spec: &Spec<'_>) -> Result<Vec<(EventHook, codegen::Matcher)>> {
+    let resolve = |name: &str| loader::if_index(name).ok();
+    let env = |event| Env {
+        layer: spec.layer,
+        priority: spec.priority,
+        ifindex: &resolve,
+        event: Some(event),
+    };
+    let ir = spec.filter.ir();
+    for event in [Event::SocketListen, Event::SocketAccept] {
+        if codegen::decide_for(ir, &env(event)) != Some(false) {
+            return Err(Error::Unsupported(
+                "refusing listen or accept, which Linux cannot do: open the handle with SNIFF, \
+                 or keep those events out of the filter (`event in {bind connect}`)",
+            ));
+        }
+    }
+    let mut out = Vec::new();
+    for hook in EventHook::ALL {
+        let m = codegen::compile(ir, &env(hook.event())).map_err(|_| {
+            Error::Unsupported(
+                "this filter in the kernel, where a SOCKET handle without SNIFF decides: open \
+                 it with SNIFF, or test only `event`, `local.*`, `remote.*`, `protocol`, \
+                 `process.pid`, `inbound`, `outbound` and `loopback`",
+            )
+        })?;
+        out.push((hook, m));
+    }
+    Ok(out)
 }
 
 /// The event of number `n`.

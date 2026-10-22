@@ -12,8 +12,8 @@ WinDivert feature, adds an Ethernet layer, and uses Wireshark display filters.
 > *Avulsion*: a river suddenly abandoning its channel for a new one.
 
 **Status: pre-alpha.** The packet parser, the filter language and the `avulse filter` CLI work.
-On Linux, the `avulse` crate diverts, sniffs, drops and sends packets at the packet layers, and
-reports flows at the FLOW layer.
+On Linux, the `avulse` crate diverts, sniffs, drops and sends packets at the packet layers,
+reports flows at the FLOW layer, and reports or refuses binds and connects at the SOCKET layer.
 The crates.io and PyPI packages only reserve the name.
 
 **[Website](https://ffalcinelli.github.io/avulse/)** ·
@@ -100,7 +100,7 @@ assert!(filter.matches(&packet, &Meta { outbound: true, ..Meta::default() }));
 | [`avulse-filter`](crates/filter) | The filter language: parser, type checker, IR, evaluator. `no_std` + `alloc`. |
 | [`avulse-cli`](crates/cli) | The `avulse` command: `filter check`, `fmt`, `explain`, `eval`, `fields`; `cleanup`. |
 | [`avulse-wasm`](crates/wasm) | The engine compiled to WebAssembly, for the playground. |
-| [`avulse`](crates/avulse) | The handle API (preview): handles, flags, parameters, the packet address, and the platform backends. Linux works at the packet layers and FLOW; SOCKET, REFLECT and the other platforms are to come. |
+| [`avulse`](crates/avulse) | The handle API (preview): handles, flags, parameters, the packet address, and the platform backends. Linux works at the packet layers, FLOW and SOCKET; REFLECT and the other platforms are to come. |
 | `avulse-ebpf` | The Linux kernel side: TC programs, the event programs, filter IR to eBPF, the loader. |
 | `avulse-capi`, `avulse-windivert-compat` | Placeholders for the coming phases. |
 | [`bindings/python`](bindings/python) | The `avulse` PyPI package: a placeholder. |

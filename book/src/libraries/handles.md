@@ -1,7 +1,7 @@
 # Handles and addresses
 
 > **Preview.** Only Linux has a backend so far, for the packet layers (`Network`,
-> `NetworkForward` and `Ethernet`) and `Flow`. Elsewhere, `Handle::open` returns
+> `NetworkForward` and `Ethernet`), `Flow` and `Socket`. Elsewhere, `Handle::open` returns
 > `Error::Unsupported`. The API may still change before version 0.1.
 
 The model is WinDivert's. You open a **handle** at a **layer**, with a filter, a priority and
@@ -155,6 +155,21 @@ of kind `PermissionDenied`. Kernel 5.10 or later with BTF is supported (tested o
   - `parent_endpoint_id` is always 0.
   - The process is the one that made the socket. It is 0 for sockets made before the handle
     opened, and for sockets accepted from such a listener.
+- **The `Socket` layer** reports bind, connect, listen, accept and close for the sockets of
+  every process. It has the same fields as `Flow`. For a connect, the local endpoint is known
+  only if the socket was bound before.
+  - With `SNIFF`, the handle only reports.
+  - Without it, the handle refuses the binds and connects its filter matches: the call fails
+    with `EPERM`, and the event is reported. With `DROP`, the call is refused and nothing is
+    reported.
+  - Linux cannot refuse a listen or an accept. A filter that can match one fails to open
+    (`Error::Unsupported`) unless it has `SNIFF`. `event in {bind connect}`, or a test of
+    `event`, keeps those events out.
+  - The kernel decides each call, so the filter must compile exactly to eBPF. It can test
+    `event`, `local.*`, `remote.*`, `protocol`, `process.pid`, `inbound`, `outbound` and
+    `loopback`, with comparisons, sets, arithmetic and the handle's constants. A test of a
+    packet field, such as `tcp`, is false. Anything else (`process.name`, `endpoint.id`,
+    `timestamp`, `random*`) fails to open without `SNIFF`.
 
 ### Where filters run
 

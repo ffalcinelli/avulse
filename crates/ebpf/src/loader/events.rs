@@ -3,16 +3,20 @@
 
 use std::fs::{self, File};
 use std::io;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 
-use avulse_filter::Layer;
-use aya::maps::RingBuf;
+use avulse_filter::{Event, Layer};
+use aya::maps::{Map, RingBuf};
 use aya::programs::{CgroupAttachMode, Program, ProgramError};
 use aya::{Ebpf, EbpfLoader};
 
-use super::{Error, Ring, aya, config_writer, drain, set_config, stats};
+use super::{
+    Error, Ring, Stats, aya, config_writer, drain, prog_load_as, set_config, stats, update,
+};
 use crate::abi::{self, Config};
+use crate::codegen::Matcher;
+use crate::facts::{SLOT_ACTION, SLOT_MATCHER};
 
 /// The event programs, built from `bpf/events.bpf.c`.
 pub static EVENTS_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/events.bpf.o"));
@@ -28,7 +32,82 @@ const PROGRAMS: &[(&str, &[Layer])] = &[
     ("avulse_ev_sockops", &[Layer::Flow, Layer::Socket]),
     ("avulse_ev_egress", &[Layer::Flow]),
     ("avulse_ev_ingress", &[Layer::Flow]),
+    // Tail-called, never attached.
+    ("avulse_ev_act_connect4", &[]),
+    ("avulse_ev_act_connect6", &[]),
+    ("avulse_ev_act_bind4", &[]),
+    ("avulse_ev_act_bind6", &[]),
 ];
+
+const BPF_PROG_TYPE_CGROUP_SOCK: u32 = 9;
+const BPF_PROG_TYPE_CGROUP_SOCK_ADDR: u32 = 18;
+const BPF_CGROUP_INET4_CONNECT: u32 = 10;
+const BPF_CGROUP_INET6_CONNECT: u32 = 11;
+const BPF_CGROUP_INET4_POST_BIND: u32 = 12;
+const BPF_CGROUP_INET6_POST_BIND: u32 = 13;
+
+/// A kind of event program that can refuse calls: each has its own matcher
+/// ([`Events::set_matcher`]), generated for its [`event`](EventHook::event).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EventHook {
+    /// `connect` on an IPv4 socket.
+    Connect4,
+    /// `connect` on an IPv6 socket.
+    Connect6,
+    /// `bind` of an IPv4 socket.
+    Bind4,
+    /// `bind` of an IPv6 socket.
+    Bind6,
+}
+
+impl EventHook {
+    /// Every kind.
+    pub const ALL: [EventHook; 4] = [
+        EventHook::Connect4,
+        EventHook::Connect6,
+        EventHook::Bind4,
+        EventHook::Bind6,
+    ];
+
+    /// The event its matcher decides.
+    pub fn event(self) -> Event {
+        match self {
+            EventHook::Connect4 | EventHook::Connect6 => Event::SocketConnect,
+            EventHook::Bind4 | EventHook::Bind6 => Event::SocketBind,
+        }
+    }
+
+    /// Its program array, its action program, and the program and attach types of its
+    /// matcher.
+    fn parts(self) -> (&'static str, &'static str, u32, u32) {
+        match self {
+            EventHook::Connect4 => (
+                "avulse_progs_connect4",
+                "avulse_ev_act_connect4",
+                BPF_PROG_TYPE_CGROUP_SOCK_ADDR,
+                BPF_CGROUP_INET4_CONNECT,
+            ),
+            EventHook::Connect6 => (
+                "avulse_progs_connect6",
+                "avulse_ev_act_connect6",
+                BPF_PROG_TYPE_CGROUP_SOCK_ADDR,
+                BPF_CGROUP_INET6_CONNECT,
+            ),
+            EventHook::Bind4 => (
+                "avulse_progs_bind4",
+                "avulse_ev_act_bind4",
+                BPF_PROG_TYPE_CGROUP_SOCK,
+                BPF_CGROUP_INET4_POST_BIND,
+            ),
+            EventHook::Bind6 => (
+                "avulse_progs_bind6",
+                "avulse_ev_act_bind6",
+                BPF_PROG_TYPE_CGROUP_SOCK,
+                BPF_CGROUP_INET6_POST_BIND,
+            ),
+        }
+    }
+}
 
 /// The event programs of one handle, their maps and their links. Dropping it detaches the
 /// programs; so does the end of the process, which closes the links.
@@ -37,6 +116,8 @@ pub struct Events {
     /// `None` once [`take_ring`](Events::take_ring) took it.
     ring: Option<Ring>,
     have_task: bool,
+    /// The matchers in the program arrays.
+    matchers: Vec<OwnedFd>,
 }
 
 /// The mount point of the cgroup v2 hierarchy, where the programs attach.
@@ -123,10 +204,47 @@ impl Events {
             .take_map("avulse_ring")
             .ok_or_else(|| Error::Aya("no map avulse_ring".into()))?;
         let ring = RingBuf::try_from(ring).map_err(aya("avulse_ring"))?;
-        Ok(Events {
+        let events = Events {
             ebpf,
             ring: Some(ring),
             have_task,
+            matchers: Vec::new(),
+        };
+        for hook in EventHook::ALL {
+            let (progs, action, ..) = hook.parts();
+            update(events.map_fd(progs)?, SLOT_ACTION, events.prog_fd(action)?)?;
+        }
+        Ok(events)
+    }
+
+    fn prog_fd(&self, name: &str) -> Result<RawFd, Error> {
+        let prog = self
+            .ebpf
+            .program(name)
+            .ok_or_else(|| Error::Aya(format!("no program {name}")))?;
+        Ok(prog.fd().map_err(aya(name))?.as_fd().as_raw_fd())
+    }
+
+    fn map_fd(&self, name: &str) -> Result<RawFd, Error> {
+        match self.ebpf.map(name) {
+            Some(Map::ProgramArray(d) | Map::PerCpuArray(d)) => Ok(d.fd().as_fd().as_raw_fd()),
+            _ => Err(Error::Aya(format!("no map {name}"))),
+        }
+    }
+
+    /// Loads `m`, generated for [`hook.event()`](EventHook::event) at the SOCKET layer, as the
+    /// matcher of `hook`'s programs. Until it is set, those programs let calls through. The
+    /// error is [`Error::Rejected`] when the verifier refuses it.
+    pub fn set_matcher(&mut self, hook: EventHook, m: &Matcher) -> Result<Stats, Error> {
+        let (progs, _, prog_type, attach) = hook.parts();
+        let progs = self.map_fd(progs)?;
+        let insns = m.with_fds(self.map_fd("avulse_ev_state")?, progs);
+        let (fd, log) = prog_load_as(&insns, prog_type, attach)?;
+        update(progs, SLOT_MATCHER, fd.as_raw_fd())?;
+        self.matchers.push(fd);
+        Ok(Stats {
+            insns: insns.len(),
+            log,
         })
     }
 

@@ -60,9 +60,15 @@ impl Backend for Linux {
         for layer in [Layer::Network, Layer::NetworkForward, Layer::Ethernet] {
             c.layers[layer as usize] = packets;
         }
-        // Events are reported, never held.
+        // Flows are reported, never held; binds and connects can be refused.
         c.layers[Layer::Flow as usize] = LayerSupport {
             open: true,
+            ..LayerSupport::default()
+        };
+        c.layers[Layer::Socket as usize] = LayerSupport {
+            open: true,
+            divert: true,
+            drop: true,
             ..LayerSupport::default()
         };
         c
@@ -73,10 +79,8 @@ impl Backend for Linux {
             Layer::Network | Layer::NetworkForward | Layer::Ethernet => {
                 Ok(Box::new(Handle::open(spec)?))
             }
-            Layer::Flow => Ok(Box::new(events::EventHandle::open(spec)?)),
-            Layer::Socket | Layer::Reflect => Err(Error::Unsupported(
-                "the SOCKET and REFLECT layers (Phase 3)",
-            )),
+            Layer::Flow | Layer::Socket => Ok(Box::new(events::EventHandle::open(spec)?)),
+            Layer::Reflect => Err(Error::Unsupported("the REFLECT layer (Phase 3)")),
         }
     }
 
@@ -312,6 +316,7 @@ fn set_matcher(classifier: &mut Classifier, spec: &Spec<'_>) -> Result<(bool, bo
         layer: spec.layer,
         priority: spec.priority,
         ifindex: &resolve,
+        event: None,
     };
     let ir = spec.filter.ir();
     let candidates = [

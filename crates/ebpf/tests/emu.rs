@@ -444,3 +444,51 @@ fn a_constant_on_the_left_is_mirrored() {
         }
     }
 }
+
+/// At the SOCKET layer, the matchers of `connect` and `bind` agree with the evaluator on every
+/// event, run on the facts the event programs write (`facts::ev::from_record`).
+#[test]
+fn event_matchers_agree_with_the_evaluator() {
+    use avulse_ebpf::facts::ev;
+    use avulse_filter::Event;
+    let records = common::event_records();
+    for src in common::EVENT_FILTERS {
+        let filter = Filter::compile(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+        let (mut hit, mut miss) = (0, 0);
+        for (event, n) in [(Event::SocketConnect, 4), (Event::SocketBind, 3)] {
+            let env = Env {
+                event: Some(event),
+                ..common::env(Layer::Socket)
+            };
+            let m = codegen::compile(filter.ir(), &env)
+                .unwrap_or_else(|e| panic!("{src} ({event:?}): {e}"));
+            assert!(m.exact());
+            let insns = m.with_fds(FACTS_FD, PROGS_FD);
+            emu::check_shape(&insns);
+            for r in records.iter().filter(|r| r.event == n) {
+                let want = filter.matches(&Packet::parse(&[], Link::Ip), &common::event_meta(r));
+                let got = emu::run_event(&insns, &ev::from_record(r));
+                assert_eq!(got, Outcome::Verdict(want), "{src} on {r:?}");
+                if want { hit += 1 } else { miss += 1 }
+            }
+        }
+        assert!(hit > 0 && miss > 0, "`{src}` does not split the events");
+    }
+    let env = Env {
+        event: Some(Event::SocketConnect),
+        ..common::env(Layer::Socket)
+    };
+    for src in common::EVENT_UNSUPPORTED {
+        let filter = Filter::compile(src).unwrap();
+        assert!(
+            matches!(
+                codegen::compile(filter.ir(), &env),
+                Err(Error::Unsupported(_))
+            ),
+            "{src}"
+        );
+    }
+    // Without its event, a matcher cannot decide `event`.
+    let filter = Filter::compile("event == connect").unwrap();
+    assert!(codegen::compile(filter.ir(), &common::env(Layer::Socket)).is_err());
+}
