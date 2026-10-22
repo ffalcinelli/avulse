@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-22, Phase 2 done: Steps 1 to 13 and Spikes A and B, Spike C partly done; Phase 3: Step 14 done, next Step 15)
+## Status (2026-10-22, Phase 2 done: Steps 1 to 13 and Spikes A and B, Spike C partly done; Phase 3: Steps 14 and 15 done, next Step 16)
 
 | Area | State |
 | --- | --- |
@@ -18,7 +18,7 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `crates/ebpf` (`avulse-ebpf`) | Step 10: the generator covers metadata (through `Env`: layer, priority, interface names), IPv6 and MAC addresses, VLAN fields, TCP options (`avulse_options`, behind `CFG_TCP_OPTIONS`), byte order and `contains` in headers, arithmetic, field-to-field comparisons, set trees, `xor` through a slot; `superset`/`compile_superset` widen the rest, and `Matcher::exact` says when user space filters again. Step 9: `avulse_ingress` redirects the inbound packets user space injects through `lo` (`MARK_REDIRECT`, `PRIO_INJECTED`); test runs return the context (`Classifier::run_ctx`). Step 8: the loader attaches through Netlink (`Classifier::attach`, `Attachment::detach`) and opens raw BPF hash maps (`HashMap`, for the registry). Step 7: the capture side of the static TC programs (`avulse_ingress`/`avulse_egress` → matcher → `avulse_act`): per-handle configuration, metadata facts, ring buffer records, divert/sniff/drop, marks, loopback, NETWORK/FORWARD/ETHERNET selection, fragments, the forwarding check, fail-open; `abi.rs` mirrors `bpf/abi.h`. Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Step 14: the event programs of the FLOW and SOCKET layers (`bpf/events.bpf.c`, `loader::Events`, records in `abi::EventRecord`). Needs clang on Linux. |
 | `spikes/macos` | Spike C (partial, `docs/spikes/macos.md`): probes of bpf, raw-socket and `utun` injection, pf and the filter engine's speed, and a `NEFilterPacketProvider` system extension around a Rust static library; run on GitHub's macOS runners by `.github/workflows/macos-spike.yml` (on changes to the spike). Outside the workspace. |
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
-| `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
+| `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Step 15: the FLOW layer (`events.rs`). Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
 | `crates/{capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
 | CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
@@ -1155,7 +1155,41 @@ assert its size.
 **Acceptance.** The verifier accepts every program on 5.15 and 6.8, and the records of a TCP
 connect, a TCP accept, a UDP exchange and a bind match what the test did.
 
-### Step 15: The FLOW layer
+### Step 15: The FLOW layer (done)
+
+**Outcome.** `crates/avulse/src/backend/linux/events.rs`: FLOW handles open on Linux
+(`capabilities()` reports `open` only: events are reported, never held). `tests/capture.rs` (40
+tests) and `tests/kernel.rs` (19) pass on 6.8 and 5.15.
+
+- **The handle** loads `Events`, writes the configuration (layer FLOW, a fresh heartbeat), links
+  the programs to the cgroup root (`Error::Unsupported` without cgroup v2), registers in the
+  registry (no TC filters: the links go with the process, so `cleanup` only removes the entry),
+  and joins the heartbeat.
+- **Receiving.** The receive side (`Rx<R>`: the queue, the readiness eventfd, epoll and the
+  `recv` loop) is now generic over its ring and shared with the packet handle.
+- **Addresses.** Each record becomes an address, with no packet: the event, `outbound`,
+  `loopback` (either address), `ipv6`, `sniffed`, and `Address::flow`.
+- **Filtering.** The filter runs in user space, on an empty packet, with `Meta::process_name` from
+  the record's `comm`.
+- **UDP flows** (`UdpFlows`): a handle remembers the UDP flows each socket established (at most
+  65,536), and turns the socket's `EV_RELEASED` record into a DELETED event for each of them, with
+  the release's timestamp.
+- **The direction of a TCP flow** is kept in the socket's storage when it is established, so that
+  its DELETED event says `outbound` too (the state callback cannot tell).
+- **The process of a socket made before the handle opened is unknown (0).** That includes the
+  sockets accepted from such a listener, since storage is cloned from the listener. The later
+  callbacks (sockops, packets) run in softirq, not as the owner. Documented in the guide.
+  `process.pid` filters miss those sockets.
+- **Tests** (`tests/capture.rs`):
+  - `flow_tcp`: outbound to the peer and inbound from the namespace (bash's `/dev/tcp`), with
+    endpoints, ports, the PID and direction, and a `process.pid` filter;
+  - `flow_udp`: established once over three exchanges, deleted when the socket closes;
+  - `flow_loopback`: both ends over IPv4 and IPv6;
+  - `flow_shutdown_and_dead_owner`: what is queued is delivered after `shutdown`, then
+    `Error::Shutdown`; a killed owner's entry is reaped.
+  - Unit tests: event records to addresses and filters, and `UdpFlows`.
+
+The original plan of the step follows.
 
 **Where.** `backend/linux/events.rs` (open, receive, close). The `Opened` handle for events
 shares the queue (`queue.rs`), the heartbeat and the registry with the packet layers.
@@ -1287,7 +1321,7 @@ pre-release tag) passes, then the v0.1.0 tag publishes. The guide and README say
 - [x] Step 13: devices without an Ethernet header (tun, WireGuard, PPP, IP tunnels) at the NETWORK
   layers
 - [x] Step 14: event programs and records
-- [ ] Step 15: FLOW layer
+- [x] Step 15: FLOW layer
 - [ ] Step 16: SOCKET layer, with blocking
 - [ ] Step 17: `process.name` and REFLECT
 - [ ] Step 18: API v0.1 and the C ABI (`libavulse.so`)

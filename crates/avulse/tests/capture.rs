@@ -822,9 +822,14 @@ fn dead_owners() {
 
 /// Runs [`owner`] in a child process, and waits until its handle is open.
 fn spawn_owner() -> Child {
+    spawn_owner_of("network")
+}
+
+/// [`spawn_owner`], with a handle of `kind` (`network` or `flow`).
+fn spawn_owner_of(kind: &str) -> Child {
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "owner", "--nocapture", "--test-threads=1"])
-        .env("AVULSE_OWNER", "1")
+        .env("AVULSE_OWNER", kind)
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
@@ -845,7 +850,10 @@ fn owner() {
     if std::env::var_os("AVULSE_OWNER").is_none() {
         return;
     }
-    let _h = open(PINGS, Layer::Network, 0, Flags::NONE);
+    let _h = match std::env::var("AVULSE_OWNER").as_deref() {
+        Ok("flow") => open_flow("true"),
+        _ => open(PINGS, Layer::Network, 0, Flags::NONE),
+    };
     println!("handle open");
     loop {
         thread::sleep(Duration::from_secs(60));
@@ -1916,4 +1924,184 @@ fn ipip_tunnel() {
     assert_eq!((requests, replies), (3, 3), "{got:?}");
     assert!(got.iter().all(|(_, a)| a.if_idx == ifindex(IPIP_IF)));
     bulk_both_ways(&h, IPIP_PEER);
+}
+
+// The FLOW layer (Step 15).
+
+fn open_flow(filter: &str) -> Handle {
+    Handle::open(filter, Layer::Flow, 0, Flags::SNIFF | Flags::RECV_ONLY)
+        .unwrap_or_else(|e| panic!("opening `{filter}` at FLOW: {e}"))
+}
+
+/// The events a FLOW handle received, as (event, outbound) pairs.
+fn flow_kinds(got: &[(Vec<u8>, Address)]) -> Vec<(avulse::Event, bool)> {
+    got.iter().map(|(_, a)| (a.event, a.outbound)).collect()
+}
+
+/// Checks that `got` is one flow, established then deleted, of this process.
+fn one_flow(got: &[(Vec<u8>, Address)], outbound: bool) -> avulse::Flow {
+    use avulse::Event::{FlowDeleted, FlowEstablished};
+    assert_eq!(
+        flow_kinds(got),
+        [(FlowEstablished, outbound), (FlowDeleted, outbound)],
+        "{got:#?}"
+    );
+    let (est, del) = (&got[0].1, &got[1].1);
+    assert_eq!(est.flow, del.flow);
+    assert!(est.timestamp <= del.timestamp && del.timestamp <= now_ns());
+    for (p, a) in got {
+        assert!(p.is_empty());
+        assert_eq!(a.layer, Layer::Flow);
+        assert!(a.sniffed && !a.impostor);
+        assert_eq!(a.flow.process_id, std::process::id());
+    }
+    est.flow
+}
+
+/// TCP flows to the peer and from it, each established and deleted once, with their endpoints
+/// and process; a filter on the process sees this process's flows only.
+#[test]
+fn flow_tcp() {
+    if !enabled() {
+        return;
+    }
+    let _veth = Veth::new();
+    let _peer = PeerServer::start();
+    let port = 9004;
+    let out = open_flow(&format!(
+        "remote.port == {SINK_PORT} and remote.addr == {PEER}"
+    ));
+    let inbound = open_flow(&format!("local.port == {port}"));
+    let mine = open_flow(&format!(
+        "process.pid == {} and protocol == 6 and remote.addr == {PEER}",
+        std::process::id()
+    ));
+    // After the handles: the process of a socket made before them is unknown.
+    let listener = TcpListener::bind((HOST, port)).unwrap();
+
+    let mut s = TcpStream::connect((PEER, SINK_PORT)).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let client_port = s.local_addr().unwrap().port();
+    s.write_all(b"hello").unwrap();
+    s.shutdown(NetShutdown::Write).unwrap();
+    s.read_to_string(&mut String::new()).unwrap();
+    drop(s);
+    // From the namespace, with bash's /dev/tcp.
+    let client = thread::spawn(move || {
+        sh(&format!(
+            "ip netns exec {NETNS} bash -c 'exec 3<>/dev/tcp/{HOST}/{port}; echo hi >&3'"
+        ))
+    });
+    let (mut accepted, peer) = listener.accept().unwrap();
+    accepted.read_to_string(&mut String::new()).unwrap();
+    drop(accepted);
+    assert!(client.join().unwrap());
+
+    let f = one_flow(&drain(&out), true);
+    assert_eq!(
+        (f.local_addr(), f.local_port),
+        (HOST.parse::<std::net::IpAddr>().unwrap(), client_port)
+    );
+    assert_eq!(
+        (f.remote_addr(), f.remote_port),
+        (PEER.parse::<std::net::IpAddr>().unwrap(), SINK_PORT)
+    );
+    assert_eq!(f.protocol, 6);
+    assert_ne!(f.endpoint_id, 0);
+    let f = one_flow(&drain(&inbound), false);
+    assert_eq!((f.local_port, f.remote_port), (port, peer.port()));
+    assert_eq!(f.remote_addr(), PEER.parse::<std::net::IpAddr>().unwrap());
+    assert_eq!(drain(&mine).len(), 4);
+}
+
+/// A UDP flow is established by its first datagram, once, and deleted when its socket closes.
+#[test]
+fn flow_udp() {
+    use avulse::Event::{FlowDeleted, FlowEstablished};
+    if !enabled() {
+        return;
+    }
+    let _veth = Veth::new();
+    let _peer = PeerServer::start();
+    let h = open_flow(&format!("protocol == 17 and remote.port == {ECHO_PORT}"));
+    let s = udp_socket(&format!("{HOST}:0"));
+    let local = s.local_addr().unwrap().port();
+    for _ in 0..3 {
+        s.send_to(b"ping", (PEER, ECHO_PORT)).unwrap();
+        s.recv_from(&mut [0; 16]).expect("the echo");
+    }
+    let got = drain(&h);
+    assert_eq!(flow_kinds(&got), [(FlowEstablished, true)], "{got:#?}");
+    drop(s);
+    let ended = drain(&h);
+    assert_eq!(flow_kinds(&ended), [(FlowDeleted, true)], "{ended:#?}");
+    let (est, del) = (got[0].1.flow, ended[0].1.flow);
+    assert_eq!(est, del);
+    assert_eq!((est.local_port, est.protocol), (local, 17));
+    assert_eq!(est.process_id, std::process::id());
+}
+
+/// Loopback flows over IPv4 and IPv6: both ends, each with its own endpoint.
+#[test]
+fn flow_loopback() {
+    use avulse::Event::{FlowDeleted, FlowEstablished};
+    if !enabled() {
+        return;
+    }
+    for host in ["127.0.0.1", "::1"] {
+        let listener = TcpListener::bind((host, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let h = open_flow(&format!("local.port == {port} or remote.port == {port}"));
+        let s = TcpStream::connect((host, port)).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        drop((s, accepted));
+        let got = drain(&h);
+        let mut kinds = flow_kinds(&got);
+        kinds.sort_by_key(|&(e, o)| (e as u8, o));
+        assert_eq!(
+            kinds,
+            [
+                (FlowEstablished, false),
+                (FlowEstablished, true),
+                (FlowDeleted, false),
+                (FlowDeleted, true)
+            ],
+            "{host}: {got:#?}"
+        );
+        assert!(
+            got.iter()
+                .all(|(_, a)| a.loopback && a.ipv6 == (host == "::1"))
+        );
+        let mut endpoints: Vec<_> = got.iter().map(|(_, a)| a.flow.endpoint_id).collect();
+        endpoints.sort();
+        endpoints.dedup();
+        assert_eq!(endpoints.len(), 2);
+    }
+}
+
+/// A FLOW handle shut down delivers what it has, then fails; one whose owner dies is reaped.
+#[test]
+fn flow_shutdown_and_dead_owner() {
+    if !enabled() {
+        return;
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let h = open_flow(&format!("local.port == {port}"));
+    let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let _accepted = listener.accept().unwrap();
+    thread::sleep(Duration::from_millis(200));
+    h.shutdown(Shutdown::Recv).unwrap();
+    let mut buf = [0; 16];
+    let (n, a) = h.recv(&mut buf).unwrap();
+    assert_eq!((n, a.event), (0, avulse::Event::FlowEstablished));
+    drop(s);
+    assert!(matches!(h.recv(&mut buf), Err(Error::Shutdown)));
+    h.close().unwrap();
+
+    let mut child = spawn_owner_of("flow");
+    // SAFETY: plain system call.
+    unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
+    child.wait().unwrap();
+    assert!(avulse::cleanup().unwrap() >= 1);
 }

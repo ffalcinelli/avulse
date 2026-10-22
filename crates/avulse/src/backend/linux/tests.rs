@@ -2,14 +2,17 @@
 //! registry's entries, the TC priorities, and how packets are sent back. `tests/capture.rs` runs
 //! the rest, as root, in a VM.
 
-use avulse_ebpf::abi::{RECORD_HEADER, Record};
+use std::net::{Ipv4Addr, Ipv6Addr};
+
+use avulse_ebpf::abi::{EV_OUTBOUND, EV_RELEASED, EventRecord, RECORD_HEADER, Record};
 use avulse_ebpf::facts::{
     F_ETH, F_ICMP, F_IPV4, F_IPV6, M_IMPOSTOR, M_OUTBOUND, M_SNIFFED, M_VLAN, M_VLAN_AD,
 };
 use avulse_ebpf::loader::{Attachment, Hook};
-use avulse_filter::Layer;
-use avulse_proto::{Link, checksum};
+use avulse_filter::{Event, Filter, Layer};
+use avulse_proto::{Link, Packet, checksum};
 
+use super::events::{self, UdpFlows};
 use super::queue::Queue;
 use super::record::{self, Ctx, Entry};
 use super::registry;
@@ -573,4 +576,104 @@ fn gso_headers() {
     let mut frag = tcp_packet(false, 100);
     frag[6] = 0x20;
     assert_eq!(send::gso(&mut frag, 0, 1500, 0), None);
+}
+
+/// An event record of a TCP connection from 10.0.0.1:40000 to 10.0.0.2:443.
+fn flow_record(event: Event, flags: u8) -> EventRecord {
+    EventRecord {
+        timestamp: 77,
+        endpoint: 0xc00c1e,
+        pid: 4242,
+        event: event as u8,
+        protocol: 6,
+        family: 4,
+        flags,
+        local_port: 40000,
+        remote_port: 443,
+        local_addr: Ipv4Addr::new(10, 0, 0, 1).to_ipv6_mapped().octets(),
+        remote_addr: Ipv4Addr::new(10, 0, 0, 2).to_ipv6_mapped().octets(),
+        comm: *b"curl\0\0\0\0\0\0\0\0\0\0\0\0",
+        ..EventRecord::default()
+    }
+}
+
+#[test]
+fn event_addresses() {
+    let r = flow_record(Event::FlowEstablished, EV_OUTBOUND);
+    let a = events::address(&r, Layer::Flow, true).unwrap();
+    assert_eq!(
+        (a.layer, a.event, a.timestamp),
+        (Layer::Flow, Event::FlowEstablished, 77)
+    );
+    assert!(a.outbound && a.sniffed && !a.loopback && !a.ipv6);
+    let f = a.flow;
+    assert_eq!(
+        (f.endpoint_id, f.process_id, f.protocol),
+        (0xc00c1e, 4242, 6)
+    );
+    assert_eq!((f.local_port, f.remote_port), (40000, 443));
+    assert_eq!(f.local_addr(), Ipv4Addr::new(10, 0, 0, 1));
+    assert_eq!(f.remote_addr(), Ipv4Addr::new(10, 0, 0, 2));
+
+    // What filters at this layer see: no packet, the flow's endpoints and process.
+    let mut meta = a.meta();
+    meta.process_name = r.comm();
+    let matches = |src: &str| {
+        Filter::compile(src)
+            .unwrap()
+            .matches(&Packet::parse(&[], Link::Ip), &meta)
+    };
+    assert!(matches(
+        "event == established and outbound and remote.port == 443"
+    ));
+    assert!(matches(
+        "local.addr == 10.0.0.1 and remote.addr in {10.0.0.0/8}"
+    ));
+    assert!(matches("process.pid == 4242 and protocol == 6"));
+    assert!(!matches("tcp") && !matches("ip"));
+    assert!(!matches("event == deleted"));
+
+    // Loopback either way, IPv6, an unknown event.
+    let mut r6 = r;
+    r6.family = 6;
+    r6.remote_addr = Ipv6Addr::LOCALHOST.octets();
+    let a = events::address(&r6, Layer::Flow, true).unwrap();
+    assert!(a.loopback && a.ipv6);
+    r6.event = 99;
+    assert!(events::address(&r6, Layer::Flow, true).is_none());
+}
+
+#[test]
+fn udp_flows_end_with_their_socket() {
+    let mut udp = UdpFlows::default();
+    let flow = |remote_port: u16| {
+        let mut r = flow_record(Event::FlowEstablished, 0);
+        r.protocol = 17;
+        r.remote_port = remote_port;
+        r
+    };
+    for port in [53, 123] {
+        assert_eq!(udp.events(flow(port)), [flow(port)]);
+    }
+    // Another socket's flow, and a TCP one, which the kernel ends on its own.
+    let mut other = flow(53);
+    other.endpoint = 1;
+    assert_eq!(udp.events(other).len(), 1);
+    let tcp = flow_record(Event::FlowEstablished, EV_OUTBOUND);
+    assert_eq!(udp.events(tcp), [tcp]);
+
+    let mut release = flow_record(Event::FlowDeleted, EV_RELEASED);
+    release.protocol = 17;
+    release.timestamp = 99;
+    let ended = udp.events(release);
+    assert_eq!(ended.len(), 2);
+    for (e, port) in ended.iter().zip([53, 123]) {
+        assert_eq!(
+            (e.event, e.timestamp, e.flags),
+            (Event::FlowDeleted as u8, 99, 0)
+        );
+        assert_eq!((e.endpoint, e.remote_port), (0xc00c1e, port));
+    }
+    // Once: the socket's flows are forgotten.
+    assert_eq!(udp.events(release), []);
 }

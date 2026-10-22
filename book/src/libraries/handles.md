@@ -1,8 +1,8 @@
 # Handles and addresses
 
 > **Preview.** Only Linux has a backend so far, for the packet layers (`Network`,
-> `NetworkForward` and `Ethernet`). Elsewhere, `Handle::open` returns `Error::Unsupported`. The API
-> may still change before version 0.1.
+> `NetworkForward` and `Ethernet`) and `Flow`. Elsewhere, `Handle::open` returns
+> `Error::Unsupported`. The API may still change before version 0.1.
 
 The model is WinDivert's. You open a **handle** at a **layer**, with a filter, a priority and
 flags. It receives the packets or events that the filter matches, each with an **address**. At
@@ -144,6 +144,17 @@ of kind `PermissionDenied`. Kernel 5.10 or later with BTF is supported (tested o
   every packet within 3 seconds (a heartbeat stops). The next `Handle::open` removes them, and so
   does `avulse cleanup` (or `avulse::cleanup()`). Open handles are listed in a registry pinned at
   `/sys/fs/bpf/avulse/`.
+- **The `Flow` layer** reports TCP and UDP flows of every process (cgroup v2 must be mounted).
+  - A TCP flow is established when its handshake completes, and deleted when it closes.
+    `outbound` says that this host opened it.
+  - A UDP flow is established by the first datagram a socket sends to, or receives from, an
+    address and port. It is deleted when the socket closes.
+  - The events have no packet, so filters test `event`, `outbound`, `local.*`, `remote.*`,
+    `protocol`, `process.pid`, `process.name` and `endpoint.id`. `ip`, `tcp` and the other
+    protocol fields are false, as in WinDivert.
+  - `parent_endpoint_id` is always 0.
+  - The process is the one that made the socket. It is 0 for sockets made before the handle
+    opened, and for sockets accepted from such a listener.
 
 ### Where filters run
 

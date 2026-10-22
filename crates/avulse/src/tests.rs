@@ -456,11 +456,17 @@ fn the_linux_backend() {
             "{layer:?}"
         );
     }
-    assert_eq!(capabilities().layer(Layer::Flow), LayerSupport::default());
-    // Refused before anything is loaded, so this needs no privileges.
+    let flow = capabilities().layer(Layer::Flow);
+    assert!(flow.open && !flow.divert && !flow.drop && !flow.inject && !flow.modify);
+    assert_eq!(capabilities().layer(Layer::Socket), LayerSupport::default());
+    // Refused before anything is loaded, so these need no privileges.
     assert!(matches!(
-        Handle::open("tcp", Layer::Flow, 0, Flags::SNIFF | Flags::RECV_ONLY),
+        Handle::open("true", Layer::Socket, 0, Flags::SNIFF | Flags::RECV_ONLY),
         Err(Error::Unsupported(_))
+    ));
+    assert!(matches!(
+        Handle::open("true", Layer::Flow, 0, Flags::RECV_ONLY),
+        Err(Error::InvalidArgument(_))
     ));
     assert!(matches!(
         Handle::open("tcp", Layer::Network, 0, Flags::SNIFF | Flags::DROP),

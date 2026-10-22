@@ -10,6 +10,7 @@
 //! Matching packets go to a ring buffer, which `recv` drains into a queue; `send` injects
 //! packets through raw and `AF_PACKET` sockets (`send.rs`).
 
+mod events;
 mod heartbeat;
 mod queue;
 mod record;
@@ -59,6 +60,11 @@ impl Backend for Linux {
         for layer in [Layer::Network, Layer::NetworkForward, Layer::Ethernet] {
             c.layers[layer as usize] = packets;
         }
+        // Events are reported, never held.
+        c.layers[Layer::Flow as usize] = LayerSupport {
+            open: true,
+            ..LayerSupport::default()
+        };
         c
     }
 
@@ -67,8 +73,9 @@ impl Backend for Linux {
             Layer::Network | Layer::NetworkForward | Layer::Ethernet => {
                 Ok(Box::new(Handle::open(spec)?))
             }
-            _ => Err(Error::Unsupported(
-                "the FLOW, SOCKET and REFLECT layers (Phase 3)",
+            Layer::Flow => Ok(Box::new(events::EventHandle::open(spec)?)),
+            Layer::Socket | Layer::Reflect => Err(Error::Unsupported(
+                "the SOCKET and REFLECT layers (Phase 3)",
             )),
         }
     }
@@ -108,7 +115,7 @@ struct Handle {
     filter: Option<Filter>,
     /// User space drops what `filter` matches (`DROP` with an inexact matcher).
     drop: bool,
-    rx: Rx,
+    rx: Rx<Ring>,
     tx: Tx,
     shut_send: AtomicBool,
     /// The heartbeat and configuration. `SEND_ONLY` handles capture nothing (their programs are
@@ -123,10 +130,10 @@ struct Handle {
     tc_priority: Option<u16>,
 }
 
-/// The receive side.
-struct Rx {
-    /// The ring buffer, and what draining it needs. Its lock serializes the readers.
-    ring: Mutex<Option<Ring>>,
+/// The receive side: `R` is the ring buffer, with what draining it needs.
+struct Rx<R> {
+    /// The ring buffer. Its lock serializes the readers.
+    ring: Mutex<Option<R>>,
     queue: Mutex<QueueState>,
     /// Set while `recv` would not block: the queue has packets, or the handle is shut down.
     ready: sys::Flag,
@@ -392,8 +399,8 @@ fn targets(all: Vec<sys::Interface>, names: &[String], layer: Layer) -> Result<T
     Ok(Targets { list, lo_selected })
 }
 
-impl Rx {
-    fn new(params: [u64; 3]) -> io::Result<Rx> {
+impl<R> Rx<R> {
+    fn new(params: [u64; 3]) -> io::Result<Rx<R>> {
         let ready = sys::Flag::new()?;
         let epoll = sys::Epoll::new()?;
         epoll.add(ready.as_fd())?;
@@ -407,6 +414,72 @@ impl Rx {
             ready,
             epoll,
         })
+    }
+
+    /// Queues what `drain` took from the ring, and wakes the readers.
+    fn push(&self, entries: Vec<Entry>) {
+        if entries.is_empty() {
+            return;
+        }
+        let mut q = lock(&self.queue);
+        for e in entries {
+            q.queue.push(e);
+        }
+        self.update(&mut q);
+    }
+
+    /// After a shutdown of the receive side: what is queued or in the ring is delivered, then
+    /// `recv` fails with [`Error::Shutdown`].
+    fn shut(&self) {
+        let mut q = lock(&self.queue);
+        q.shut = true;
+        self.update(&mut q);
+    }
+
+    /// Waits for a packet or an event, at most `timeout`. `drain` moves the ring's records to
+    /// the queue ([`push`](Rx::push)) and returns how many it read.
+    fn recv(
+        &self,
+        buf: &mut [u8],
+        timeout: Option<Duration>,
+        drain: impl Fn() -> usize,
+    ) -> Result<(usize, Address)> {
+        let deadline = timeout.map(|t| Instant::now() + t);
+        loop {
+            let shut = {
+                let mut q = lock(&self.queue);
+                let e = q.queue.pop(sys::now_ns());
+                self.update(&mut q);
+                if let Some(e) = e {
+                    drop(q);
+                    let n = e.data.len();
+                    let dst = buf
+                        .get_mut(..n)
+                        .ok_or(Error::BufferTooSmall { needed: n })?;
+                    dst.copy_from_slice(&e.data);
+                    return Ok((n, e.addr));
+                }
+                q.shut
+            };
+            // After a shutdown, what the ring still holds is delivered first.
+            if drain() > 0 {
+                continue;
+            }
+            if shut {
+                return Err(Error::Shutdown);
+            }
+            let wait = match deadline {
+                None => -1,
+                Some(d) => {
+                    let left = d.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(Error::Timeout);
+                    }
+                    left.as_millis().clamp(1, i32::MAX as u128) as i32
+                }
+            };
+            self.epoll.wait(wait)?;
+        }
     }
 
     /// Makes `ready` say whether `recv` would return at once.
@@ -455,13 +528,7 @@ impl Handle {
             }
             entries.push(e);
         }
-        if !entries.is_empty() {
-            let mut q = lock(&self.rx.queue);
-            for e in entries {
-                q.queue.push(e);
-            }
-            self.rx.update(&mut q);
-        }
+        self.rx.push(entries);
         n
     }
 
@@ -484,42 +551,7 @@ impl Handle {
 
 impl Opened for Handle {
     fn recv(&self, buf: &mut [u8], timeout: Option<Duration>) -> Result<(usize, Address)> {
-        let deadline = timeout.map(|t| Instant::now() + t);
-        loop {
-            let shut = {
-                let mut q = lock(&self.rx.queue);
-                let e = q.queue.pop(sys::now_ns());
-                self.rx.update(&mut q);
-                if let Some(e) = e {
-                    drop(q);
-                    let n = e.data.len();
-                    let dst = buf
-                        .get_mut(..n)
-                        .ok_or(Error::BufferTooSmall { needed: n })?;
-                    dst.copy_from_slice(&e.data);
-                    return Ok((n, e.addr));
-                }
-                q.shut
-            };
-            // After a shutdown, what the ring still holds is delivered first.
-            if self.drain() > 0 {
-                continue;
-            }
-            if shut {
-                return Err(Error::Shutdown);
-            }
-            let wait = match deadline {
-                None => -1,
-                Some(d) => {
-                    let left = d.saturating_duration_since(Instant::now());
-                    if left.is_zero() {
-                        return Err(Error::Timeout);
-                    }
-                    left.as_millis().clamp(1, i32::MAX as u128) as i32
-                }
-            };
-            self.rx.epoll.wait(wait)?;
-        }
+        self.rx.recv(buf, timeout, || self.drain())
     }
 
     fn send(&self, packet: &[u8], addr: &Address) -> Result<usize> {
@@ -537,9 +569,7 @@ impl Opened for Handle {
                 beat.update(|c| c.flags |= abi::CFG_SHUTDOWN)
                     .map_err(io_error)?;
             }
-            let mut q = lock(&self.rx.queue);
-            q.shut = true;
-            self.rx.update(&mut q);
+            self.rx.shut();
         }
         if matches!(how, Shutdown::Send | Shutdown::Both) {
             self.shut_send.store(true, Ordering::Release);

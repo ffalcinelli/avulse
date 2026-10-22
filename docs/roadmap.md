@@ -252,6 +252,9 @@ cleanup, and exact in-kernel match versus interpreter (`BPF_PROG_TEST_RUN`).
 1. Port `ebpfdivert/src/ebpfdivert_events.bpf.c` for FLOW and SOCKET, add `process.name` (comm), and REFLECT.
 2. Freeze the Rust API and C ABI as 0.x, publish `libavulse.so` (static, manylinux_2_28).
 
+Progress (steps in `docs/implementation-plan.md`): the event programs (Step 14) and the FLOW layer (Step 15) are
+done.
+
 Exit: Linux release v0.1.
 
 ### Phase 4: WinDivert compat shim on Linux and conformance

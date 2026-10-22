@@ -63,7 +63,8 @@ struct sock_info {
     __u16 local_port;
     __u16 remote_port;
     __u8 family;
-    __u8 pad[3];
+    __u8 flags; /* EV_OUTBOUND: the flow's direction, for its DELETED event */
+    __u8 pad[2];
     __u8 local_addr[16];
     __u8 remote_addr[16];
     char comm[16];
@@ -337,7 +338,8 @@ int avulse_ev_release(struct bpf_sock *sk)
     return 1;
 }
 
-static __always_inline void from_sockops(struct avulse_event *e, struct bpf_sock_ops *skops)
+static __always_inline struct sock_info *from_sockops(struct avulse_event *e,
+                                                      struct bpf_sock_ops *skops)
 {
     struct sock_info *info;
     int v6 = skops->family == AF_INET6;
@@ -358,6 +360,7 @@ static __always_inline void from_sockops(struct avulse_event *e, struct bpf_sock
     info = info_of(skops->sk, 1);
     owner(e, info);
     remember(info, e);
+    return info;
 }
 
 /* TCP: LISTEN and ACCEPT (SOCKET), ESTABLISHED and DELETED (FLOW). */
@@ -366,6 +369,7 @@ int avulse_ev_sockops(struct bpf_sock_ops *skops)
 {
     struct avulse_config *cfg = live();
     struct avulse_event e = {};
+    struct sock_info *info;
     __u32 op = skops->op;
     int socket;
 
@@ -385,13 +389,15 @@ int avulse_ev_sockops(struct bpf_sock_ops *skops)
     case BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB:
         if (socket && op != BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB)
             return 1;
-        from_sockops(&e, skops);
+        info = from_sockops(&e, skops);
         if (socket) {
             e.event = EVENT_SOCKET_ACCEPT;
         } else {
             e.event = EVENT_FLOW_ESTABLISHED;
             if (op == BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB)
                 e.flags = EV_OUTBOUND;
+            if (info)
+                info->flags = e.flags;
             /* Ask for the state changes, to report the end of the flow. */
             bpf_sock_ops_cb_flags_set(skops,
                                       skops->bpf_sock_ops_cb_flags | BPF_SOCK_OPS_STATE_CB_FLAG);
@@ -400,8 +406,10 @@ int avulse_ev_sockops(struct bpf_sock_ops *skops)
     case BPF_SOCK_OPS_STATE_CB:
         if (socket || skops->args[1] != TCP_CLOSE)
             return 1;
-        from_sockops(&e, skops);
+        info = from_sockops(&e, skops);
         e.event = EVENT_FLOW_DELETED;
+        if (info)
+            e.flags = info->flags & EV_OUTBOUND;
         break;
     default:
         return 1;
