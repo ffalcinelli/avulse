@@ -257,6 +257,19 @@ const PAYLOADS: &[&[u8]] = &[
     b"0123456789abcdefghijklmnopqrstuvwxyz0123456789",
 ];
 
+/// Whether `BPF_PROG_TEST_RUN` takes `frame` as input. Since Linux 7.0 it refuses (`EINVAL`)
+/// a frame whose EtherType is IPv4 or IPv6 when the IP header after the 14-byte Ethernet header
+/// is shorter than the minimum (`bpf_prog_test_run_skb` reads it to fill the socket). The
+/// programs see such frames in real traffic too, but a test run cannot give them.
+pub fn test_runnable(frame: &[u8]) -> bool {
+    let ip = frame.len().saturating_sub(14);
+    match frame.get(12..14) {
+        Some([0x08, 0x00]) => ip >= 20,
+        Some([0x86, 0xdd]) => ip >= 40,
+        _ => frame.len() >= 14,
+    }
+}
+
 /// Well-formed frames of every kind the filters read, then the same frames cut short, with
 /// padding, and with random bytes changed. Every frame is at least 14 bytes long when
 /// `min_len` is 14 (what `BPF_PROG_TEST_RUN` accepts).

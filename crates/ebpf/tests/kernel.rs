@@ -137,7 +137,10 @@ fn kernel_agrees_with_the_evaluator() {
     let opts = abi::CFG_TCP_OPTIONS;
     tc.set_config(&config(Layer::Ethernet, abi::CFG_DROP | opts))
         .unwrap();
-    let frames = common::corpus(1, 3000, 14);
+    let frames: Vec<_> = common::corpus(1, 3000, 14)
+        .into_iter()
+        .filter(|f| common::test_runnable(f))
+        .collect();
 
     // Without a matcher every packet passes, and the facts are `Facts::from_packet`'s.
     let base = tc.stats().unwrap()[stat::NO_MATCHER];
@@ -829,7 +832,10 @@ fn tshark_filters_in_the_kernel() {
     }
     pin_to_cpu0();
     let mut tc = Classifier::load().expect("load the TC object");
-    let frames = common::corpus(12, 300, 14);
+    let frames: Vec<_> = common::corpus(12, 300, 14)
+        .into_iter()
+        .filter(|f| common::test_runnable(f))
+        .collect();
     let all = tshark_filters::AGREE
         .iter()
         .chain(tshark_filters::OUTER)
