@@ -241,8 +241,8 @@ side (Step 8: open, attach, registry, heartbeat, queue, `avulse cleanup`) and in
 `AF_PACKET` sockets, the `lo` redirect, GSO, reinjection by user-space filters) and the matcher's coverage with the
 superset fallback (Step 10: metadata, IPv6, VLAN, TCP options, arithmetic, set trees) and the ETHERNET layer
 (Step 11: ARP, VLAN and QinQ with or without offload, non-IP injection) are done, and the privileged suite (Step 12)
-passes on both VMs. **Phase 2 is done.** Devices without an Ethernet header (tun, WireGuard) come next, before
-Phase 3.
+passes on both VMs. **Phase 2 is done.** Devices without an Ethernet header (tun, WireGuard, PPP, IP tunnels) are
+supported at the NETWORK layers since Step 13. Phase 3 comes next.
 
 Exit: privileged tests pass on both Vagrant VMs, covering divert, inject, GSO, forward, ETHERNET/ARP/VLAN, crash
 cleanup, and exact in-kernel match versus interpreter (`BPF_PROG_TEST_RUN`).

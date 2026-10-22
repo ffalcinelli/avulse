@@ -3,7 +3,7 @@
 //! | Packet | Path |
 //! | --- | --- |
 //! | Loopback | A raw IP socket: routed, so that 127/8 and `::1` are not dropped as martians. |
-//! | Outbound or forwarded, with its context | `AF_PACKET` out of the interface it was captured on, behind the saved link-layer header. |
+//! | Outbound or forwarded, with its context | `AF_PACKET` out of the interface it was captured on, behind the saved link-layer header (none on devices without one: tun, WireGuard, IP tunnels). |
 //! | Outbound, without a context | A raw IP socket: routed like any local packet. |
 //! | Inbound | `AF_PACKET` on `lo`, marked `MARK_REDIRECT \| ifindex`: `lo`'s ingress program redirects it to the interface's ingress. |
 //! | ETHERNET | The frame, through `AF_PACKET`: out of the interface, or through `lo` when inbound. |
@@ -98,12 +98,18 @@ pub fn path(layer: Layer, addr: &Address, packet: &[u8], lo: u32) -> Result<Path
     }
     // The saved header applies on the interface it came from.
     let v6 = packet[0] >> 4 == 6;
-    let l2 = Ctx::decode(&addr.context)
-        .filter(|c| c.ifindex == ifindex && c.l2().len() >= ETH_LEN)
+    let ctx = Ctx::decode(&addr.context).filter(|c| c.ifindex == ifindex);
+    let l2 = ctx
+        .filter(|c| c.l2().len() >= ETH_LEN)
         .map(|c| link_header(c.l2(), v6));
     if addr.outbound || layer == Layer::NetworkForward {
         return Ok(match l2 {
             Some(l2) => Path::Out { ifindex, l2 },
+            // Captured on a device without a link-layer header: out of it, as it is.
+            None if ctx.is_some_and(|c| c.l2().is_empty()) => Path::Out {
+                ifindex,
+                l2: Vec::new(),
+            },
             None => Path::Raw,
         });
     }
@@ -315,10 +321,10 @@ impl Tx {
 
 /// A frame to send through `AF_PACKET`.
 struct Frame {
-    /// The link-layer header to put in front (empty at ETHERNET).
+    /// The link-layer header to put in front (empty at ETHERNET, and for devices without one).
     l2: Vec<u8>,
     pkt: Vec<u8>,
-    /// Where the IP header is in `pkt`.
+    /// Where the IP header is in `pkt`: 0 when there is no link-layer header at all.
     at: Option<usize>,
     /// The checksums to compute.
     fix: Updated,
@@ -362,7 +368,11 @@ impl Socks {
         frame.extend(&f.l2);
         frame.extend(&f.pkt);
         let body = &mut frame[VNET_LEN..];
-        let ethertype = u16::from_be_bytes([body[12], body[13]]);
+        let ethertype = if f.l2.is_empty() && f.at == Some(0) {
+            ethertype_ip(body[0] >> 4 == 6)
+        } else {
+            u16::from_be_bytes([body[12], body[13]])
+        };
         let mut vnet = None;
         if let Some(at) = f.at.map(|a| a + f.l2.len()) {
             let len = body.len() - at;

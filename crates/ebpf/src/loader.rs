@@ -13,6 +13,7 @@ use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
+use avulse_proto::Link;
 use aya::maps::{Array, Map, MapData, PerCpuArray, RingBuf};
 use aya::programs::links::Link as _;
 use aya::programs::tc::{self, NlOptions, SchedClassifierLink, TcAttachOptions, TcHandle};
@@ -120,10 +121,15 @@ pub enum Hook {
 }
 
 impl Hook {
-    fn program(self) -> &'static str {
-        match self {
-            Hook::Ingress => "avulse_ingress",
-            Hook::Egress => "avulse_egress",
+    /// The entry program for the hook, on a device whose packets start with `link`'s header:
+    /// `avulse_ingress`/`avulse_egress` for Ethernet devices, `avulse_ingress_ip`/
+    /// `avulse_egress_ip` for those without a link-layer header (tun, WireGuard, IP tunnels).
+    fn program(self, link: Link) -> &'static str {
+        match (self, link) {
+            (Hook::Ingress, Link::Ethernet) => "avulse_ingress",
+            (Hook::Egress, Link::Ethernet) => "avulse_egress",
+            (Hook::Ingress, Link::Ip) => "avulse_ingress_ip",
+            (Hook::Egress, Link::Ip) => "avulse_egress_ip",
         }
     }
 
@@ -257,6 +263,8 @@ impl Classifier {
         for name in [
             "avulse_ingress",
             "avulse_egress",
+            "avulse_ingress_ip",
+            "avulse_egress_ip",
             "avulse_act",
             "avulse_options",
         ] {
@@ -333,18 +341,27 @@ impl Classifier {
     }
 
     /// Attaches an entry program to interface `ifname` as a cls_bpf filter at TC priority
-    /// `priority` (lower runs first), adding the `clsact` qdisc if it is missing. The filter stays
-    /// until the classifier is dropped, or until [`Attachment::detach`].
-    pub fn attach(&mut self, ifname: &str, hook: Hook, priority: u16) -> Result<Attachment, Error> {
+    /// `priority` (lower runs first), adding the `clsact` qdisc if it is missing. `link` is the
+    /// header the device's packets start with: [`Link::Ethernet`], or [`Link::Ip`] for devices
+    /// without a link-layer header (tun, WireGuard, IP tunnels), which serve the NETWORK layers
+    /// only. The filter stays until the classifier is dropped, or until [`Attachment::detach`].
+    pub fn attach(
+        &mut self,
+        ifname: &str,
+        hook: Hook,
+        link: Link,
+        priority: u16,
+    ) -> Result<Attachment, Error> {
         let ifindex = if_index(ifname)?;
         // It fails when the qdisc exists, which is fine; attaching reports any other problem.
         let _ = tc::qdisc_add_clsact(ifname);
+        let name = hook.program(link);
         let prog: &mut SchedClassifier = self
             .ebpf
-            .program_mut(hook.program())
-            .ok_or_else(|| Error::Aya(format!("no program {}", hook.program())))?
+            .program_mut(name)
+            .ok_or_else(|| Error::Aya(format!("no program {name}")))?
             .try_into()
-            .map_err(aya(hook.program()))?;
+            .map_err(aya(name))?;
         let options = TcAttachOptions::Netlink(NlOptions {
             priority,
             handle: TcHandle::AUTO_ASSIGN,
@@ -440,7 +457,7 @@ impl Classifier {
     pub fn run_ctx(&self, hook: Hook, frame: &[u8], ctx: &SkbCtx) -> Result<(i32, SkbCtx), Error> {
         let mut out = [0u8; CTX_OUT];
         let (verdict, _) = test_run(
-            self.prog_fd(hook.program())?,
+            self.prog_fd(hook.program(Link::Ethernet))?,
             frame,
             Some(ctx),
             Some(&mut out),

@@ -14,7 +14,7 @@ use super::queue::Queue;
 use super::record::{self, Ctx, Entry};
 use super::registry;
 use super::send::{self, Path};
-use super::{after, sys, targets};
+use super::{Targets, after, sys, targets};
 use crate::{Address, Context, Error, Param};
 
 const MAC: [u8; 12] = [2, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 2];
@@ -283,20 +283,113 @@ fn interfaces() {
         // A network namespace with nothing in it.
         return;
     };
-    let t = targets(std::slice::from_ref(&lo.name)).unwrap();
+    let names = std::slice::from_ref(&lo.name);
+    let t = targets(all.clone(), names, Layer::Network).unwrap();
     assert!(t.lo_selected);
-    assert!(t.list.iter().all(|i| i.kind == sys::ARPHRD_LOOPBACK));
-    let t = targets(&[]).unwrap();
+    assert!(t.list.iter().all(|(i, _)| i.kind == sys::ARPHRD_LOOPBACK));
+    let t = targets(all.clone(), &[], Layer::Network).unwrap();
     assert!(t.lo_selected);
-    assert!(
-        t.list
-            .iter()
-            .all(|i| matches!(i.kind, sys::ARPHRD_ETHER | sys::ARPHRD_LOOPBACK))
-    );
-    match targets(&["no-such-if0".into()]) {
+    assert!(t.list.iter().all(|(i, link)| i.link() == Some(*link)));
+    match targets(all, &["no-such-if0".into()], Layer::Network) {
         Err(Error::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
         r => panic!("{:?}", r.map(|t| t.list)),
     }
+}
+
+fn iface(index: u32, name: &str, kind: u16) -> sys::Interface {
+    sys::Interface {
+        index,
+        name: name.into(),
+        kind,
+    }
+}
+
+#[test]
+fn interface_kinds() {
+    let all = vec![
+        iface(1, "lo", sys::ARPHRD_LOOPBACK),
+        iface(2, "eth0", sys::ARPHRD_ETHER),
+        iface(3, "wg0", sys::ARPHRD_NONE),
+        iface(4, "ipip0", sys::ARPHRD_TUNNEL),
+        iface(5, "sit0", sys::ARPHRD_SIT),
+        iface(6, "gre0", 778),
+        iface(7, "ppp0", sys::ARPHRD_PPP),
+    ];
+    let names = |t: Targets| -> Vec<(String, Link)> {
+        t.list.into_iter().map(|(i, l)| (i.name, l)).collect()
+    };
+    let eth = |n: &str| (n.to_owned(), Link::Ethernet);
+    let ip = |n: &str| (n.to_owned(), Link::Ip);
+
+    // Every supported device at the NETWORK layers, the Ethernet ones at ETHERNET.
+    for layer in [Layer::Network, Layer::NetworkForward] {
+        let t = targets(all.clone(), &[], layer).unwrap();
+        assert_eq!(
+            names(t),
+            [
+                eth("lo"),
+                eth("eth0"),
+                ip("wg0"),
+                ip("ipip0"),
+                ip("sit0"),
+                ip("ppp0")
+            ]
+        );
+    }
+    let t = targets(all.clone(), &[], Layer::Ethernet).unwrap();
+    assert_eq!(names(t), [eth("lo"), eth("eth0")]);
+
+    // A selection, and lo, which is always attached.
+    let t = targets(all.clone(), &["wg0".into()], Layer::Network).unwrap();
+    assert!(!t.lo_selected);
+    assert_eq!(names(t), [eth("lo"), ip("wg0")]);
+
+    // Named devices the layer cannot serve.
+    for (name, layer) in [("wg0", Layer::Ethernet), ("gre0", Layer::Network)] {
+        match targets(all.clone(), &[name.into()], layer) {
+            Err(Error::Unsupported(_)) => {}
+            r => panic!("{name}: {:?}", r.map(|t| t.list)),
+        }
+    }
+}
+
+#[test]
+fn raw_ip_devices() {
+    let flags = (F_IPV4 | F_ICMP) as u16;
+    let lo = 1;
+    // A record from a device without a link-layer header: the packet starts at the IP header,
+    // and the context saves an empty header.
+    let out = entry(&record(&ping(), 0, M_OUTBOUND, flags, 0), Layer::Network).unwrap();
+    assert_eq!(out.data, ping());
+    assert!(out.addr.outbound && out.addr.ip_checksum && !out.addr.vlan);
+    let ctx = Ctx::decode(&out.addr.context).unwrap();
+    assert!(ctx.l2().is_empty());
+    assert_eq!(ctx.ifindex, 7);
+
+    // Out of the device it came from, as it is; elsewhere, routed.
+    let path = |addr: &Address, layer| send::path(layer, addr, &ping(), lo).unwrap();
+    let same = Path::Out {
+        ifindex: 7,
+        l2: Vec::new(),
+    };
+    assert_eq!(path(&out.addr, Layer::Network), same);
+    let mut fwd = out.addr;
+    fwd.outbound = false;
+    fwd.layer = Layer::NetworkForward;
+    assert_eq!(path(&fwd, Layer::NetworkForward), same);
+    let mut moved = out.addr;
+    moved.if_idx = 8;
+    assert_eq!(path(&moved, Layer::Network), Path::Raw);
+
+    // Inbound: through lo, behind a header made up for the redirect.
+    let inbound = entry(&record(&ping(), 0, 0, flags, 0), Layer::Network).unwrap();
+    assert_eq!(
+        path(&inbound.addr, Layer::Network),
+        Path::In {
+            ifindex: 7,
+            l2: None
+        }
+    );
 }
 
 /// A TCP segment over IPv4 (or IPv6) with `payload` bytes of data, checksums right.

@@ -12,6 +12,10 @@
  *
  * `avulse_ingress` also redirects the inbound packets that user space injects through lo.
  *
+ * `avulse_ingress_ip` and `avulse_egress_ip` are the same programs for devices without an
+ * Ethernet header (tun, WireGuard, IP tunnels), whose packets start at the IP header on both
+ * hooks. They serve the NETWORK layers only.
+ *
  * Headers are read with bpf_skb_load_bytes, which also reads paged (non-linear) data. The
  * programs are in "classifier" sections, the name aya knows for cls_bpf programs.
  */
@@ -291,15 +295,28 @@ static __always_inline void parse_arp(struct __sk_buff *skb, struct avulse_facts
 /*
  * Packet::parse for Link::Ethernet, of the frame as user space sees it: when the device took
  * the outer VLAN tag off (offload), user space puts it back, so only one more tag fits in
- * Packet's two (`max_tags`).
+ * Packet's two (`max_tags`). With `raw_ip`, Packet::parse for Link::Ip, of a packet that starts
+ * at the IP header: its version must agree with skb->protocol.
  */
-static __always_inline void parse(struct __sk_buff *skb, struct avulse_facts *f, __u32 max_tags)
+static __always_inline void parse(struct __sk_buff *skb, struct avulse_facts *f, __u32 max_tags,
+                                  int raw_ip)
 {
     __u32 len = skb->len, off = ETH_LEN, et;
 
     __builtin_memset(f, 0, sizeof(*f));
     f->len = len;
     f->pay = f->pay_end = len;
+    if (raw_ip) {
+        /* skb->protocol is in network byte order. */
+        __u32 proto = skb->protocol;
+
+        f->pay = 0;
+        if (proto == __builtin_bswap16(0x0800))
+            parse_ipv4(skb, f, 0);
+        else if (proto == __builtin_bswap16(0x86dd))
+            parse_ipv6(skb, f, 0);
+        return;
+    }
     if (len < ETH_LEN || ld16(skb, 12, &et))
         return;
     f->flags = F_ETH;
@@ -354,8 +371,11 @@ static __always_inline int forwarded(struct __sk_buff *skb, struct avulse_facts 
            r == BPF_FIB_LKUP_RET_FRAG_NEEDED;
 }
 
-/* Everything before the matcher: is the packet for this handle, and what are its facts. */
-static __always_inline int classify(struct __sk_buff *skb, int outbound)
+/*
+ * Everything before the matcher: is the packet for this handle, and what are its facts.
+ * `raw_ip`: the device has no Ethernet header.
+ */
+static __always_inline int classify(struct __sk_buff *skb, int outbound, int raw_ip)
 {
     __u32 zero = 0, mark = skb->mark, meta = outbound ? M_OUTBOUND : 0, vlan_tci = 0, layer;
     struct avulse_config *cfg = bpf_map_lookup_elem(&avulse_config, &zero);
@@ -387,6 +407,9 @@ static __always_inline int classify(struct __sk_buff *skb, int outbound)
     }
     layer = cfg->layer;
     network = layer == LAYER_NETWORK || layer == LAYER_FORWARD;
+    /* Such devices carry no frames: the ETHERNET layer does not attach to them. */
+    if (raw_ip && !network)
+        return TC_ACT_UNSPEC;
     if (network) {
         /* A forwarded packet leaves through egress with the ingress device set. */
         int fwd = outbound && !(meta & M_LOOPBACK) && skb->ingress_ifindex != 0;
@@ -396,7 +419,7 @@ static __always_inline int classify(struct __sk_buff *skb, int outbound)
         if (fwd)
             meta |= M_FORWARD;
     }
-    if (skb->vlan_present) {
+    if (!raw_ip && skb->vlan_present) {
         meta |= M_VLAN;
         vlan_tci = skb->vlan_tci;
         /* vlan_proto is in network byte order. */
@@ -404,7 +427,7 @@ static __always_inline int classify(struct __sk_buff *skb, int outbound)
             meta |= M_VLAN_AD;
     }
 
-    parse(skb, f, (meta & M_VLAN) ? MAX_VLANS - 1 : MAX_VLANS);
+    parse(skb, f, (meta & M_VLAN) ? MAX_VLANS - 1 : MAX_VLANS, raw_ip);
     f->layer = layer;
     f->ifindex = skb->ifindex;
     f->vlan_tci = vlan_tci;
@@ -453,13 +476,26 @@ int avulse_ingress(struct __sk_buff *skb)
 
     if ((mark & MARK_MASK) == MARK_REDIRECT)
         return redirect_injected(skb, mark);
-    return classify(skb, 0);
+    return classify(skb, 0, 0);
 }
 
 SEC("classifier")
 int avulse_egress(struct __sk_buff *skb)
 {
-    return classify(skb, 1);
+    return classify(skb, 1, 0);
+}
+
+/* Inbound injections arrive on lo, which has an Ethernet header: no redirect here. */
+SEC("classifier")
+int avulse_ingress_ip(struct __sk_buff *skb)
+{
+    return classify(skb, 0, 1);
+}
+
+SEC("classifier")
+int avulse_egress_ip(struct __sk_buff *skb)
+{
+    return classify(skb, 1, 1);
 }
 
 /* Between the parser and the matcher, for the matchers that read TCP options. */

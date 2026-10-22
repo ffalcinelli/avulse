@@ -8,6 +8,8 @@ use std::net::IpAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::path::Path;
 
+use avulse_proto::Link;
+
 fn check(r: libc::c_int) -> io::Result<libc::c_int> {
     if r < 0 {
         Err(io::Error::last_os_error())
@@ -179,6 +181,18 @@ pub fn sysctl_on(path: &str) -> bool {
 pub const ARPHRD_ETHER: u16 = 1;
 /// `ARPHRD_LOOPBACK`.
 pub const ARPHRD_LOOPBACK: u16 = 772;
+/// `ARPHRD_NONE`: tun, WireGuard.
+pub const ARPHRD_NONE: u16 = 0xfffe;
+/// `ARPHRD_PPP`.
+pub const ARPHRD_PPP: u16 = 512;
+/// `ARPHRD_RAWIP`.
+pub const ARPHRD_RAWIP: u16 = 519;
+/// `ARPHRD_TUNNEL`: ipip.
+pub const ARPHRD_TUNNEL: u16 = 768;
+/// `ARPHRD_TUNNEL6`: ip6tnl.
+pub const ARPHRD_TUNNEL6: u16 = 769;
+/// `ARPHRD_SIT`.
+pub const ARPHRD_SIT: u16 = 776;
 
 /// A network interface.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -187,6 +201,22 @@ pub struct Interface {
     pub name: String,
     /// The `ARPHRD_*` device type.
     pub kind: u16,
+}
+
+impl Interface {
+    /// The header its packets start with on the TC hooks, if the programs support it: Ethernet
+    /// (and loopback) devices, and devices without a link-layer header, whose packets start at
+    /// the IP header (tun, WireGuard, PPP, ipip, ip6tnl, sit). GRE is not one of them: in NBMA
+    /// mode (without a remote address) its devices build the outer header before TC sees the
+    /// packet.
+    pub fn link(&self) -> Option<Link> {
+        match self.kind {
+            ARPHRD_ETHER | ARPHRD_LOOPBACK => Some(Link::Ethernet),
+            ARPHRD_NONE | ARPHRD_PPP | ARPHRD_RAWIP | ARPHRD_TUNNEL | ARPHRD_TUNNEL6
+            | ARPHRD_SIT => Some(Link::Ip),
+            _ => None,
+        }
+    }
 }
 
 /// Every network interface.

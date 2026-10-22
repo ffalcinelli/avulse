@@ -111,7 +111,7 @@ of kind `PermissionDenied`. Kernel 5.10 or later with BTF is supported (tested o
 - **Sending** needs `CAP_NET_RAW` as well. Loopback packets, and new packets with an empty
   `context`, go through a raw IP socket and are routed like local traffic. A packet received
   outbound (or forwarded) goes back out of the interface it was captured on, behind the Ethernet
-  header it had; an inbound one goes to that interface's ingress through `lo`, where the handles'
+  header it had (with none on a device that has none, such as tun); an inbound one goes to that interface's ingress through `lo`, where the handles'
   programs redirect it. Change `if_idx` and the saved header no longer applies: an outbound
   packet is then routed, and an inbound one gets an Ethernet header to the interface's address.
   At the `Ethernet` layer, frames go out of `if_idx` as they are, or in through `lo`; `if_idx`
@@ -119,8 +119,13 @@ of kind `PermissionDenied`. Kernel 5.10 or later with BTF is supported (tested o
   hands to the network card (GSO), is segmented by the kernel. A `SEND_ONLY` handle still loads
   programs, on `lo`'s ingress only, for inbound injection.
 - **Interfaces.** A handle captures on the interfaces it was given (all of them by default) as
-  they are when it opens. Only Ethernet and loopback devices are supported; tun and WireGuard
-  devices are skipped, or refused when named. Loopback traffic is seen once, as outbound.
+  they are when it opens. Ethernet and loopback devices are supported at every layer. Devices
+  without a link-layer header, whose packets start at the IP header (tun, WireGuard, PPP, and the
+  ipip, ip6tnl and sit tunnels), are supported at the `Network` and `NetworkForward` layers only:
+  they carry no frames, so the `Ethernet` layer skips them, or refuses them when named. Other
+  devices, GRE tunnels among them, are skipped, or refused when named. (A GRE device without a
+  remote address builds the outer header before the TC hooks see the packet, and nothing tells
+  the two modes apart.) Loopback traffic is seen once, as outbound.
 - **VLAN tags.** When the network card takes the outer tag off (VLAN offload), the backend puts it
   back where it was, with its TPID (0x8100, or 0x88a8 for an 802.1ad tag): in the frame at the
   `Ethernet` layer, and in `vlan`/`vlan_tci` at every layer. Frames go out and in with their tags

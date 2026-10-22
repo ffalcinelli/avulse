@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-21, Phase 2 done: Steps 1 to 12 and Spikes A and B, Spike C partly done; next: Phase 3)
+## Status (2026-10-22, Phase 2 done: Steps 1 to 13 and Spikes A and B, Spike C partly done; next: Phase 3)
 
 | Area | State |
 | --- | --- |
@@ -18,7 +18,7 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `crates/ebpf` (`avulse-ebpf`) | Step 10: the generator covers metadata (through `Env`: layer, priority, interface names), IPv6 and MAC addresses, VLAN fields, TCP options (`avulse_options`, behind `CFG_TCP_OPTIONS`), byte order and `contains` in headers, arithmetic, field-to-field comparisons, set trees, `xor` through a slot; `superset`/`compile_superset` widen the rest, and `Matcher::exact` says when user space filters again. Step 9: `avulse_ingress` redirects the inbound packets user space injects through `lo` (`MARK_REDIRECT`, `PRIO_INJECTED`); test runs return the context (`Classifier::run_ctx`). Step 8: the loader attaches through Netlink (`Classifier::attach`, `Attachment::detach`) and opens raw BPF hash maps (`HashMap`, for the registry). Step 7: the capture side of the static TC programs (`avulse_ingress`/`avulse_egress` → matcher → `avulse_act`): per-handle configuration, metadata facts, ring buffer records, divert/sniff/drop, marks, loopback, NETWORK/FORWARD/ETHERNET selection, fragments, the forwarding check, fail-open; `abi.rs` mirrors `bpf/abi.h`. Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Needs clang on Linux. |
 | `spikes/macos` | Spike C (partial, `docs/spikes/macos.md`): probes of bpf, raw-socket and `utun` injection, pf and the filter engine's speed, and a `NEFilterPacketProvider` system extension around a Rust static library; run on GitHub's macOS runners by `.github/workflows/macos-spike.yml` (on changes to the spike). Outside the workspace. |
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
-| `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. 13 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 32 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
+| `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
 | `crates/{capi,windivert-compat}` | Empty stubs (one doc line each, `publish = false`). |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
 | CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
@@ -907,8 +907,8 @@ in the kernel, and the ARP fields compile. `tests/capture.rs` (23 tests) and `te
   replies rewritten to another MAC, which the peer then believes); `inject_inbound_frames` (an
   LLDP frame and an ARP request injected inbound; the sniffing handle sees them as impostors and
   the host answers the ARP request).
-- **Left for later:** devices without an Ethernet header (tun, WireGuard, IP tunnels), which
-  Step 8 skips. The programs would need to know, per packet, that the frame starts at the IP
+- **Left for later (done in Step 13):** devices without an Ethernet header (tun, WireGuard, IP
+  tunnels), which Step 8 skips. The programs would need to know, per packet, that the frame starts at the IP
   header, for instance from a per-interface set in the configuration. That is worth its own
   step after Phase 2 (VPN traffic is common), with the inbound redirect revisited for L3
   targets (Step 9's note).
@@ -1001,6 +1001,51 @@ a 6.x kernel). It does not replace the 5.15 VM run.
 is destroyed afterwards. Then update `docs/roadmap.md` (Phase 2 done) and `CLAUDE.md` (what
 what the `avulse` crate and its Linux backend now hold).
 
+### Step 13: Devices without an Ethernet header (done)
+
+**Outcome.** NETWORK and NETWORK_FORWARD handles capture, divert and send on devices whose packets
+start at the IP header: `ARPHRD_NONE` (tun, WireGuard), `ARPHRD_RAWIP`, `ARPHRD_PPP`,
+`ARPHRD_TUNNEL` (ipip), `ARPHRD_TUNNEL6` (ip6tnl) and `ARPHRD_SIT`. `tests/capture.rs` (36 tests)
+and `tests/kernel.rs` (15) pass on 6.8 and 5.15.
+
+- **Entry programs.** `avulse_ingress_ip` and `avulse_egress_ip` share the handle's maps and slots
+  and call `classify(…, raw_ip)`: the parser starts at offset 0, with `parse_ipv4`/`parse_ipv6`
+  chosen by `skb->protocol` (the header's version must agree), no `F_ETH`, no VLAN. The facts are
+  then those of the NETWORK layers (`base = l3 = 0`), so `Facts::at_network` stays the contract
+  and the code generator did not change. At ETHERNET they pass everything. There is no redirect
+  branch: inbound injections arrive on `lo`.
+- **Loader.** `Classifier::attach` takes the `Link` (`Ethernet` or `Ip`) to pick the program.
+  `Hook` is still the attach point, so the registry's layout did not change.
+- **Selection** (`targets`, now a pure function over the interface list, tested without
+  privileges): `sys::Interface::link` maps each `ARPHRD_*` kind to `Link::Ethernet`, `Link::Ip` or
+  unsupported. Raw-IP devices are attached at the NETWORK layers; the ETHERNET layer skips them,
+  or refuses them when named (`Error::Unsupported`). Other kinds stay skipped, or refused when
+  named.
+- **GRE stays unsupported.** In NBMA mode (no remote address) a GRE device has `header_ops`, and
+  TC sees the outer header first; sysfs does not tell the modes apart.
+- **Sending.** A context with an empty L2 header (a packet captured on such a device) sends an
+  outbound or forwarded packet out of the same device through `AF_PACKET`, as it is, with the
+  protocol taken from the IP version; elsewhere it is routed. Inbound packets go through `lo`'s
+  redirect, behind a made-up Ethernet header with a zero MAC address (`lo`'s). The redirect reaches
+  an L3 device through `__bpf_redirect_no_mac` and the packet is delivered as `PACKET_HOST`.
+  ebpfdivert's second stage (`bpf_skb_change_type`) was not needed, which settles Step 9's
+  "revisit with L3 devices".
+- **Tests.**
+  - `tun_divert_and_reinject`, `tun_sniff_modify_inject` and `tun_kernel_agrees_with_evaluator`
+    run on a tun device owned by the test, which plays the far end through the device's file.
+    They cover:
+    - divert and reinject over IPv4 and IPv6, each packet seen once;
+    - sniff, an outbound reply rewritten on its way out, built packets injected inbound and
+      outbound;
+    - the ETHERNET layer seeing nothing;
+    - 13 filters against the evaluator.
+  - `ipip_tunnel`: an ipip tunnel to the namespace over the veth pair, with pings and 8 MiB of TCP
+    each way through a diverting handle (GSO packets on the tunnel).
+  - `bad_arguments`: tun at both layers, and GRE.
+  - `BPF_PROG_TEST_RUN` always builds an Ethernet header (`eth_type_trans`), so `tests/kernel.rs`
+    cannot drive the `_ip` programs; it still checks that the verifier loads them on both
+    kernels.
+
 ## Checklist
 
 - [x] Phase 0.1: repo, workspace, CI, names claimed (GitHub, crates.io, PyPI), trusted publishers
@@ -1021,4 +1066,6 @@ what the `avulse` crate and its Linux backend now hold).
 - [x] Step 10: matcher coverage and superset fallback
 - [x] Step 11: ETHERNET layer (devices without an Ethernet header left for later)
 - [x] Step 12: privileged suite on both VMs (Phase 2 exit)
+- [x] Step 13: devices without an Ethernet header (tun, WireGuard, PPP, IP tunnels) at the NETWORK
+  layers
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement

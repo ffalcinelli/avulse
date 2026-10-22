@@ -4,7 +4,9 @@
 //! compiled to an eBPF matcher. When the code generator cannot compile the filter, or the
 //! verifier rejects it, the matcher takes every packet of the layer and user space evaluates the
 //! filter on each record, reinjecting what does not match. The programs are attached as classic
-//! cls_bpf filters at TC priority `30001 - priority`, on the selected interfaces and on `lo`.
+//! cls_bpf filters at TC priority `30001 - priority`, on the selected interfaces and on `lo`:
+//! Ethernet devices, and at the NETWORK layers devices without a link-layer header too (tun,
+//! WireGuard, IP tunnels), which get the programs that read packets from the IP header.
 //! Matching packets go to a ring buffer, which `recv` drains into a queue; `send` injects
 //! packets through raw and `AF_PACKET` sockets (`send.rs`).
 
@@ -171,6 +173,7 @@ impl Handle {
             let lo = sys::interfaces()?
                 .into_iter()
                 .filter(|i| i.kind == sys::ARPHRD_LOOPBACK)
+                .map(|i| (i, Link::Ethernet))
                 .collect();
             let page = u32::try_from(sys::page_size()).unwrap_or(4096);
             (
@@ -181,7 +184,10 @@ impl Handle {
                 page,
             )
         } else {
-            (targets(spec.interfaces)?, loader::DEFAULT_RING_BYTES)
+            (
+                targets(sys::interfaces()?, spec.interfaces, spec.layer)?,
+                loader::DEFAULT_RING_BYTES,
+            )
         };
 
         let mut classifier = Classifier::load_with_ring(ring_bytes).map_err(io_error)?;
@@ -251,12 +257,12 @@ impl Handle {
             &[Hook::Ingress, Hook::Egress]
         };
         let mut attachments = Vec::new();
-        for iface in &targets.list {
+        for (iface, link) in &targets.list {
             for &hook in hooks {
                 // Dropping the classifier detaches what is attached so far.
                 attachments.push(
                     classifier
-                        .attach(&iface.name, hook, tc_priority)
+                        .attach(&iface.name, hook, *link, tc_priority)
                         .map_err(io_error)?,
                 );
             }
@@ -335,17 +341,21 @@ fn after(max: u16) -> u16 {
     }
 }
 
-/// The interfaces to attach to.
+/// The interfaces to attach to, with the header their packets start with.
 struct Targets {
-    list: Vec<sys::Interface>,
+    list: Vec<(sys::Interface, Link)>,
     /// Whether the application selected `lo` (it is attached anyway).
     lo_selected: bool,
 }
 
-/// The selected interfaces (all when `names` is empty), plus the loopback device. Only Ethernet
-/// and loopback devices: the programs expect an Ethernet header.
-fn targets(names: &[String]) -> Result<Targets> {
-    let all = sys::interfaces()?;
+/// Of the interfaces `all`, those to attach to at `layer`: the selected ones (every one when
+/// `names` is empty) the programs support at the layer, plus the loopback device. Devices
+/// without a link-layer header serve the NETWORK layers only: they carry no frames.
+fn targets(all: Vec<sys::Interface>, names: &[String], layer: Layer) -> Result<Targets> {
+    let supported = |i: &sys::Interface| match i.link() {
+        Some(Link::Ip) if layer == Layer::Ethernet => None,
+        link => link,
+    };
     for name in names {
         match all.iter().find(|i| &i.name == name) {
             None => {
@@ -354,9 +364,15 @@ fn targets(names: &[String]) -> Result<Targets> {
                     format!("no interface {name}"),
                 )));
             }
-            Some(i) if !matches!(i.kind, sys::ARPHRD_ETHER | sys::ARPHRD_LOOPBACK) => {
+            Some(i) if i.link() == Some(Link::Ip) && supported(i).is_none() => {
                 return Err(Error::Unsupported(
-                    "interfaces without an Ethernet header (tun, WireGuard, IP tunnels)",
+                    "the ETHERNET layer on interfaces without an Ethernet header (tun, \
+                     WireGuard, IP tunnels)",
+                ));
+            }
+            Some(i) if supported(i).is_none() => {
+                return Err(Error::Unsupported(
+                    "interfaces other than Ethernet, loopback, tun, PPP and IP-in-IP tunnels",
                 ));
             }
             Some(_) => {}
@@ -368,10 +384,9 @@ fn targets(names: &[String]) -> Result<Targets> {
         .any(|i| i.kind == sys::ARPHRD_LOOPBACK && selected(i));
     let list = all
         .into_iter()
-        .filter(|i| match i.kind {
-            sys::ARPHRD_LOOPBACK => true,
-            sys::ARPHRD_ETHER => selected(i),
-            _ => false,
+        .filter_map(|i| {
+            let link = supported(&i)?;
+            (i.kind == sys::ARPHRD_LOOPBACK || selected(&i)).then_some((i, link))
         })
         .collect();
     Ok(Targets { list, lo_selected })

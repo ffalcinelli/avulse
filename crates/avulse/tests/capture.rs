@@ -619,11 +619,17 @@ fn bulk_tcp() {
         0,
         Flags::NONE,
     );
+    bulk_both_ways(&h, PEER);
+}
+
+/// The bulk transfers to and from the peer server at `peer`, through `h`, which diverts them:
+/// every byte arrives, and the outbound side goes back as GSO packets.
+fn bulk_both_ways(h: &Handle, peer: &str) {
     let (reply, got) = forwarding(
-        &h,
+        h,
         |_, _| {},
         || {
-            let mut s = TcpStream::connect((PEER, SINK_PORT)).unwrap();
+            let mut s = TcpStream::connect((peer, SINK_PORT)).unwrap();
             s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
             let data: Vec<u8> = (0..BULK).map(bulk_byte).collect();
             for chunk in data.chunks(1 << 16) {
@@ -640,10 +646,10 @@ fn bulk_tcp() {
     assert!(big > 0, "no GSO packet among {}", got.len());
 
     let (data, got) = forwarding(
-        &h,
+        h,
         |_, _| {},
         || {
-            let mut s = TcpStream::connect((PEER, SOURCE_PORT)).unwrap();
+            let mut s = TcpStream::connect((peer, SOURCE_PORT)).unwrap();
             s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
             let mut data = Vec::new();
             s.read_to_end(&mut data).unwrap();
@@ -1315,20 +1321,25 @@ fn bad_arguments() {
     if !enabled() {
         return;
     }
-    let open_on = |ifname: &str| {
-        OpenOptions::new()
-            .interfaces([ifname])
-            .open("true", Layer::Network)
-    };
+    let open_on = |ifname: &str, layer| OpenOptions::new().interfaces([ifname]).open("true", layer);
     assert!(matches!(
-        open_on("no-such-if0"),
+        open_on("no-such-if0", Layer::Network),
         Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound
     ));
+    // A tun device serves the NETWORK layers only; a GRE device none.
     sh("ip link del avtun0");
     assert!(sh("ip tuntap add dev avtun0 mode tun") && sh("ip link set avtun0 up"));
-    let tun = open_on("avtun0");
+    let network = open_on("avtun0", Layer::Network).map(|h| h.close());
+    let ethernet = open_on("avtun0", Layer::Ethernet);
     sh("ip link del avtun0");
-    assert!(matches!(tun, Err(Error::Unsupported(_))));
+    assert!(matches!(network, Ok(Ok(()))), "{network:?}");
+    assert!(matches!(ethernet, Err(Error::Unsupported(_))));
+    sh("ip link del avgre0");
+    if sh("ip link add avgre0 type gre local 10.196.0.1 remote 10.196.0.2") {
+        let gre = open_on("avgre0", Layer::Network);
+        sh("ip link del avgre0");
+        assert!(matches!(gre, Err(Error::Unsupported(_))));
+    }
     assert!(matches!(
         Handle::open("tcp and (", Layer::Network, 0, Flags::NONE),
         Err(Error::Filter(_))
@@ -1532,4 +1543,377 @@ fn kernel_agrees_with_evaluator() {
         FILTERS.len(),
         seen.len()
     );
+}
+
+/// A tun device, which the test plays the far end of: what the host sends to [`TUN_PEER`] (or
+/// [`TUN_PEER6`]) comes out of its file, and what the test writes to the file arrives on the
+/// device. Closing the file removes the device. It has no link-layer header: the programs read
+/// its packets from the IP header.
+struct Tun(std::fs::File);
+
+const TUN_IF: &str = "avtun1";
+const TUN_HOST: &str = "10.198.0.1";
+const TUN_PEER: &str = "10.198.0.2";
+const TUN_HOST6: &str = "fd98::1";
+const TUN_PEER6: &str = "fd98::2";
+/// The far end's echo traffic, both IP versions.
+const TUN_PINGS: &str = "(ip.addr == 10.198.0.2 and icmp) or (ipv6.addr == fd98::2 and icmpv6)";
+
+impl Tun {
+    fn new() -> Tun {
+        const TUNSETIFF: u64 = 0x4004_54ca;
+        const IFF_TUN: u16 = 0x0001;
+        const IFF_NO_PI: u16 = 0x1000;
+        sh(&format!("ip link del {TUN_IF}"));
+        let file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open("/dev/net/tun")
+            .unwrap();
+        // struct ifreq: the name, then the flags.
+        let mut ifr = [0u8; 40];
+        ifr[..TUN_IF.len()].copy_from_slice(TUN_IF.as_bytes());
+        ifr[16..18].copy_from_slice(&(IFF_TUN | IFF_NO_PI).to_ne_bytes());
+        // SAFETY: `ifr` is as large as a struct ifreq, which the call reads and writes.
+        let r = unsafe { libc::ioctl(file.as_raw_fd(), TUNSETIFF as _, ifr.as_mut_ptr()) };
+        assert_eq!(r, 0, "TUNSETIFF: {}", std::io::Error::last_os_error());
+        for cmd in [
+            format!("ip addr add {TUN_HOST}/24 dev {TUN_IF}"),
+            format!("ip -6 addr add {TUN_HOST6}/64 dev {TUN_IF} nodad"),
+            format!("ip link set {TUN_IF} up"),
+        ] {
+            assert!(sh(&cmd), "{cmd}");
+        }
+        Tun(file)
+    }
+
+    /// Delivers `packet` to the host, as the far end.
+    fn write(&self, packet: &[u8]) {
+        (&self.0).write_all(packet).unwrap();
+    }
+
+    /// The first packet the host sends to the far end within a second that `pick` accepts.
+    fn read(&self, pick: impl Fn(&[u8]) -> bool) -> Option<Vec<u8>> {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut buf = vec![0; 1 << 16];
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let mut pfd = libc::pollfd {
+                fd: self.0.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd.
+            if unsafe { libc::poll(&mut pfd, 1, left.as_millis() as i32 + 1) } <= 0 {
+                continue;
+            }
+            let n = (&self.0).read(&mut buf).unwrap();
+            if pick(&buf[..n]) {
+                return Some(buf[..n].to_vec());
+            }
+        }
+    }
+
+    /// Sends an echo request from the far end (`seq`, `len` bytes of data) and waits for the
+    /// host's reply; whether it came.
+    fn ping(&self, v6: bool, seq: u16, len: usize) -> bool {
+        let (src, dst) = if v6 {
+            (TUN_PEER6, TUN_HOST6)
+        } else {
+            (TUN_PEER, TUN_HOST)
+        };
+        self.write(&echo_request(src, dst, seq, len));
+        self.read(|p| echo(p).is_some_and(|(t, q)| matches!(t, 0 | 129) && q == seq))
+            .is_some()
+    }
+}
+
+/// An ICMP or ICMPv6 echo request from `src` to `dst`, with sequence number `seq` and `len`
+/// bytes of data, checksums right.
+fn echo_request(src: &str, dst: &str, seq: u16, len: usize) -> Vec<u8> {
+    use std::net::IpAddr;
+    let (src, dst): (IpAddr, IpAddr) = (src.parse().unwrap(), dst.parse().unwrap());
+    let mut icmp = vec![if src.is_ipv6() { 128 } else { 8 }, 0, 0, 0, 0x12, 0x34];
+    icmp.extend(seq.to_be_bytes());
+    icmp.extend((0..len).map(|i| i as u8));
+    let mut p = match (src, dst) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => {
+            let mut h = vec![0x45, 0];
+            h.extend(((20 + icmp.len()) as u16).to_be_bytes());
+            h.extend([0, 0, 0x40, 0, 64, 1, 0, 0]);
+            h.extend(s.octets());
+            h.extend(d.octets());
+            h
+        }
+        (IpAddr::V6(s), IpAddr::V6(d)) => {
+            let mut h = vec![0x60, 0, 0, 0];
+            h.extend((icmp.len() as u16).to_be_bytes());
+            h.extend([58, 64]);
+            h.extend(s.octets());
+            h.extend(d.octets());
+            h
+        }
+        _ => panic!("mixed IP versions"),
+    };
+    p.extend(icmp);
+    avulse::proto::checksum::recalculate(&mut p, Link::Ip);
+    p
+}
+
+/// The ICMP or ICMPv6 type and the sequence number of an echo request or reply.
+fn echo(p: &[u8]) -> Option<(u8, u16)> {
+    let at = match p.first()? >> 4 {
+        4 if p.get(9) == Some(&1) => (p[0] as usize & 0xf) * 4,
+        6 if p.get(6) == Some(&58) => 40,
+        _ => return None,
+    };
+    let m = p.get(at..at + 8)?;
+    matches!(m[0], 0 | 8 | 128 | 129).then(|| (m[0], u16::from_be_bytes([m[6], m[7]])))
+}
+
+fn open_on(ifname: &str, filter: &str, layer: Layer, flags: Flags) -> Handle {
+    OpenOptions::new()
+        .flags(flags)
+        .interfaces([ifname])
+        .open(filter, layer)
+        .unwrap_or_else(|e| panic!("opening `{filter}` on {ifname}: {e}"))
+}
+
+/// A device without a link-layer header (tun): diverted, the far end's requests wait in the
+/// handle; sent back, the host answers, and its answers, diverted and sent back out of the
+/// device as they are, reach the far end. IPv4 and IPv6, each packet seen once.
+#[test]
+fn tun_divert_and_reinject() {
+    if !enabled() {
+        return;
+    }
+    let tun = Tun::new();
+    assert!(exact(TUN_PINGS));
+    let h = open_on(TUN_IF, TUN_PINGS, Layer::Network, Flags::NONE);
+    assert!(!tun.ping(false, 1, 32));
+    let got = drain(&h);
+    assert_eq!(got.len(), 1, "{got:?}");
+    let (p, a) = &got[0];
+    assert_eq!(echo(p), Some((8, 1)));
+    assert!(!a.outbound && !a.loopback && !a.impostor && !a.sniffed && !a.ipv6);
+    assert!(a.ip_checksum && !a.vlan);
+    assert_eq!(a.if_idx, ifindex(TUN_IF));
+
+    let (replies, got) = forwarding(
+        &h,
+        |_, _| {},
+        || {
+            (2..5)
+                .flat_map(|seq| [tun.ping(false, seq, 32), tun.ping(true, seq, 32)])
+                .filter(|ok| *ok)
+                .count()
+        },
+    );
+    assert_eq!(replies, 6);
+    let requests = got.iter().filter(|(_, a)| !a.outbound).count();
+    let answers = got.iter().filter(|(_, a)| a.outbound).count();
+    assert_eq!((requests, answers), (6, 6), "{got:?}");
+    assert_eq!(got.iter().filter(|(_, a)| a.ipv6).count(), 6);
+    assert!(
+        got.iter()
+            .all(|(_, a)| !a.impostor && a.if_idx == ifindex(TUN_IF))
+    );
+}
+
+/// On a tun device: a copy of each packet; a reply rewritten on its way out; packets built by
+/// the application, injected inbound (through `lo`'s redirect to the device) and outbound; and
+/// nothing at the ETHERNET layer, which does not attach to such devices.
+#[test]
+fn tun_sniff_modify_inject() {
+    if !enabled() {
+        return;
+    }
+    let tun = Tun::new();
+    let sniff = open_on(TUN_IF, TUN_PINGS, Layer::Network, Flags::SNIFF);
+    let frames = OpenOptions::new()
+        .flags(Flags::SNIFF)
+        .open(&format!("ip.addr == {TUN_PEER}"), Layer::Ethernet)
+        .unwrap();
+    assert!(matches!(
+        OpenOptions::new()
+            .interfaces([TUN_IF])
+            .open("true", Layer::Ethernet),
+        Err(Error::Unsupported(_))
+    ));
+    assert!(tun.ping(false, 1, 32) && tun.ping(true, 1, 32));
+    let got = drain(&sniff);
+    assert_eq!(got.len(), 4, "{got:?}");
+    assert!(got.iter().all(|(_, a)| a.sniffed));
+    assert!(drain(&frames).is_empty());
+    drop((sniff, frames));
+
+    // The reply's last byte flipped on its way out (the ICMP checksum computed again).
+    let h = open_on(
+        TUN_IF,
+        &format!("ip.dst == {TUN_PEER} and icmp.type == 0"),
+        Layer::Network,
+        Flags::NONE,
+    );
+    let (reply, got) = forwarding(
+        &h,
+        |p, _| {
+            *p.last_mut().unwrap() ^= 0xff;
+            avulse::proto::checksum::recalculate(p, Link::Ip);
+        },
+        || {
+            tun.write(&echo_request(TUN_PEER, TUN_HOST, 7, 32));
+            tun.read(|p| echo(p) == Some((0, 7)))
+        },
+    );
+    assert_eq!(got.len(), 1);
+    let reply = reply.expect("the reply");
+    assert_eq!(*reply.last().unwrap(), 31 ^ 0xff);
+    assert!(avulse::proto::checksum::verify(&reply, Link::Ip).icmp);
+    h.close().unwrap();
+
+    // Built packets: requests injected inbound get answers; one sent outbound comes out.
+    let s = OpenOptions::new()
+        .flags(Flags::SEND_ONLY)
+        .open("false", Layer::Network)
+        .unwrap();
+    let mut inbound = Address::new(Layer::Network);
+    inbound.if_idx = ifindex(TUN_IF);
+    for (v6, src, dst) in [(false, TUN_PEER, TUN_HOST), (true, TUN_PEER6, TUN_HOST6)] {
+        inbound.ipv6 = v6;
+        s.send(&echo_request(src, dst, 8, 16), &inbound).unwrap();
+        let want = if v6 { 129 } else { 0 };
+        assert!(
+            tun.read(|p| echo(p) == Some((want, 8))).is_some(),
+            "v6: {v6}"
+        );
+    }
+    let mut outbound = Address::new(Layer::Network);
+    outbound.outbound = true;
+    s.send(&echo_request(TUN_HOST, TUN_PEER, 9, 16), &outbound)
+        .unwrap();
+    assert!(tun.read(|p| echo(p) == Some((8, 9))).is_some());
+}
+
+/// On a tun device, the kernel's matchers agree with the evaluator (as
+/// `kernel_agrees_with_evaluator` checks on Ethernet devices).
+#[test]
+fn tun_kernel_agrees_with_evaluator() {
+    if !enabled() {
+        return;
+    }
+    const FILTERS: &[&str] = &[
+        "icmp",
+        "icmpv6",
+        "inbound",
+        "outbound and ipv6",
+        "ip.len > 100",
+        "frame.len == 60",
+        "frame[0] == 0x45",
+        "icmp.type == 8",
+        "icmpv6.type == 129",
+        "ip.src == 10.198.0.2",
+        "ipv6.dst == fd98::2",
+        "ip.ttl == 64",
+        // Inexact.
+        "icmp.seq == 2",
+    ];
+    let tun = Tun::new();
+    let all = open_on(TUN_IF, TUN_PINGS, Layer::Network, Flags::SNIFF);
+    let handles: Vec<Handle> = FILTERS
+        .iter()
+        .map(|f| open_on(TUN_IF, f, Layer::Network, Flags::SNIFF))
+        .collect();
+    // They are drained one after the other.
+    for h in std::iter::once(&all).chain(&handles) {
+        h.set_param(Param::QueueTime, 16_000).unwrap();
+    }
+    for seq in 1..4 {
+        for v6 in [false, true] {
+            assert!(tun.ping(v6, seq, 32 * seq as usize * seq as usize));
+        }
+    }
+    let seen = drain(&all);
+    assert_eq!(seen.len(), 12, "{seen:?}");
+    for (f, h) in FILTERS.iter().zip(&handles) {
+        let filter = Filter::compile(f).unwrap();
+        let mut want: Vec<Vec<u8>> = seen
+            .iter()
+            .filter(|(p, a)| filter.matches(&Packet::parse(p, Link::Ip), &a.meta()))
+            .map(|(p, _)| p.clone())
+            .collect();
+        // Only the far end's echoes: the host sends router solicitations on the device too.
+        let mut got: Vec<Vec<u8>> = drain(h)
+            .into_iter()
+            .map(|(p, _)| p)
+            .filter(|p| echo(p).is_some())
+            .collect();
+        want.sort();
+        got.sort();
+        assert!(
+            !want.is_empty() && want.len() < seen.len(),
+            "`{f}` does not split the traffic"
+        );
+        assert_eq!(got, want, "`{f}`");
+    }
+}
+
+/// An ipip tunnel to the peer, over the veth pair, removed when dropped (the peer's end goes
+/// with the namespace).
+struct Ipip;
+
+const IPIP_IF: &str = "avipip0";
+const IPIP_PEER: &str = "10.197.0.2";
+
+impl Ipip {
+    fn new() -> Ipip {
+        sh(&format!("ip link del {IPIP_IF}"));
+        for cmd in [
+            format!("ip link add {IPIP_IF} type ipip local {HOST} remote {PEER}"),
+            format!("ip addr add 10.197.0.1/30 dev {IPIP_IF}"),
+            format!("ip link set {IPIP_IF} up"),
+            format!(
+                "ip netns exec {NETNS} ip link add avipip1 type ipip local {PEER} remote {HOST}"
+            ),
+            format!("ip netns exec {NETNS} ip addr add {IPIP_PEER}/30 dev avipip1"),
+            format!("ip netns exec {NETNS} ip link set avipip1 up"),
+        ] {
+            assert!(sh(&cmd), "{cmd}");
+        }
+        assert!(ping_to(IPIP_PEER, 1), "the ipip tunnel does not work");
+        Ipip
+    }
+}
+
+impl Drop for Ipip {
+    fn drop(&mut self) {
+        sh(&format!("ip link del {IPIP_IF}"));
+    }
+}
+
+/// Over an IP-in-IP tunnel: pings and bulk TCP diverted on the tunnel device and sent back, the
+/// large segments as GSO packets.
+#[test]
+fn ipip_tunnel() {
+    if !enabled() {
+        return;
+    }
+    let _veth = Veth::new();
+    let _ipip = Ipip::new();
+    let _peer = PeerServer::start();
+    let h = open_on(
+        IPIP_IF,
+        &format!("ip.addr == {IPIP_PEER}"),
+        Layer::Network,
+        Flags::NONE,
+    );
+    let (ok, got) = forwarding(&h, |_, _| {}, || ping_to(IPIP_PEER, 3));
+    assert!(ok);
+    let requests = got.iter().filter(|(p, _)| icmp(p).0 == 8).count();
+    let replies = got.iter().filter(|(p, _)| icmp(p).0 == 0).count();
+    assert_eq!((requests, replies), (3, 3), "{got:?}");
+    assert!(got.iter().all(|(_, a)| a.if_idx == ifindex(IPIP_IF)));
+    bulk_both_ways(&h, IPIP_PEER);
 }
