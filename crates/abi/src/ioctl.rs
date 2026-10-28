@@ -13,6 +13,7 @@
 //! | [`SET_PARAM`] | [`Param::index`], `u32`; value, `u64` | nothing |
 //! | [`GET_PARAM`] | [`Param::index`], `u32` | value, `u64` |
 //! | [`STATS`] | nothing | [`Stats`], eight `u64`s |
+//! | [`EVAL`] | one [`Record`] | 1 if the handle's filter matches it, else 0, `u32` |
 //!
 //! A handle is a file object of the device: `OPEN` once after creating it, then the others. Closing
 //! the file (or the process exiting) closes the handle.
@@ -57,6 +58,9 @@ pub const SET_PARAM: u32 = ctl_code(0x925, METHOD_BUFFERED);
 pub const GET_PARAM: u32 = ctl_code(0x926, METHOD_BUFFERED);
 /// Reads the handle's counters.
 pub const STATS: u32 = ctl_code(0x927, METHOD_BUFFERED);
+/// Runs the handle's filter on a packet and its address, in the kernel, as the packet hooks do:
+/// what the tests compare with the evaluator. It changes nothing.
+pub const EVAL: u32 = ctl_code(0x928, METHOD_BUFFERED);
 
 /// Why bytes from the other side are refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

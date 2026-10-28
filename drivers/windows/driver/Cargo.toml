@@ -1,0 +1,47 @@
+# The Windows driver, avulse.sys: WDM, with the packet hooks to come (WFP callouts and an NDIS
+# lightweight filter), running avulse's bytecode verifier and interpreter in the kernel. It builds
+# only with the WDK, in the `windows` VM (drivers/windows/scripts/build.ps1); it is outside the
+# main workspace.
+[package]
+# Named `avulse`, so that cargo-wdk finds `avulse.inx` and makes `avulse.sys`. It is not the
+# `avulse` crate of the main workspace, and is never published.
+name = "avulse"
+description = "The avulse Windows driver."
+version = "0.0.0"
+edition = "2024"
+license = "LGPL-3.0-or-later OR GPL-2.0-or-later"
+publish = false
+
+[package.metadata.wdk.driver-model]
+driver-type = "WDM"
+
+[lib]
+name = "avulse"
+crate-type = ["cdylib"]
+test = false
+
+[build-dependencies]
+bindgen = "0.71"
+wdk-build = "0.5.1"
+
+[dependencies]
+avulse-abi = { path = "../../../crates/abi" }
+avulse-filter = { path = "../../../crates/filter" }
+avulse-proto = { path = "../../../crates/proto" }
+wdk = "0.4.1"
+wdk-alloc = "0.4.1"
+wdk-panic = "0.4.1"
+wdk-sys = "0.5.1"
+
+# Release builds only (docs/spikes/windows-driver.md, finding 2): the debug build's frames overflow
+# the kernel stack.
+[profile.dev]
+panic = "abort"
+lto = true
+opt-level = 3
+
+[profile.release]
+panic = "abort"
+lto = true
+
+[workspace]

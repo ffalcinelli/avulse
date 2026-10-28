@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-28, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5: Step 22 done, next Step 23)
+## Status (2026-10-28, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5: Steps 22 and 23 done, next Step 24)
 
 | Area | State |
 | --- | --- |
@@ -20,6 +20,8 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
 | `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Steps 15 to 17: the FLOW, SOCKET and REFLECT layers (`events.rs`, `reflect.rs`), SOCKET refusing binds and connects in the kernel; `Address` version 2 (216 bytes) with the process name. Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
 | `crates/capi` (`avulse-capi`) | Step 18: the C ABI, `libavulse.so`/`.a`, header `include/avulse.h` (hand-written, layout pinned by asserts), 20 functions, tested from C (`tests/c.rs`, `tests/c/abi.c`). |
+| `drivers/windows` | Step 23: `avulse.sys` (WDM, Rust, outside the workspace): the control device, handles opened with verified bytecode, parameters, statistics, shutdown, and `EVAL`, a test IOCTL that runs a handle's filter in the kernel. `test/` passes 243 checks in the `windows` VM under Driver Verifier, WinDivert's filter vectors included. No packet hook yet. |
+| `crates/abi` (`avulse-abi`) | Step 23: the types shared with the driver and the C ABI (`Address`, `Flags`, `Param`, `Shutdown`, `Stats`, `Syntax`), and `ioctl`, the driver protocol. `no_std`. |
 | `crates/windivert-compat` | Steps 19 to 21: `libavulse_windivert.so`, libebpfdivert's C API over avulse (21 `ebpfdivert_*` exports, negative errno values, WinDivert's 80-byte address with avulse's reinjection context in its union). WinDivert's helpers (hash, checksums, `eval_filter` with `random*`) agree with WinDivert's own code on generated vectors (`scripts/gen_compat_vectors.py`). REFLECT's data is WinDivert's serialized filter object (`Filter::windivert_object`, matching WinDivert's compiler on 230 filters). 15 unit tests, the exported-symbol test, and `tests/capture.rs` (6, `AVULSE_BPF=1`) on 6.8 and 5.15. pydivert's suite (155) and jdivert's (334, JNA and Panama) pass against it unchanged. `publish = false`. |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
 | CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
@@ -1723,24 +1725,54 @@ reading only, as everywhere in this project.
 - **Tests:** `agree` compares a reused register file too, and a register left by an earlier run
   reads as empty.
 
-### Step 23: The ABI crate, the bindings, and the driver's skeleton (in progress)
+### Step 23: The ABI crate, the bindings, and the driver's skeleton (done)
 
-**Progress.** The host half is done.
-- `crates/abi` (`avulse-abi`, `no_std`, `forbid(unsafe_code)`, in the `no_std` CI build) holds
-  `Address`, `Flow`, `Reflect`, `Context`, `Flags`, `Param`, `Shutdown`, `Stats` and `Syntax`.
-  They moved from `avulse`, which re-exports them unchanged. `Param::index` is public.
-- `abi::ioctl` is the driver protocol:
-  - the device path and `PROTOCOL_VERSION`;
-  - the `CTL_CODE`s (buffered, except `RECV` out-direct and `SEND` in-direct);
-  - `OpenRequest` (a 32-byte header, then interface indexes, program and filter text);
-  - `Record`s (the encoded address, the data's length, the data padded to 8 bytes);
-  - the parameters and the statistics.
-  
+**Outcome.** `avulse.sys` loads and unloads under Driver Verifier in the `windows` VM.
+`drivers/windows/test` passes 243 checks against it: handles, parameters, statistics, shutdown,
+refused programs and requests, and WinDivert's filter vectors evaluated in the kernel.
+
+- **`crates/abi`** (`avulse-abi`, `no_std`, `forbid(unsafe_code)`, in the `no_std` CI build)
+  holds `Address`, `Flow`, `Reflect`, `Context`, `Flags`, `Param`, `Shutdown`, `Stats` and
+  `Syntax`.
+  - They moved from `avulse`, which re-exports them unchanged. `Param::index` is public.
+  - Its layout tests moved with them.
+- **`abi::ioctl`** is the driver protocol:
+  - the device path, `PROTOCOL_VERSION` and the `CTL_CODE`s;
+  - `OpenRequest`, `Record`s, the parameters and the statistics;
+  - `EVAL`, a test IOCTL that runs a handle's filter on a packet from user mode, as the hooks
+    will.
+
   Every decoder checks what it reads (`Malformed`), and the address is encoded field by field
-  at its `repr(C)` offsets. 6 tests.
+  at its `repr(C)` offsets. 6 host tests.
+- **`drivers/windows/driver`**: package `avulse`, outside the main workspace, built by
+  `drivers/windows/scripts/build.ps1` (clippy `-D warnings`, then `cargo wdk build`).
+  - The control device `\\.\Avulse` (`WdmlibIoCreateDeviceSecure`, the system and
+    Administrators only).
+  - Each file object is a handle: `CREATE`, `OPEN` (decode and verify), `CLEANUP` (close, also
+    at process exit), `CLOSE` (free).
+  - The program lives in an `Arc<Open>` that owns its bytes.
+  - Per-processor scratch, each slot behind a spin lock that raises to DISPATCH_LEVEL
+    (`KfRaiseIrql` is inline on x64), allocated zeroed (a 64 KiB struct literal would overflow
+    the stack).
+  - Registers written afresh for each evaluation, and the spike's stack check.
+  - `RECV` and `SEND` answer `STATUS_NOT_IMPLEMENTED` for now.
+- **Deviations.**
+  - The bindings stay in the driver's `build.rs`, as in the spike, not in a `-sys` crate:
+    `wdk-build` configures one package. Split them out if a second driver needs them.
+  - The package is named `avulse`, because cargo-wdk derives the INF's name (`avulse.inx`) from
+    it.
+- **Found on the way.**
+  - `IoCreateDeviceSecure` is a macro for `WdmlibIoCreateDeviceSecure`, in `wdmsec.lib`.
+  - bindgen already defines `IRP`.
+  - The toolchain script now adds clippy and rustfmt, and puts `avulse.sys` under Driver
+    Verifier.
+- **`drivers/windows/scripts/test.ps1`**:
+  - loads the driver as a kernel service;
+  - runs `avulse-driver-test.exe`, which leaves a handle open at exit, so stopping the driver
+    checks that the handle's cleanup closed it;
+  - fails on a crash dump.
 
-Left: the bindings crate and the driver, in the `windows` VM.
-
+The original plan of the step follows.
 
 **Where.**
 - `crates/abi`: the types above, with layout tests (`size_of`, offsets) and encode/decode
@@ -1915,7 +1947,7 @@ pre-release tag) passes, then the v0.0.1 tag publishes. The guide and README say
 - [x] Step 20: compat shim handle exports, `Handle::stats`
 - [x] Step 21: pydivert and jdivert suites against the shim (Phase 4 exit)
 - [x] Step 22: the interpreter for the kernel (`matches_in`, borrowed operands, frame sizes in CI)
-- [ ] Step 23: driver ABI crate, bindings, driver skeleton
+- [x] Step 23: ABI crate (`avulse-abi`), driver skeleton (`avulse.sys`, device, handles, `EVAL`)
 - [ ] Step 24: user-mode Windows backend
 - [ ] Step 25: NETWORK and NETWORK_FORWARD on Windows
 - [ ] Step 26: injection on Windows

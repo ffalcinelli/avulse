@@ -15,13 +15,13 @@
 # kernel the Linux backend supports, with the strictest verifier). The binaries need nothing
 # installed in the VM.
 #
-# "windows" (Windows 11 24H2) builds and loads the Windows driver (spikes/windows-driver). Its
-# provisioning installs the driver toolchain and turns on test signing, which takes effect after
-# a reboot:
+# "windows" (Windows 11 24H2) builds and loads the Windows driver (drivers/windows, and the
+# spike in spikes/windows-driver). Its provisioning installs the driver toolchain and turns on
+# test signing and Driver Verifier, which take effect after a reboot:
 #
 #   vagrant up windows && vagrant reload windows
-#   vagrant winrm windows -e -c "C:\avulse\spikes\windows-driver\scripts\build.ps1"
-#   vagrant winrm windows -e -c "C:\avulse\spikes\windows-driver\scripts\test.ps1"
+#   vagrant winrm windows -e -c "C:\avulse\drivers\windows\scripts\build.ps1"
+#   vagrant winrm windows -e -c "C:\avulse\drivers\windows\scripts\test.ps1"
 #   vagrant destroy -f windows
 
 Vagrant.configure("2") do |config|

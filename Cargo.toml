@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-exclude = ["fuzz", "spikes"]
+exclude = ["fuzz", "spikes", "drivers"]
 members = [
     "crates/proto",
     "crates/filter",

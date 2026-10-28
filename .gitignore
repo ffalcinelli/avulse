@@ -5,6 +5,7 @@ __pycache__/
 /book/book
 /.vagrant
 /spikes/*/target
+/drivers/*/*/target
 
 # Local secrets (crates.io token).
 .env

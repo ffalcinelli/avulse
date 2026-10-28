@@ -92,6 +92,8 @@ if (-not (Test-Path "C:\rust\cargo\bin\cargo.exe")) {
     Install "Rust" "$Downloads\rustup-init.exe" `
         "-y --profile minimal --default-toolchain stable --default-host x86_64-pc-windows-msvc --no-modify-path"
 }
+# Clippy, which drivers/windows/scripts/build.ps1 runs on the driver.
+& C:\rust\cargo\bin\rustup.exe component add clippy rustfmt
 if (-not (Test-Path "C:\rust\cargo\bin\cargo-wdk.exe")) {
     Write-Host "Installing cargo-wdk..."
     & C:\rust\cargo\bin\cargo.exe install cargo-wdk --version 0.1.1 --locked
@@ -102,6 +104,6 @@ if (-not (Test-Path "C:\rust\cargo\bin\cargo-wdk.exe")) {
 # and a crash writes a kernel memory dump (C:\Windows\MEMORY.DMP) with the full stacks, not a
 # triage minidump. All three take effect after a reboot.
 bcdedit /set testsigning on | Out-Host
-verifier /standard /driver avulse_spike.sys | Out-Host
+verifier /standard /driver avulse_spike.sys avulse.sys | Out-Host
 Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl -Name CrashDumpEnabled -Value 2
 Write-Host "Toolchain ready. Reboot (vagrant reload windows) to turn test signing on."
