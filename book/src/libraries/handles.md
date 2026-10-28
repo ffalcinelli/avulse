@@ -110,6 +110,13 @@ The platforms differ; macOS, for example, cannot modify a packet in place. `avul
 says, per layer, whether handles can be opened, divert, drop, inject and modify. `Handle::open`
 refuses what the backend says it cannot do, with `Error::Unsupported`.
 
+## On Windows
+
+Windows is in progress (Phase 5). A handle opens at the NETWORK layers with `SNIFF`, through the
+avulse driver. `Handle::open` installs and starts the driver from `avulse.sys`, next to the
+executable or at `AVULSE_DRIVER`, unless `Flags::NO_INSTALL` is set; that needs Administrator
+rights. Packets do not arrive yet. `capabilities()` says what works.
+
 ## On Linux
 
 The Linux backend runs eBPF programs on the traffic-control (TC) hooks of each interface. Opening
