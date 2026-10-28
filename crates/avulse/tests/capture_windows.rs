@@ -71,8 +71,7 @@ fn shutdown_ends_receives() {
     assert!(matches!(r, Err(Error::Shutdown)), "{r:?}");
 }
 
-/// Parameters reach the driver, counters come back, and sending, which comes with injection, is
-/// refused as unsupported.
+/// Parameters reach the driver, counters come back, and a RECV_ONLY handle cannot send.
 #[test]
 fn parameters_counters_and_limits() {
     if !enabled() {
@@ -86,8 +85,15 @@ fn parameters_counters_and_limits() {
     assert_eq!(h.param(Param::QueueLength), 64);
     let s = h.stats().unwrap();
     assert_eq!((s.diverted, s.sniffed, s.queue_drops), (0, 0, 0));
-    let r = h.send(&[0x45; 20], &avulse::Address::new(Layer::Network));
-    assert!(matches!(r, Err(Error::Unsupported(_))), "{r:?}");
+    let r = Handle::open(
+        "udp.dstport == 9",
+        Layer::Network,
+        0,
+        Flags::SNIFF | Flags::RECV_ONLY,
+    )
+    .unwrap()
+    .send(&[0x45; 20], &avulse::Address::new(Layer::Network));
+    assert!(matches!(r, Err(Error::InvalidArgument(_))), "{r:?}");
     // The installed driver is used as it is.
     let h2 = Handle::open(
         "udp",
@@ -254,4 +260,94 @@ fn many_handles() {
             h.close().unwrap();
         }
     }
+}
+
+/// A diverted datagram sent back arrives, unchanged or modified, and its handle does not see it
+/// again.
+#[test]
+fn reinject() {
+    if !enabled() {
+        return;
+    }
+    let rx = receiver("127.0.0.1:9406");
+    let h = Handle::open("udp.dstport == 9406", Layer::Network, 0, Flags::NONE).unwrap();
+    send_to("127.0.0.1:9406", &[b"hello", b"world"]);
+    let mut got = [0; 16];
+    let (p, a) = recv_one(&h);
+    h.send(&p, &a).unwrap();
+    assert_eq!(rx.recv(&mut got).unwrap(), 5);
+    assert_eq!(&got[..5], b"hello");
+    // Modified: the checksums are computed again, as the address's flags are clear.
+    let (mut p, a) = recv_one(&h);
+    p[28..33].copy_from_slice(b"WORLD");
+    h.send(&p, &a).unwrap();
+    assert_eq!(rx.recv(&mut got).unwrap(), 5);
+    assert_eq!(&got[..5], b"WORLD");
+    let mut buf = vec![0; MAX_PACKET_LEN];
+    let r = h.recv_timeout(&mut buf, Duration::from_millis(300));
+    assert!(
+        matches!(r, Err(Error::Timeout)),
+        "its own packets pass it by: {r:?}"
+    );
+}
+
+/// A UDP datagram for 127.0.0.1:`port`, with zero checksums.
+fn udp_packet(port: u16, payload: &[u8]) -> Vec<u8> {
+    let len = 28 + payload.len();
+    let mut p = vec![
+        0x45, 0, 0, 0, 0, 1, 0, 0, 64, 17, 0, 0, 127, 0, 0, 1, 127, 0, 0, 1,
+    ];
+    p[2..4].copy_from_slice(&(len as u16).to_be_bytes());
+    p.extend_from_slice(&40000u16.to_be_bytes());
+    p.extend_from_slice(&port.to_be_bytes());
+    p.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    p.extend_from_slice(&[0, 0]);
+    p.extend_from_slice(payload);
+    p
+}
+
+/// A packet built from scratch, injected by a SEND_ONLY handle, arrives.
+#[test]
+fn inject_built_packet() {
+    if !enabled() {
+        return;
+    }
+    let rx = receiver("127.0.0.1:9407");
+    let h = Handle::open("false", Layer::Network, 0, Flags::SEND_ONLY).unwrap();
+    let mut a = avulse::Address::new(Layer::Network);
+    a.outbound = true;
+    a.loopback = true;
+    h.send(&udp_packet(9407, b"built"), &a).unwrap();
+    let mut got = [0; 16];
+    assert_eq!(rx.recv(&mut got).unwrap(), 5);
+    assert_eq!(&got[..5], b"built");
+}
+
+/// A high-priority handle diverts and reinjects; a lower one then sees the packet, as an
+/// impostor, and the higher one does not see it again.
+#[test]
+fn priorities_and_impostors() {
+    if !enabled() {
+        return;
+    }
+    let rx = receiver("127.0.0.1:9409");
+    let high = Handle::open("udp.dstport == 9409", Layer::Network, 100, Flags::NONE).unwrap();
+    let low = Handle::open("udp.dstport == 9409", Layer::Network, -100, Flags::SNIFF).unwrap();
+    send_to("127.0.0.1:9409", &[b"order"]);
+    let (p, a) = recv_one(&high);
+    assert!(!a.impostor);
+    let mut buf = vec![0; MAX_PACKET_LEN];
+    let r = low.recv_timeout(&mut buf, Duration::from_millis(300));
+    assert!(
+        matches!(r, Err(Error::Timeout)),
+        "the higher handle took it first: {r:?}"
+    );
+    high.send(&p, &a).unwrap();
+    let (q, b) = recv_one(&low);
+    assert_eq!(q[28..], p[28..]);
+    assert!(b.impostor, "{b:?}");
+    let r = high.recv_timeout(&mut buf, Duration::from_millis(300));
+    assert!(matches!(r, Err(Error::Timeout)), "{r:?}");
+    let mut got = [0; 16];
+    assert_eq!(rx.recv(&mut got).unwrap(), 5);
 }

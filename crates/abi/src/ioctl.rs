@@ -8,7 +8,7 @@
 //! | --- | --- | --- |
 //! | [`OPEN`] | [`OpenRequest`] | nothing |
 //! | [`RECV`] | nothing | [`Record`]s, back to back, at least one |
-//! | [`SEND`] | [`Record`]s, back to back | the count sent, `u32` |
+//! | [`SEND`] | [`Record`]s, back to back | how many were sent, `u32` |
 //! | [`SHUTDOWN`] | how, `u32` (1 receive, 2 send, 3 both) | nothing |
 //! | [`SET_PARAM`] | [`Param::index`], `u32`; value, `u64` | nothing |
 //! | [`GET_PARAM`] | [`Param::index`], `u32` | value, `u64` |
@@ -34,7 +34,6 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// `FILE_DEVICE_NETWORK`.
 const DEVICE_TYPE: u32 = 0x12;
 const METHOD_BUFFERED: u32 = 0;
-const METHOD_IN_DIRECT: u32 = 1;
 const METHOD_OUT_DIRECT: u32 = 2;
 /// `FILE_READ_DATA | FILE_WRITE_DATA`.
 const ACCESS: u32 = 3;
@@ -49,7 +48,7 @@ pub const OPEN: u32 = ctl_code(0x921, METHOD_BUFFERED);
 /// Receives packets or events: completes when at least one is queued.
 pub const RECV: u32 = ctl_code(0x922, METHOD_OUT_DIRECT);
 /// Sends packets.
-pub const SEND: u32 = ctl_code(0x923, METHOD_IN_DIRECT);
+pub const SEND: u32 = ctl_code(0x923, METHOD_BUFFERED);
 /// Shuts the handle down in one direction or both.
 pub const SHUTDOWN: u32 = ctl_code(0x924, METHOD_BUFFERED);
 /// Sets a queue parameter.

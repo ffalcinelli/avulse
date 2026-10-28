@@ -112,8 +112,9 @@ refuses what the backend says it cannot do, with `Error::Unsupported`.
 
 ## On Windows
 
-Windows is in progress (Phase 5). At the NETWORK layers, handles divert, sniff and drop packets
-through the avulse driver's WFP callouts; sending comes next. `Handle::open` installs and starts
+Windows is in progress (Phase 5). At the NETWORK layers, handles divert, sniff, drop and send
+packets through the avulse driver's WFP callouts. Filters with `matches` are not supported there
+yet. `Handle::open` installs and starts
 the driver from `avulse.sys`, next to the executable or at `AVULSE_DRIVER`, unless
 `Flags::NO_INSTALL` is set; that needs Administrator rights. Loopback packets are seen once,
 outbound, as in WinDivert. `capabilities()` says what works.

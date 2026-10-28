@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-28, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5: Steps 22 to 25 done, next Step 26)
+## Status (2026-10-28, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5: Steps 22 to 26 done, next Step 27)
 
 | Area | State |
 | --- | --- |
@@ -1738,7 +1738,8 @@ refused programs and requests, and WinDivert's filter vectors evaluated in the k
   - Its layout tests moved with them.
 - **`abi::ioctl`** is the driver protocol:
   - the device path, `PROTOCOL_VERSION` and the `CTL_CODE`s;
-  - `OpenRequest`, `Record`s, the parameters and the statistics;
+  - `OpenRequest`, `Record`s, the parameters and the statistics (all buffered but `RECV`,
+    which is out-direct);
   - `EVAL`, a test IOCTL that runs a handle's filter on a packet from user mode, as the hooks
     will.
 
@@ -1915,7 +1916,47 @@ The original plan of the step follows.
 match and miss, priorities between two handles, queue limits, shutdown delivering what is
 queued.
 
-### Step 26: Injection
+### Step 26: Injection (done; forward injection untested)
+
+**Outcome.** Windows handles send packets: diverted packets go back unchanged or modified, and
+built packets are injected. In the `windows` VM, under Driver Verifier, `capture_windows.rs`
+(12 tests) and the driver test (243) pass.
+
+- **`drivers/windows/driver/src/inject.rs`.**
+  - One injection handle per address family. With `AF_UNSPEC` and forward injection,
+    `FwpsInjectionHandleCreate0` fails with `0x80320035`.
+  - A NET_BUFFER_LIST pool from an NDIS generic object.
+  - `SEND` copies each packet into nonpaged memory with an MDL and injects it:
+    - outbound with `FwpsInjectNetworkSendAsync0`;
+    - inbound with `FwpsInjectNetworkReceiveAsync0`, on the address's interfaces;
+    - forwarded with `FwpsInjectForwardAsync0`.
+
+    The completion frees it. `SEND` became a buffered IOCTL, and returns how many records it
+    sent; only a first failure is an error.
+- **Loops and impostors.**
+  - The injection context is the sender's priority. Classify queries it
+    (`FwpsQueryPacketInjectionState0`):
+    - handles of the same or a higher priority than the sender pass the packet by;
+    - lower priorities see it with `impostor` set.
+
+    This is Linux's mark rule.
+  - `SEND_ONLY` handles get no WFP filter.
+- **User mode** applies WinDivert's rules before `SEND`: an impostor loses a hop of TTL
+  (`decrement_ttl` moved to `backend/mod.rs`, shared with Linux), and the checksums whose flags
+  are clear are computed. `capabilities()` now reports inject and modify at the NETWORK layers.
+- **Left.**
+  - Filters that need user space (`matches`) are still `Unsupported`. They need the kernel to
+    divert everything and user space to reinject what does not match, as Linux does.
+  - Forward injection is written but untested (no routed setup in the VM yet).
+- **Tests** (`capture_windows.rs`):
+  - a diverted datagram sent back unchanged and modified arrives, and its handle does not see it
+    again;
+  - a built UDP packet from a `SEND_ONLY` handle arrives;
+  - a high-priority handle diverts and reinjects, and the lower one sees the packet as an
+    impostor;
+  - a `RECV_ONLY` handle cannot send.
+
+The original plan of the step follows.
 
 **Where.**
 - `IOCTL_SEND`: `FwpsInjectNetworkSendAsync0` (outbound), `ReceiveAsync0` (inbound, with the
@@ -2038,7 +2079,7 @@ pre-release tag) passes, then the v0.0.1 tag publishes. The guide and README say
 - [x] Step 23: ABI crate (`avulse-abi`), driver skeleton (`avulse.sys`, device, handles, `EVAL`)
 - [x] Step 24: user-mode Windows backend (service, device, overlapped `RECV`, timeouts, shutdown)
 - [x] Step 25: NETWORK and NETWORK_FORWARD on Windows (divert, sniff, drop; WFP callouts)
-- [ ] Step 26: injection on Windows
+- [x] Step 26: injection on Windows (send, reinject, impostors)
 - [ ] Step 27: ETHERNET on Windows (NDIS LWF)
 - [ ] Step 28: FLOW, SOCKET and REFLECT on Windows
 - [ ] Step 29: `WinDivert.dll` and the binding suites on Windows (Phase 5 exit)

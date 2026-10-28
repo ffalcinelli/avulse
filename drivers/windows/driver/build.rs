@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .allowlist_function(
             "IoCreateDevice|WdmlibIoCreateDeviceSecure|IoDeleteDevice|IoCreateSymbolicLink|\
              IoDeleteSymbolicLink|IofCompleteRequest|IoGetStackLimits|IoReleaseCancelSpinLock|\
-             MmMapLockedPagesSpecifyCache|\
+             MmMapLockedPagesSpecifyCache|IoAllocateMdl|IoFreeMdl|MmBuildMdlForNonPagedPool|\
              KeExpandKernelStackAndCalloutEx|KeQueryMaximumProcessorCountEx|\
              KeGetCurrentProcessorNumberEx|\
              KeAcquireSpinLockRaiseToDpc|KeReleaseSpinLock|KeQueryPerformanceCounter|DbgPrint",
@@ -44,7 +44,8 @@ fn main() -> Result<(), Box<dyn Error>> {
              NDIS_FILTER_.*|NDIS_OBJECT_.*|NET_BUFFER.*|FWPS_.*|FWPM_.*|FWP_.*",
         )
         .allowlist_var(
-            "IRP_MJ_.*|NDIS_.*|FWP.*|FILE_DEVICE_.*|DO_.*|DISPATCH_LEVEL|\
+            "IRP_MJ_.*|NDIS_.*|FWP.*|FILE_DEVICE_.*|DO_.*|DISPATCH_LEVEL|AF_INET|AF_INET6|AF_UNSPEC|\
+             NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1|\
              ALL_PROCESSOR_GROUPS|RPC_C_AUTHN_.*",
         )
         .generate()?

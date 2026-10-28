@@ -22,6 +22,8 @@ use std::time::Duration;
 use avulse_abi::ioctl::{self, OpenRequest, Record};
 use avulse_filter::Layer;
 use avulse_filter::bytecode::EncodeError;
+use avulse_proto::Link;
+use avulse_proto::checksum::{self, Updated};
 use windows_sys::Win32::Foundation::{
     ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_OPERATION_ABORTED,
     ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_EXISTS,
@@ -53,14 +55,14 @@ pub(crate) struct Windows;
 
 impl Backend for Windows {
     fn capabilities(&self) -> Capabilities {
-        // The NETWORK layers divert, sniff and drop; injection comes with Step 26.
         let mut c = Capabilities::NONE;
         for layer in [Layer::Network, Layer::NetworkForward] {
             c.layers[layer as usize] = LayerSupport {
                 open: true,
                 divert: true,
                 drop: true,
-                ..LayerSupport::default()
+                inject: true,
+                modify: true,
             };
         }
         c
@@ -423,22 +425,32 @@ impl Opened for Handle {
         }
     }
 
+    /// WinDivert's rules, as on Linux: an impostor loses a hop of TTL, and the checksums whose
+    /// address flags are clear are computed; then the driver injects the packet.
     fn send(&self, packet: &[u8], addr: &Address) -> Result<usize> {
-        let mut input = Vec::with_capacity(Record::encoded_len(packet.len()));
+        let mut pkt = packet.to_vec();
+        if addr.impostor && !pkt.is_empty() {
+            super::decrement_ttl(&mut pkt)?;
+        }
+        let fix = Updated {
+            ipv4: !addr.ip_checksum,
+            tcp: !addr.tcp_checksum,
+            udp: !addr.udp_checksum,
+            ..Updated::default()
+        };
+        checksum::recalculate_only(&mut pkt, Link::Ip, fix);
+        let mut input = Vec::with_capacity(Record::encoded_len(pkt.len()));
         Record {
             addr: *addr,
-            data: packet,
+            data: &pkt,
         }
         .encode_into(&mut input);
         let mut sent = [0u8; 4];
-        match self.call(ioctl::SEND, &input, &mut sent) {
-            Ok(_) => Ok(packet.len()),
-            // STATUS_NOT_IMPLEMENTED, until the driver injects.
-            Err(Error::Io(e)) if e.raw_os_error() == Some(1) => {
-                Err(Error::Unsupported("sending on Windows, for now"))
-            }
-            Err(e) => Err(e),
+        self.call(ioctl::SEND, &input, &mut sent)?;
+        if u32::from_le_bytes(sent) != 1 {
+            return Err(Error::Io(io::Error::other("the driver sent nothing")));
         }
+        Ok(packet.len())
     }
 
     fn shutdown(&self, how: Shutdown) -> Result<()> {

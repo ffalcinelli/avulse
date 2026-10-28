@@ -19,11 +19,11 @@ use avulse_abi::{Address, Flags};
 use avulse_filter::{Layer, Meta};
 use avulse_proto::Link;
 
-use crate::eval;
 use crate::handle::Open;
 use crate::lock::SpinLock;
 use crate::rx::{self, Entry};
 use crate::sys::{self, w};
+use crate::{eval, inject};
 
 const fn guid(a: u32, b: u16, c: u16, d: [u8; 8]) -> sys::GUID {
     sys::GUID {
@@ -441,9 +441,19 @@ unsafe fn classify(
     let Some(open) = HANDLES.lock().get(&id).cloned() else {
         return;
     };
-    if open.rx.lock().shut {
+    if open.rx.lock().shut || open.flags.contains(Flags::SEND_ONLY) {
         return;
     }
+    let nbl = layer_data.cast::<sys::NET_BUFFER_LIST>();
+    // A packet sent by a handle of this priority or a lower one passes this handle by: it saw the
+    // packet before the sender did (or is the sender). Handles of lower priorities see it as an
+    // impostor, as on Linux.
+    // SAFETY: at these layers, `layer_data` is a NET_BUFFER_LIST.
+    let impostor = match unsafe { inject::sender(nbl, hook.ipv6) } {
+        Some(p) if open.priority >= p => return,
+        Some(_) => true,
+        None => false,
+    };
     // SAFETY: WFP passes valid values.
     let flags = unsafe { value_u32(values, hook.flags) };
     let loopback = flags & sys::FWP_CONDITION_FLAG_IS_LOOPBACK != 0;
@@ -451,8 +461,7 @@ unsafe fn classify(
     if loopback && !hook.outbound && hook.avulse == Layer::Network {
         return;
     }
-    let nbl = layer_data.cast::<sys::NET_BUFFER_LIST>();
-    // SAFETY: at these layers, `layer_data` is a NET_BUFFER_LIST.
+    // SAFETY: as above.
     let nb = unsafe { sys::nbl_first_nb(nbl) };
     // Inbound, the data starts after the IP header: move back to include it.
     let back = if hook.outbound {
@@ -477,6 +486,7 @@ unsafe fn classify(
     addr.outbound = hook.outbound;
     addr.loopback = loopback;
     addr.ipv6 = hook.ipv6;
+    addr.impostor = impostor;
     // SAFETY: WFP passes valid values.
     unsafe {
         addr.if_idx = value_u32(values, hook.if_idx);

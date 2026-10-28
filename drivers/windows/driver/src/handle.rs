@@ -139,7 +139,10 @@ pub fn open(file: &File, input: &[u8]) -> Result<(), sys::NTSTATUS> {
     }
     // Verify outside the lock: it is linear in the program's size.
     let open = Arc::new(Open::new(&req, file.rx.clone())?);
-    if matches!(open.layer, Layer::Network | Layer::NetworkForward) {
+    // A SEND_ONLY handle captures nothing: it needs no WFP filter.
+    if matches!(open.layer, Layer::Network | Layer::NetworkForward)
+        && !open.flags.contains(Flags::SEND_ONLY)
+    {
         // SAFETY: at PASSIVE_LEVEL, in the dispatch routine.
         unsafe { wfp::attach(&open)? };
     }

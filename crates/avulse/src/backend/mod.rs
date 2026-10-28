@@ -101,6 +101,32 @@ impl Backend for Unavailable {
     }
 }
 
+/// What WinDivert does to the packets an application sends with the impostor flag: decrement
+/// the TTL (hop limit), so that two handles that reinject each other's packets cannot loop
+/// forever. `ip` starts with the IP header.
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
+pub(crate) fn decrement_ttl(ip: &mut [u8]) -> Result<()> {
+    let at = match ip[0] >> 4 {
+        4 => 8,
+        6 => 7,
+        _ => return Ok(()),
+    };
+    if ip[at] <= 1 {
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::HostUnreachable,
+            "the TTL of the impostor packet ran out",
+        )));
+    }
+    ip[at] -= 1;
+    if at == 8 {
+        // The header checksum, updated: the word TTL|protocol went down by 0x100.
+        let c = u16::from_be_bytes([ip[10], ip[11]]) as u32 + 0x100;
+        let c = (c & 0xffff) + (c >> 16);
+        ip[10..12].copy_from_slice(&(c as u16).to_be_bytes());
+    }
+    Ok(())
+}
+
 /// What a backend supports at one layer ([`Capabilities::layer`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]

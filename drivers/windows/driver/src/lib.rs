@@ -19,6 +19,7 @@ use wdk_alloc::WdkAllocator;
 mod device;
 mod eval;
 mod handle;
+mod inject;
 mod lock;
 mod rx;
 mod sys;
@@ -47,12 +48,17 @@ pub unsafe extern "system" fn driver_entry(
         return status;
     }
     // SAFETY: at PASSIVE_LEVEL, once, with the device just created.
-    let status = unsafe { wfp::register(device::get()) };
+    let mut status = unsafe { wfp::register(device::get()) };
+    if status == sys::STATUS_SUCCESS {
+        // SAFETY: at PASSIVE_LEVEL, once, with the driver object.
+        status = unsafe { inject::init(driver) };
+    }
     if status != sys::STATUS_SUCCESS {
         wdk::println!("avulse: WFP registration failed: {status:#x}");
         // SAFETY: as above; nothing uses the device yet.
         unsafe {
             wfp::unregister();
+            inject::free();
             device::delete();
         }
         eval::free();
@@ -70,6 +76,7 @@ unsafe extern "C" fn unload(_driver: *mut sys::DRIVER_OBJECT) {
     // SAFETY: at PASSIVE_LEVEL, after `driver_entry` succeeded; no file is open.
     unsafe {
         wfp::unregister();
+        inject::free();
         device::delete();
     }
     eval::free();

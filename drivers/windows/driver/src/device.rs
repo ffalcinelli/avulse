@@ -15,7 +15,7 @@ use avulse_proto::Link;
 
 use crate::handle::{self, File};
 use crate::sys::{self, unicode, w};
-use crate::{eval, rx};
+use crate::{eval, inject, rx};
 
 static DEVICE: AtomicPtr<sys::DEVICE_OBJECT> = AtomicPtr::new(null_mut());
 
@@ -272,7 +272,36 @@ fn control(file: &File, code: u32, io: &Buffered) -> Result<usize, sys::NTSTATUS
                 .ok_or(sys::STATUS_INSUFFICIENT_RESOURCES)?;
             io.output(&u32::from(matched).to_le_bytes())
         }
-        ioctl::SEND => Err(sys::STATUS_NOT_IMPLEMENTED),
+        ioctl::SEND => {
+            let h = handle::get(file)?;
+            if h.flags.contains(avulse_abi::Flags::RECV_ONLY)
+                || !matches!(h.layer, Layer::Network | Layer::NetworkForward)
+            {
+                return Err(sys::STATUS_INVALID_DEVICE_REQUEST);
+            }
+            if h.mutable.lock().shut_send {
+                // ERROR_NO_DATA in user mode: shut down.
+                return Err(sys::STATUS_PIPE_EMPTY);
+            }
+            let mut sent = 0u32;
+            for r in Record::decode_all(io.input()) {
+                let status = match r {
+                    Ok(r) if r.data.len() <= eval::MAX_PACKET => {
+                        inject::send(r.data, &r.addr, h.layer, h.priority)
+                    }
+                    _ => sys::STATUS_INVALID_PARAMETER,
+                };
+                if status != sys::STATUS_SUCCESS {
+                    // Only the first failure is an error; after it, nothing more is sent.
+                    if sent == 0 {
+                        return Err(status);
+                    }
+                    break;
+                }
+                sent += 1;
+            }
+            io.output(&sent.to_le_bytes())
+        }
         _ => Err(sys::STATUS_INVALID_DEVICE_REQUEST),
     }
 }
