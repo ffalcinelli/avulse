@@ -155,6 +155,11 @@ impl<'a> Vals<'a> {
         }
     }
 
+    /// Empties the list (the values past its length are never read).
+    pub(crate) fn clear(&mut self) {
+        self.n = 0;
+    }
+
     pub(crate) fn as_slice(&self) -> &[V<'a>] {
         &self.v[..self.n]
     }

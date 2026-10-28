@@ -64,13 +64,17 @@ fn both(src: &str) -> Option<(Filter, Vec<u8>)> {
     Some((f, bytes))
 }
 
-/// The IR evaluator and the bytecode give the same result on `frame`, under every [`metas`].
+/// The IR evaluator and the bytecode give the same result on `frame`, under every [`metas`], with
+/// a fresh register file and with one reused from the earlier runs.
 fn agree(src: &str, f: &Filter, bytes: &[u8], frame: &[u8], link: Link) -> Result<(), String> {
     let program = bytecode::verify(bytes).map_err(|e| format!("{src}: {e}"))?;
     let packet = Packet::parse(frame, link);
-    for meta in &metas() {
+    let metas = metas();
+    let mut regs = bytecode::Registers::new();
+    for meta in &metas {
         let (ir, bc) = (f.matches(&packet, meta), program.matches(&packet, meta));
-        if ir != bc {
+        let reused = program.matches_in(&mut regs, &packet, meta);
+        if ir != bc || bc != reused {
             return Err(format!(
                 "{src}\n  frame {frame:02x?} ({link:?}), {meta:?}\n  IR {ir}, bytecode {bc}\n{}",
                 f.program().unwrap()
@@ -346,7 +350,19 @@ fn unwritten_registers_are_empty() {
     let p = program(&[insn(EXISTS, 0, 15, 0, 0)], &[]);
     let frame = https_syn();
     let v = bytecode::verify(&p).unwrap();
-    assert!(!v.matches(&Packet::parse(&frame, Link::Ethernet), &Meta::default()));
+    let packet = Packet::parse(&frame, Link::Ethernet);
+    let meta = Meta::default();
+    assert!(!v.matches(&packet, &meta));
+    // Not even when an earlier run left a value there.
+    let port = FIELDS.iter().position(|d| d.name == "tcp.port").unwrap() as u32;
+    let w = program(
+        &[insn(FIELD, 15, 0, 0, port), insn(EXISTS, 0, 15, 0, 0)],
+        &[],
+    );
+    let w = bytecode::verify(&w).unwrap();
+    let mut regs = bytecode::Registers::new();
+    assert!(w.matches_in(&mut regs, &packet, &meta));
+    assert!(!v.matches_in(&mut regs, &packet, &meta));
 }
 
 /// Every table filter of the tshark comparison, over its whole corpus: the IR evaluator and the

@@ -70,6 +70,21 @@ jobs:
       - run: cargo build -p avulse-proto -p avulse-filter --target thumbv7em-none-eabihf
       - run: cargo build -p avulse-filter --features regex --target thumbv7em-none-eabihf
 
+  stack:
+    # The interpreter's stack frames in a release build: the Windows driver runs it on a short
+    # kernel stack (scripts/stack-sizes.py, docs/spikes/windows-driver.md).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - name: Install llvm-readobj
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends llvm
+      - run: python3 scripts/stack-sizes.py
+
   docs:
     # rustdoc with broken links as errors, the WebAssembly build of the playground, and the guide.
     # The filters in the guide are compiled by `cargo test` (crates/cli/tests/docs.rs).

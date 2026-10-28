@@ -11,19 +11,22 @@ use crate::fields::FIELDS;
 use crate::meta::Meta;
 use crate::value::{self, V, Vals};
 
-pub(super) fn run(code: &[u8], pool: &[u8], pkt: &Packet<'_>, meta: &Meta<'_>) -> bool {
-    run_in(code, pool, pkt, meta)
-}
-
-/// [`run`] with one lifetime for everything values may borrow from.
-fn run_in<'a>(code: &'a [u8], pool: &'a [u8], p: &'a Packet<'a>, m: &'a Meta<'a>) -> bool {
-    let mut regs = [Vals::new(); REGISTERS];
+/// Runs a verified program, with `regs` as its register file, which it empties first: a register
+/// the program reads before writing it is empty, as in a fresh file.
+pub(super) fn run<'a>(
+    code: &'a [u8],
+    pool: &'a [u8],
+    p: &'a Packet<'a>,
+    m: &'a Meta<'a>,
+    regs: &mut [Vals<'a>; REGISTERS],
+) -> bool {
+    for r in regs.iter_mut() {
+        r.clear();
+    }
+    let empty = Vals::new();
     let mut bools = [false; BOOLEANS];
     let mut acc = false;
     let mut pc = 0usize;
-    let get = |regs: &[Vals<'a>; REGISTERS], r: u8| {
-        regs.get(r as usize).copied().unwrap_or_else(Vals::new)
-    };
     let field = |id: u32| FIELDS.get(id as usize).map(|d| d.field);
     while let Some(i) = code
         .get(pc.saturating_mul(INSN)..)
@@ -34,7 +37,11 @@ fn run_in<'a>(code: &'a [u8], pool: &'a [u8], p: &'a Packet<'a>, m: &'a Meta<'a>
         let Some(op) = Op::from_u8(i.op) else {
             return false;
         };
-        let (b, c) = (get(&regs, i.b), get(&regs, i.c));
+        // The operands are borrowed: copying two registers per instruction was most of the cost.
+        let (b, c) = (
+            regs.get(i.b as usize).unwrap_or(&empty),
+            regs.get(i.c as usize).unwrap_or(&empty),
+        );
         let out = match op {
             Op::Lit => lit_at(pool, i.imm)
                 .map(Vals::one)
@@ -53,20 +60,20 @@ fn run_in<'a>(code: &'a [u8], pool: &'a [u8], p: &'a Packet<'a>, m: &'a Meta<'a>
                 }
             }
             Op::Slice => match Ranges::at(pool, i.imm) {
-                Ok(r) => value::slice_vals(&b, r),
+                Ok(r) => value::slice_vals(b, r),
                 Err(_) => Vals::new(),
             },
-            Op::BitAnd => value::bitand(&b, &c),
+            Op::BitAnd => value::bitand(b, c),
             Op::Arith => match ARITH.get(i.imm as usize) {
-                Some(op) => value::arith(*op, &b, &c),
+                Some(op) => value::arith(*op, b, c),
                 None => Vals::new(),
             },
-            Op::Neg => value::neg_abs(&b, false),
-            Op::Abs => value::neg_abs(&b, true),
-            Op::Ext => value::extreme(i.imm == 1, &b, &c),
-            Op::Len => value::len(&b),
-            Op::Count => value::count(&b),
-            Op::Case => value::case(&b, i.imm == 1),
+            Op::Neg => value::neg_abs(b, false),
+            Op::Abs => value::neg_abs(b, true),
+            Op::Ext => value::extreme(i.imm == 1, b, c),
+            Op::Len => value::len(b),
+            Op::Count => value::count(b),
+            Op::Case => value::case(b, i.imm == 1),
             // Tests and control flow: they set the accumulator or jump, and write no register.
             _ => {
                 match op {
@@ -76,15 +83,15 @@ fn run_in<'a>(code: &'a [u8], pool: &'a [u8], p: &'a Packet<'a>, m: &'a Meta<'a>
                     Op::Cmp => {
                         acc = CMP
                             .get(usize::from(i.a & 7))
-                            .is_some_and(|op| value::cmp_test(*op, quant(i.a >> 3), &b, &c));
+                            .is_some_and(|op| value::cmp_test(*op, quant(i.a >> 3), b, c));
                     }
                     Op::Member => {
                         acc = match Set::at(pool, i.imm) {
-                            Ok(set) => value::member_test(&b, set, quant(i.a), i.a & 2 != 0),
+                            Ok(set) => value::member_test(b, set, quant(i.a), i.a & 2 != 0),
                             Err(_) => false,
                         };
                     }
-                    Op::Contains => acc = value::contains_test(quant(i.a), &b, &c),
+                    Op::Contains => acc = value::contains_test(quant(i.a), b, c),
                     Op::Not => acc = !acc,
                     Op::SaveB => {
                         if let Some(slot) = bools.get_mut(i.a as usize) {

@@ -5,12 +5,12 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-28, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; next Phase 5, the Windows driver)
+## Status (2026-10-28, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5: Step 22 done, next Step 23)
 
 | Area | State |
 | --- | --- |
 | `crates/proto` (`avulse-proto`) | Done for Phase 1. Zero-copy `no_std` parsing: Ethernet, 2 VLAN tags, ARP, IPv4, IPv6 (8 extension headers, fragments), TCP (options: `Tcp::option_iter`, `option`), UDP, ICMP, ICMPv6. Checksum recalculation (all, or `checksum::recalculate_only`) and verification (`checksum::verify`). 15 tests, including all truncations and random input. |
-| `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. Wireshark 4.6 syntax covered: quantifiers, arithmetic, layers, value labels, `@field`, `&` on bytes, multi-range slices, `upper`/`lower`, and `matches` (optional `regex` feature). Semantics validated against tshark 4.6/4.7 (`src/tests/tshark.rs`, including every field's byte span against PDML). Bytecode, verifier and `no_std` interpreter (`bytecode/`), sharing the value operations in `value.rs` with the IR evaluator. WinDivert 2.2 front-end (`windivert/`), passing WinDivert's 241 vectors through the IR, the bytecode and the native round trip; `ir::Test::native()` prints native syntax. Nesting is bounded (native 64 levels, 4 macro levels; WinDivert 341 parentheses). TCP options: `tcp.options`, `.mss`, `.mss_val`, `.wscale`, `.wscale.shift`, `.wscale.multiplier`, `.sack_perm`, `.timestamp`, `.tsval`, `.tsecr`. 76 unit tests, 9 tshark tests (opt-in) and doctests. |
+| `crates/filter` (`avulse-filter`) | Front half of Phase 1 done: lexer, parser, `fmt`, checker, typed IR, `simplify`, allocation-free evaluator. Wireshark 4.6 syntax covered: quantifiers, arithmetic, layers, value labels, `@field`, `&` on bytes, multi-range slices, `upper`/`lower`, and `matches` (optional `regex` feature). Semantics validated against tshark 4.6/4.7 (`src/tests/tshark.rs`, including every field's byte span against PDML). Bytecode, verifier and `no_std` interpreter (`bytecode/`), sharing the value operations in `value.rs` with the IR evaluator; `VerifiedProgram::matches_in` takes the register file from the caller, and its frames are checked in CI (`scripts/stack-sizes.py`, Step 22). WinDivert 2.2 front-end (`windivert/`), passing WinDivert's 241 vectors through the IR, the bytecode and the native round trip; `ir::Test::native()` prints native syntax. Nesting is bounded (native 64 levels, 4 macro levels; WinDivert 341 parentheses). TCP options: `tcp.options`, `.mss`, `.mss_val`, `.wscale`, `.wscale.shift`, `.wscale.multiplier`, `.sack_perm`, `.timestamp`, `.tsval`, `.tsecr`. 76 unit tests, 9 tshark tests (opt-in) and doctests. |
 | `crates/cli` (`avulse`) | `avulse filter check \| fmt \| explain [--bytecode] \| eval --hex … \| convert [--layer …] \| fields [--format markdown]`. Exit codes: 0 match, 1 no match, 2 error. `avulse cleanup` reaps the handles of dead processes (Linux, root). |
 | `fuzz/` | cargo-fuzz targets `bytecode` (verifier and interpreter on arbitrary programs), `filter` (parser, `fmt` round trip, checker, evaluator, bytecode agreement) and `windivert` (front-end, bytecode and native agreement). Outside the workspace. |
 | `crates/wasm` (`avulse-wasm`) | The filter engine for the website's playground (wasm-bindgen, `publish = false`). |
@@ -439,7 +439,7 @@ equivalent on the vector packets.
 
 ### After that
 
-Phases 2 to 4 are expanded below. Then follow the roadmap: 5 (Windows driver; read the Spike B
+Phases 2 to 5 are expanded below. Then follow the roadmap: 5 (Windows driver; read the Spike B
 note's requirements first) → 6 (macOS, after Spike C) → the first release (v0.0.1, below) → 7
 (bindings, 1.0). Before starting each phase, expand it into steps in this file, in the same
 format as above.
@@ -1622,6 +1622,222 @@ Listed for users in `book/src/libraries/windivert-compat.md`.
 - On a TCP data offset longer than the packet, `calc_checksums` stays within the packet.
 - At FLOW and SOCKET, `eval_filter` accepts a non-NULL packet of length 0.
 
+## Phase 5: Windows driver
+
+**Goal** (roadmap, Phase 5): a Rust driver that gives Windows every layer, with WFP callouts for
+the WinDivert layers, an NDIS lightweight filter for ETHERNET, and the `no_std` bytecode
+interpreter. Then the WinDivert-compatible `WinDivert.dll`. **Exit:** the pydivert and jdivert
+Windows suites pass against it, under Driver Verifier. Attestation signing is an owner action
+(EV certificate, Partner Center), tracked here but not blocking the code.
+
+Read `docs/spikes/windows-driver.md` first. Its findings are requirements: release builds only,
+the stack check with `KeExpandKernelStackAndCalloutEx`, a register file off the stack, a
+preallocated buffer for split packets, retreating to the IP header at the inbound layers, and
+registering when the base filtering engine starts. `windivert/sys/windivert.c` is reference
+reading only, as everywhere in this project.
+
+**Decisions for this phase** (change them here, with a reason, if the work proves them wrong):
+
+- **Where the code lives.**
+  - `drivers/windows/` is a Cargo workspace of its own, outside the main one (like the spikes),
+    because it builds only with the WDK. It holds `avulse-wdk-sys` (the bindgen bindings of
+    finding 1, with the hand-written macros and safe wrappers for NBL chains and classify
+    output) and `avulse-driver` (`avulse.sys`, WDM, with the NDIS filter in the same binary,
+    installed by an INF as in the spike).
+  - The user-mode side is `crates/avulse/src/backend/windows/`, a module like Linux's.
+- **One ABI crate for both sides.** `crates/driver-abi` (`avulse-driver-abi`) is `no_std` and
+  `forbid(unsafe_code)`, in the main workspace so that host tests cover it. It holds:
+  - the IOCTL codes, and the open request (layer, priority, flags, the bytecode, interface
+    indexes, the filter text and its syntax for REFLECT);
+  - the receive and send records;
+  - the parameters and shutdown;
+  - the address, which crosses the boundary as avulse's own `Address`: `Address`, `Flow`,
+    `Reflect`, `Context` and `Flags` move into this crate, and `avulse` re-exports them (same
+    layout, same `ADDRESS_VERSION`).
+- **The kernel runs bytecode only.** User mode compiles the filter (`Filter::program`) and the
+  driver verifies it at open (`bytecode::verify`). A filter the bytecode cannot express
+  (`EncodeError::UserSpaceOnly`, i.e. `matches`) opens with a match-all program, and user space
+  filters again and reinjects what does not match, as Linux does with an inexact matcher.
+- **Evaluation.**
+  - Per-processor scratch, allocated at load: the register file (`matches_in`) and a copy buffer
+    for packets whose data is split across MDLs. No allocation per packet.
+  - The stack check of the spike, failing open.
+  - The kernel reads the whole packet. Large sends (LSO) are capped at the MTU WinDivert allows
+    (`40 + 0xFFFF`).
+- **Diverting** follows WinDivert's model.
+  - At the WFP layers, a matched packet is copied to the handle's queue and the original is
+    absorbed (`FWP_ACTION_BLOCK` with `FWPS_CLASSIFY_OUT_FLAG_ABSORB`).
+  - `recv` completes pending `IOCTL_RECV` requests (the inverted-call model, a cancel-safe
+    queue).
+  - The queue applies the queue parameters, as Linux's `queue.rs` does.
+- **Priorities and loops.** One sublayer, with a WFP filter per handle and layer whose weight
+  follows the handle's priority. Each handle injects through its own injection handle, so
+  `FwpsQueryPacketInjectionState0` tells its own packets (skipped) from other handles' (the
+  impostor flag, and lower priorities only).
+- **Lifetime.** A handle is a file object. `IRP_MJ_CLEANUP` closes it, which is the crash
+  safety (no heartbeat is needed on Windows). The driver removes its WFP objects through a
+  dynamic engine session. It (re)registers on `FwpmBfeStateSubscribeChanges0`.
+- **Loading.** As WinDivert's DLL does: the first open installs and starts the `avulse` kernel
+  service from `avulse.sys`. The file sits next to the executable, or at `AVULSE_DRIVER`, and
+  the call needs Administrator. The ETHERNET layer also needs the filter bound to adapters
+  (`netcfg` with the INF), so `capabilities()` reports ETHERNET only when it is.
+- **Testing.**
+  - Builds and tests run in the `windows` Vagrant VM: test signing, Driver Verifier, kernel
+    dumps (`spikes/windows-driver/scripts/toolchain.ps1`, moved to `drivers/windows/scripts/`).
+  - `crates/avulse/tests/capture_windows.rs` (`AVULSE_DRIVER=1`, Administrator) ports the Linux
+    capture scenarios that apply.
+  - The host checks the ABI crate, and the user-mode backend through `cargo check --target
+    x86_64-pc-windows-msvc` in CI's Windows job.
+
+### Step 22: The interpreter for the kernel (done)
+
+**Outcome.** Spike B's and Spike C's interpreter findings are fixed in `avulse-filter`.
+
+- **`VerifiedProgram::matches_in(&mut Registers, …)`.** The caller provides the register file
+  (16 registers, about 2.7 KiB), so the interpreter's frame stays small. The driver keeps one
+  per processor. `run` empties the registers it gets (16 length writes, not a 2.7 KiB clear), so
+  a register a program reads before writing it is empty, as in a fresh file. `matches` uses a
+  fresh file.
+- **Operands are borrowed, not copied.** Copying two 170-byte registers per instruction was most
+  of the cost (Spike C, finding 5). Interpreter time in ns per packet on this workstation, with
+  the macOS spike's corpus; the last column reuses one register file:
+
+  | Filter | Evaluator | Before | `matches` | `matches_in` |
+  | --- | --- | --- | --- | --- |
+  | `tcp.port == 443` | 37 | 198 | 108 | 75 |
+  | addresses and a flag | 58 | 321 | 181 | 132 |
+  | a 51-port set | 102 | 565 | 518 | 492 |
+  | `tcp.payload contains "GET "` | 975 | 1133 | 1061 | 1017 |
+  | IPv6 or TCP options | 86 | 419 | 211 | 168 |
+  | `eth.type`, `not icmp`, `len(frame)` | 106 | 534 | 245 | 199 |
+  | a WinDivert filter | 77 | 430 | 186 | 155 |
+
+  Large sets stay slow: each test decodes every item from the constant pool. A sorted,
+  fixed-width encoding of integer sets would fix it, at the cost of a `bytecode::VERSION` bump.
+  Left for later.
+- **Stack frames, measured in CI.** `scripts/stack-sizes.py` builds avulse-filter in release with
+  `-Z emit-stack-sizes` and reads the frames with `llvm-readobj`. It fails over 1 KiB on the
+  interpreter's path (`bytecode::exec`, `value`, `avulse_proto`). The largest are now
+  `exec::run` and `value::load`, at 504 B each; Spike B's debug build had 6,728 B. CI's `stack`
+  job runs it.
+- **Tests:** `agree` compares a reused register file too, and a register left by an earlier run
+  reads as empty.
+
+### Step 23: The ABI crate, the bindings, and the driver's skeleton
+
+**Where.**
+- `crates/driver-abi`: the types above, with layout tests (`size_of`, offsets) and encode/decode
+  tests of the requests.
+- Move `Address` and friends there, and re-export them from `avulse`.
+- `drivers/windows/avulse-wdk-sys`: the spike's `build.rs` and `sys.rs`, plus
+  `IoCreateDevice`/symbolic link, IRP and cancel-safe queue functions, and the WFP injection
+  calls.
+- `drivers/windows/avulse-driver`:
+  - `DriverEntry` and unload;
+  - the control device `\\.\Avulse` (Administrator only, through its security descriptor);
+  - `IRP_MJ_CREATE`/`CLEANUP`/`CLOSE`, and the IOCTLs open (verify the program), shutdown,
+    set and get param, stats;
+  - the per-processor scratch, and the evaluation with the stack check (from the spike's
+    `stats.rs`);
+  - no packet hook yet.
+
+**Tests.** Host: the ABI crate. VM: the driver loads and unloads under Driver Verifier. A small
+test program opens the device, opens a handle with a valid program and with a bad one (refused),
+and closes it, also by exiting without closing.
+
+### Step 24: The user-mode backend
+
+**Where.** `crates/avulse/src/backend/windows/`:
+- installing and starting the service, and opening the device;
+- `Backend`/`Opened`, with overlapped `DeviceIoControl`;
+- `recv` with a timeout (a pending `IOCTL_RECV`, cancelled with `CancelIoEx`);
+- shutdown, params, stats and close.
+
+`Opened::as_fd` is Unix-only, so add a Windows counterpart (`as_handle`, an event that is
+signalled when `recv` would not block), and expose it as `Handle::as_handle` and in the C ABI
+(`avulse_fd` returns -1 there; add `avulse_handle_event`). CI's Windows job checks it compiles.
+
+**Acceptance.** In the VM, `Handle::open` at NETWORK loads the driver on first use, a receive
+times out, and close and process exit release the handle.
+
+### Step 25: NETWORK and NETWORK_FORWARD
+
+**Where.** `avulse-driver`'s `wfp.rs`:
+- callouts at `INBOUND`/`OUTBOUND_IPPACKET_V4`/`V6` and `IPFORWARD_V4`/`V6`;
+- per handle and layer, WFP filters at its weight;
+- classify:
+  - retreat to the IP header inbound;
+  - read the packet (in place or into the scratch copy);
+  - fill `Meta` (direction, loopback, interface indexes, impostor, fragment);
+  - evaluate;
+  - divert (queue a copy, absorb the original), sniff (queue a copy, permit) or drop;
+- the queue with the parameters, and `IOCTL_RECV` completion;
+- the `FRAGMENTS` flag.
+
+**Tests.** `capture_windows.rs`: divert, sniff and drop pings and loopback UDP, filters that
+match and miss, priorities between two handles, queue limits, shutdown delivering what is
+queued.
+
+### Step 26: Injection
+
+**Where.**
+- `IOCTL_SEND`: `FwpsInjectNetworkSendAsync0` (outbound), `ReceiveAsync0` (inbound, with the
+  interface indexes) and `ForwardAsync0`.
+- Each handle's injection handle, and the injection state for loops and `impostor` (an impostor
+  loses a hop of TTL, as on Linux).
+- WinDivert's checksum rules: compute the checksums whose address flag is clear.
+- Batches.
+
+**Tests.** Reinject diverted pings unchanged and modified, inject built packets both ways,
+loopback, two handles at different priorities, and no loop.
+
+### Step 27: The ETHERNET layer
+
+**Where.** `avulse-driver`'s `lwf.rs`:
+- per handle, the frames of its adapters, from the send and receive NBL hooks;
+- divert (complete the original NBL and queue a copy), sniff, drop;
+- injection by allocating NBLs from a pool, sent with `NdisFSendNetBufferLists` or indicated
+  with `NdisFIndicateReceiveNetBufferLists`, marked so the filter skips its own;
+- VLAN tags from the NBL's 802.1Q info, the counterpart of Linux's offloaded tags.
+
+The INF and its install (`netcfg`) are part of the backend's setup.
+
+**Tests.** ARP and VLAN frames, divert and reinject, inject a frame both ways.
+
+### Step 28: FLOW, SOCKET and REFLECT
+
+**Where.**
+- FLOW: `ALE_FLOW_ESTABLISHED_V4`/`V6` and the flow-delete callback (`FwpsFlowAssociateContext0`).
+- SOCKET: `ALE_RESOURCE_ASSIGNMENT` (bind), `ALE_AUTH_CONNECT` (connect), `ALE_AUTH_LISTEN`,
+  `ALE_AUTH_RECV_ACCEPT` and the endpoint closure. Windows can refuse all four, unlike Linux.
+- `process.name` from the process image.
+- REFLECT from the driver's handle table: open and close events with the filter text.
+- The FLOW/SOCKET fields of `Meta`, as Linux fills them.
+
+**Tests.** The Linux event scenarios: connect, bind and accept, refusing by filter and by process
+name, flows of TCP and UDP, and REFLECT of another process's handle.
+
+### Step 29: `WinDivert.dll` and the binding suites (Phase 5 exit)
+
+**Where.** `crates/windivert-compat` on Windows:
+- the `WinDivert*` exports (Open, Recv/RecvEx, Send/SendEx, Shutdown, Close, Set/GetParam and
+  the helpers) over the same core as the `ebpfdivert_*` exports, with `GetLastError` codes;
+- built as `WinDivert.dll`, next to `avulse.sys`.
+
+**Tests.** pydivert's and jdivert's Windows suites in their own `windows` VMs, with the DLL in
+place of WinDivert's. Divergences are listed in the guide.
+
+### Step 30: Hardening and distribution
+
+**Where.**
+- Driver Verifier (standard flags and special pool) on every suite, and HVCI compatibility (the
+  Device Guard readiness tool).
+- A CI job that builds the driver, if the WDK installs on a GitHub Windows runner in reasonable
+  time; else the VM build stays the check.
+- arm64.
+- OSSign for the user-mode binaries.
+- Owner actions: the EV certificate, Partner Center, attestation signing.
+
 ## Release v0.0.1 (after Phases 5 and 6)
 
 The first release, once Windows and macOS have backends. The plan below was written for a
@@ -1680,7 +1896,15 @@ pre-release tag) passes, then the v0.0.1 tag publishes. The guide and README say
 - [x] Step 19: compat shim core (address, errno, helpers)
 - [x] Step 20: compat shim handle exports, `Handle::stats`
 - [x] Step 21: pydivert and jdivert suites against the shim (Phase 4 exit)
-- [ ] Phase 5: Windows driver
+- [x] Step 22: the interpreter for the kernel (`matches_in`, borrowed operands, frame sizes in CI)
+- [ ] Step 23: driver ABI crate, bindings, driver skeleton
+- [ ] Step 24: user-mode Windows backend
+- [ ] Step 25: NETWORK and NETWORK_FORWARD on Windows
+- [ ] Step 26: injection on Windows
+- [ ] Step 27: ETHERNET on Windows (NDIS LWF)
+- [ ] Step 28: FLOW, SOCKET and REFLECT on Windows
+- [ ] Step 29: `WinDivert.dll` and the binding suites on Windows (Phase 5 exit)
+- [ ] Step 30: hardening and distribution (Driver Verifier, HVCI, CI build, signing)
 - [ ] Phase 6: macOS system extension
 - [ ] Release v0.0.1 (crates.io, tarballs; after Phases 5 and 6)
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement

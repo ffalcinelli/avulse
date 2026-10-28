@@ -281,6 +281,9 @@ Exit: both suites pass. The binding suites become a free cross-language conforma
 3. Set up the signing pipeline: EV certificate and attestation signing through Partner Center.
 4. Ship the compat `WinDivert.dll` drop-in.
 
+Progress (steps in `docs/implementation-plan.md`, Steps 22 to 30): the interpreter is ready for the kernel stack
+(Step 22: a register file the caller provides, borrowed operands, about twice as fast, frames checked in CI).
+
 Exit: the pydivert and jdivert Windows suites pass against it, and the driver is attestation-signed.
 
 ### Phase 6: macOS system extension

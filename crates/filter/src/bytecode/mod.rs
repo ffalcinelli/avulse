@@ -122,7 +122,7 @@ use avulse_proto::Packet;
 use crate::fields::FIELDS;
 use crate::ir::{ArithOp, CmpOp, Lit, Quant, Slice, SliceEnd};
 use crate::meta::Meta;
-use crate::value::V;
+use crate::value::{V, Vals};
 
 pub use encode::EncodeError;
 pub use verify::{VerifyError, VerifyErrorKind, verify};
@@ -556,12 +556,50 @@ pub struct VerifiedProgram<'p> {
     pool: &'p [u8],
 }
 
-impl VerifiedProgram<'_> {
+impl<'p> VerifiedProgram<'p> {
     /// Whether `packet`, with metadata `meta`, matches. This gives the same result as
     /// [`Filter::matches`](crate::Filter::matches) on the filter the program was compiled from. It
     /// does not allocate and never panics.
     pub fn matches(&self, packet: &Packet<'_>, meta: &Meta<'_>) -> bool {
-        exec::run(self.code, self.pool, packet, meta)
+        self.matches_in(&mut Registers::new(), packet, meta)
+    }
+
+    /// [`matches`](Self::matches) with a register file the caller provides, so that the
+    /// interpreter's own stack frame stays small: a kernel driver keeps the registers out of its
+    /// short stack (they take about 2.7 KiB). It can be reused: each run starts by emptying it.
+    pub fn matches_in<'a>(
+        &self,
+        regs: &mut Registers<'a>,
+        packet: &'a Packet<'a>,
+        meta: &'a Meta<'a>,
+    ) -> bool
+    where
+        'p: 'a,
+    {
+        exec::run(self.code, self.pool, packet, meta, &mut regs.0)
+    }
+}
+
+/// The interpreter's register file ([`VerifiedProgram::matches_in`]). Its values may borrow from
+/// the packet and the metadata of the evaluation it is used for, hence the lifetime.
+pub struct Registers<'a>([Vals<'a>; REGISTERS]);
+
+impl Registers<'_> {
+    /// An empty register file.
+    pub fn new() -> Self {
+        Registers([Vals::new(); REGISTERS])
+    }
+}
+
+impl Default for Registers<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for Registers<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Registers")
     }
 }
 
