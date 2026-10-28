@@ -76,7 +76,7 @@ versioned (`ADDRESS_VERSION`), so the C API can expose it as it is.
 | `if_idx`, `sub_if_idx` | The interface |
 | `vlan`, `vlan_tci` | The outer VLAN tag the packet carried, also at the NETWORK layers |
 | `flow` | FLOW and SOCKET events: process ID and name (`flow.process_name()`), endpoint IDs, local and remote address and port, protocol |
-| `reflect` | REFLECT events: the other handle's process, layer, flags, priority and opening time |
+| `reflect` | REFLECT events: the other handle's process, layer, flags, priority, opening time and filter syntax |
 | `context` | Opaque: what the backend needs to reinject a captured packet unchanged |
 
 To send a packet back, use the address it was received with: its direction, interface and
@@ -187,8 +187,9 @@ of kind `PermissionDenied`. Kernel 5.10 or later with BTF is supported (tested o
   every 100 ms.
   - At first, it reports every open handle, itself included, as `ReflectOpen`.
   - Then it reports a handle when it opens, and `ReflectClose` when it closes or its owner dies.
-  - The data is the handle's filter, in native syntax. `Address::reflect` has its process,
-    layer, flags, priority and opening time.
+  - The data is the handle's filter as it was written, and `Address::reflect.syntax` says in
+    which language (`Syntax::Native` or `Syntax::WinDivert`). `Address::reflect` also has its
+    process, layer, flags, priority and opening time.
   - Processes in another PID namespace, or that use another bpffs, are not seen.
 
 ### Where filters run

@@ -17,14 +17,27 @@ pub const PRIORITY_LOWEST: i16 = -30_000;
 
 /// The language of a handle's filter.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u8)]
 #[non_exhaustive]
 pub enum Syntax {
     /// Avulse's language, a subset of Wireshark's display filters
     /// ([`Filter::compile`]).
     #[default]
-    Native,
+    Native = 0,
     /// WinDivert 2.2's filter language ([`Filter::compile_windivert`]).
-    WinDivert,
+    WinDivert = 1,
+}
+
+impl TryFrom<u8> for Syntax {
+    type Error = u8;
+
+    fn try_from(n: u8) -> core::result::Result<Syntax, u8> {
+        match n {
+            0 => Ok(Syntax::Native),
+            1 => Ok(Syntax::WinDivert),
+            n => Err(n),
+        }
+    }
 }
 
 /// How to open a handle, beyond the filter and the layer.
@@ -100,14 +113,17 @@ impl OpenOptions {
             ));
         }
         check_flags(layer, self.flags)?;
+        let source = filter;
         let filter = match self.syntax {
-            Syntax::Native => Filter::compile(filter)?,
-            Syntax::WinDivert => Filter::compile_windivert(filter, layer)?,
+            Syntax::Native => Filter::compile(source)?,
+            Syntax::WinDivert => Filter::compile_windivert(source, layer)?,
         };
         check_support(backend, layer, self.flags)?;
         let params = Param::ALL.map(Param::default_value);
         let opened = backend.open(&Spec {
             filter: &filter,
+            source,
+            syntax: self.syntax,
             layer,
             priority: self.priority,
             flags: self.flags,

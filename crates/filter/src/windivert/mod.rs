@@ -27,7 +27,10 @@
 //! options are cut short is dropped rather than shortened.
 
 mod lower;
+mod object;
 mod parse;
+
+pub(crate) use object::object;
 
 use alloc::format;
 

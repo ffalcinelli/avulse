@@ -14,7 +14,8 @@ WinDivert feature, adds an Ethernet layer, and uses Wireshark display filters.
 **Status: pre-alpha.** The packet parser, the filter language and the `avulse filter` CLI work.
 On Linux, the `avulse` crate diverts, sniffs, drops and sends packets at the packet layers,
 reports flows at the FLOW layer, reports or refuses binds and connects at the SOCKET layer, and
-reports handles at the REFLECT layer.
+reports handles at the REFLECT layer. A WinDivert-compatible library (`libavulse_windivert.so`)
+runs the pydivert and jdivert test suites unchanged. Windows and macOS have no backend yet.
 The crates.io and PyPI packages only reserve the name.
 
 **[Website](https://ffalcinelli.github.io/avulse/)** ·

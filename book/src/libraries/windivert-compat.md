@@ -12,7 +12,8 @@ Linux conventions:
 
 [pydivert](https://github.com/ffalcinelli/pydivert) and
 [jdivert](https://github.com/ffalcinelli/jdivert) use libebpfdivert as their Linux backend, so
-they can load this library in its place, unchanged. The Windows exports (a drop-in `WinDivert.dll`)
+they can load this library in its place, unchanged. Both test suites pass against it: pydivert's
+on Python, and jdivert's through JNA (Java 8) and Panama (Java 22 and later). The Windows exports (a drop-in `WinDivert.dll`)
 come with the Windows driver.
 
 ```console
@@ -29,13 +30,14 @@ $ mvn test -Debpfdivert.skipDownload=true -Debpfdivert.local=$PWD/target/release
 | `WINDIVERT_ADDRESS` | [`Address`](handles.md#the-address), field by field. The 64-byte union holds the layer's data as WinDivert lays it out. At the NETWORK layers, its last 56 bytes hold avulse's reinjection context, so send a packet back with the address it came with |
 | `WinDivertHelperCalcChecksums`, `HashPacket`, `EvalFilter` | Reimplemented with WinDivert's packet parser. They give WinDivert's results byte for byte, `random8/16/32` included |
 | `WinDivertHelperFormatFilter` | The filter in a canonical WinDivert syntax (`Filter::format_windivert`) |
+| REFLECT's data | WinDivert's serialized filter object (`@WinDiv_…`, with its NUL), compiled from the other handle's filter as WinDivert's compiler does (`Filter::windivert_object`) |
 | `ebpfdivert_get_handle_stats` | `Handle::stats` |
 | `ebpfdivert_unregister` | `avulse::cleanup` |
 
 ## Differences from libebpfdivert
 
-- **REFLECT data.** A REFLECT event carries the other handle's filter in native syntax
-  (`udp.dstport == 53`), where WinDivert carries its serialized filter object.
+- **REFLECT data of native filters.** A handle opened with a native filter has no WinDivert
+  object. Its REFLECT events carry the filter's text instead (`udp.dstport == 53`).
 - **Formatted filters.** `format_filter` returns a canonical form of the filter as written.
   WinDivert decompiles its filter object instead, which can look different, after its
   simplifications. Both compile to the same filter.

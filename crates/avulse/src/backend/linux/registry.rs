@@ -43,11 +43,12 @@ const VALUE_SIZE: usize = FILTER_AT + FILTER_MAX;
 /// | 16 | 8 | when it opened (`CLOCK_MONOTONIC`, ns) |
 /// | 24 | 8 | flags |
 /// | 32 | 1 | layer |
+/// | 33 | 1 | syntax of the filter text (`Syntax`; 0, native, in entries of older versions) |
 /// | 34 | 2 | priority |
 /// | 36 | 4 | number of TC filters |
 /// | 40 | 4 | length of the filter text |
 /// | 48 | 128 × 12 | TC filters: ifindex (4), hook (1: 0 ingress, 1 egress), 0 (1), TC priority (2), handle (4) |
-/// | 1584 | 2048 | the filter, as text (cut) |
+/// | 1584 | 2048 | the filter as written, as text (cut) |
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Entry {
     pub pid: u32,
@@ -56,6 +57,7 @@ pub struct Entry {
     pub timestamp: i64,
     pub flags: u64,
     pub layer: u8,
+    pub syntax: u8,
     pub priority: i16,
     pub attachments: Vec<Attachment>,
     pub filter: String,
@@ -75,6 +77,7 @@ impl Entry {
         b[16..24].copy_from_slice(&self.timestamp.to_ne_bytes());
         b[24..32].copy_from_slice(&self.flags.to_ne_bytes());
         b[32] = self.layer;
+        b[33] = self.syntax;
         b[34..36].copy_from_slice(&self.priority.to_ne_bytes());
         b[36..40].copy_from_slice(&(n as u32).to_ne_bytes());
         b[40..44].copy_from_slice(&(filter_len as u32).to_ne_bytes());
@@ -120,6 +123,7 @@ impl Entry {
             timestamp: u64_at(16) as i64,
             flags: u64_at(24),
             layer: b[32],
+            syntax: b[33],
             priority: u16_at(34) as i16,
             attachments,
             filter: String::from_utf8_lossy(&b[FILTER_AT..FILTER_AT + filter_len]).into_owned(),

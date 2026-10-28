@@ -210,6 +210,16 @@ fn windivert_filter_vectors() {
     assert!(ran > 200, "{ran}");
 }
 
+/// WinDivert's serialized filter objects (REFLECT's data), from WinDivert's own compiler.
+#[test]
+fn filter_objects() {
+    for &(layer, src, want) in vectors::OBJECTS {
+        let layer = Layer::try_from(layer).unwrap();
+        let got = avulse_filter::Filter::windivert_object(src, layer).unwrap();
+        assert_eq!(got, want, "{src} at {layer:?}");
+    }
+}
+
 #[test]
 fn filters_check_and_format() {
     assert!(helpers::check_filter("tcp.DstPort == 80", Layer::Network).is_ok());

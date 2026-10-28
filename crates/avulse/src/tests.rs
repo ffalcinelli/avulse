@@ -181,6 +181,7 @@ fn address_layout() {
     assert_eq!(offset_of!(Flow, local_addr), 24);
     assert_eq!(offset_of!(Flow, protocol), 56);
     assert_eq!(size_of::<Reflect>(), 24);
+    assert_eq!(offset_of!(Reflect, syntax), 23);
     assert_eq!(size_of::<Context>(), CONTEXT_LEN);
     assert_eq!(size_of::<Flags>(), 8);
 }

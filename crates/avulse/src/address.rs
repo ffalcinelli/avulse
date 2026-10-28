@@ -5,10 +5,10 @@ use core::net::{IpAddr, Ipv6Addr};
 
 use avulse_filter::{Event, FlowTuple, Layer, Meta};
 
-use crate::Flags;
+use crate::{Flags, Syntax};
 
 /// The version of the [`Address`] layout. It changes whenever a field is added, moved or resized.
-pub const ADDRESS_VERSION: u16 = 2;
+pub const ADDRESS_VERSION: u16 = 3;
 
 /// Size of the reinjection context ([`Context`]).
 pub const CONTEXT_LEN: usize = 64;
@@ -271,7 +271,8 @@ pub struct Reflect {
     pub priority: i16,
     /// Its layer.
     pub layer: Layer,
-    reserved: u8,
+    /// The language of its filter, which is the event's data, as written.
+    pub syntax: Syntax,
 }
 
 impl Reflect {
@@ -281,7 +282,7 @@ impl Reflect {
         process_id: 0,
         priority: 0,
         layer: Layer::Network,
-        reserved: 0,
+        syntax: Syntax::Native,
     };
 }
 

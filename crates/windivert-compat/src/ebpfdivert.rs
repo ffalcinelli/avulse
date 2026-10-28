@@ -16,7 +16,8 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use avulse::{
-    Address, Error, Flags, Handle, Layer, MAX_PACKET_LEN, OpenOptions, Param, Shutdown, Syntax,
+    Address, Error, Filter, Flags, Handle, Layer, MAX_PACKET_LEN, OpenOptions, Param, Shutdown,
+    Syntax,
 };
 
 use crate::address::WdAddress;
@@ -334,10 +335,14 @@ pub unsafe extern "C" fn ebpfdivert_recv(
             }
             let buf = bytes_mut(pkt, pkt_len);
             let wants_data = !pkt.is_null();
-            let r = with_buffer(buf, |buf| match timeout(timeout_ms) {
-                Some(t) => h.recv_timeout(buf, t),
-                None => h.recv(buf),
-            });
+            let r = if h.layer() == Layer::Reflect {
+                recv_reflect(h, buf, timeout(timeout_ms))
+            } else {
+                with_buffer(buf, |buf| match timeout(timeout_ms) {
+                    Some(t) => h.recv_timeout(buf, t),
+                    None => h.recv(buf),
+                })
+            };
             match r {
                 Ok((n, a)) => {
                     put(recv_len, n as u32);
@@ -352,6 +357,43 @@ pub unsafe extern "C" fn ebpfdivert_recv(
             }
         })
     }
+}
+
+/// A REFLECT event with WinDivert's data: a filter written in WinDivert's syntax becomes
+/// WinDivert's serialized filter object, with its NUL, as WinDivert reports it. A native filter
+/// stays as it is: WinDivert has no object for it.
+fn recv_reflect(
+    h: &Handle,
+    buf: &mut [u8],
+    timeout: Option<Duration>,
+) -> avulse::Result<(usize, Address)> {
+    let (data, a) = with_buffer(&mut [], |scratch| {
+        let (n, a) = match timeout {
+            Some(t) => h.recv_timeout(scratch, t),
+            None => h.recv(scratch),
+        }?;
+        let raw = &scratch[..n];
+        let object = match (a.reflect.syntax, std::str::from_utf8(raw)) {
+            (Syntax::WinDivert, Ok(src)) => Filter::windivert_object(src, a.reflect.layer).ok(),
+            _ => None,
+        };
+        let data = match object {
+            Some(o) => {
+                let mut o = o.into_bytes();
+                o.push(0);
+                o
+            }
+            None => raw.to_vec(),
+        };
+        Ok::<_, Error>((data, a))
+    })?;
+    // As for packets, one that does not fit is dropped; no buffer asks for the length only.
+    if !buf.is_empty() {
+        buf.get_mut(..data.len())
+            .ok_or(Error::BufferTooSmall { needed: data.len() })?
+            .copy_from_slice(&data);
+    }
+    Ok((data.len(), a))
 }
 
 /// Receives up to `*addr_len` packets back to back into `pkt`. Waits only for the first. On
@@ -388,9 +430,17 @@ pub unsafe extern "C" fn ebpfdivert_recv_ex(
             let mut got = vec![Address::default(); max];
             let mut lens = vec![0; max];
             let buf = bytes_mut(pkt, pkt_len);
-            let r = with_buffer(buf, |buf| {
-                h.recv_batch(buf, &mut got, &mut lens, timeout(timeout_ms))
-            });
+            // REFLECT events one at a time: their data changes length on the way.
+            let r = if h.layer() == Layer::Reflect {
+                recv_reflect(h, buf, timeout(timeout_ms)).map(|(n, a)| {
+                    (got[0], lens[0]) = (a, n);
+                    1
+                })
+            } else {
+                with_buffer(buf, |buf| {
+                    h.recv_batch(buf, &mut got, &mut lens, timeout(timeout_ms))
+                })
+            };
             match r {
                 Ok(k) => {
                     for (i, a) in got[..k].iter().enumerate() {

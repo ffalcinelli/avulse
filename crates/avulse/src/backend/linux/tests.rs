@@ -248,6 +248,7 @@ fn registry_entries() {
             },
         ],
         filter: "icmp".into(),
+        syntax: 1,
     };
     let b = e.encode();
     assert_eq!(registry::Entry::decode(&b), Some(e.clone()));
@@ -690,6 +691,7 @@ fn registered(pid: u32, timestamp: i64, layer: Layer, filter: &str) -> registry:
         priority: -7,
         attachments: Vec::new(),
         filter: filter.into(),
+        syntax: 0,
     }
 }
 

@@ -20,7 +20,7 @@ $ cc -I crates/capi/include app.c -L target/release -lavulse
   error number behind `AVULSE_E_IO`. Both are per thread.
 - The layers, events, flags, parameters and shutdown directions have WinDivert's numbers, as
   `AVULSE_*` constants.
-- `struct avulse_address` has the layout of the Rust `Address`, version 2 (216 bytes); the
+- `struct avulse_address` has the layout of the Rust `Address`, version 3 (216 bytes); the
   header checks the layout with static asserts. Start new addresses with `avulse_address_init`.
 - A handle can be used from several threads at once, except with `avulse_close`.
 

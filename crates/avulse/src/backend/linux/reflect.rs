@@ -14,7 +14,7 @@ use super::record::Entry;
 use super::registry::{self, Registry};
 use super::{Rx, lock, sys};
 use crate::backend::{Opened, Spec};
-use crate::{Address, Error, Flags, Param, Result, Shutdown, Stats};
+use crate::{Address, Error, Flags, Param, Result, Shutdown, Stats, Syntax};
 
 /// How often the registry is read.
 const PERIOD: Duration = Duration::from_millis(100);
@@ -31,7 +31,7 @@ struct Seen {
     handles: HashMap<u64, registry::Entry>,
 }
 
-/// The REFLECT event of the handle registered as `e`, and its data: the filter.
+/// The REFLECT event of the handle registered as `e`, and its data: the filter as written.
 pub(super) fn event(e: &registry::Entry, event: Event, now: i64) -> Option<Entry> {
     let mut addr = Address::new(Layer::Reflect);
     addr.timestamp = now;
@@ -43,6 +43,7 @@ pub(super) fn event(e: &registry::Entry, event: Event, now: i64) -> Option<Entry
     r.process_id = e.pid;
     r.priority = e.priority;
     r.layer = Layer::try_from(e.layer).ok()?;
+    r.syntax = Syntax::try_from(e.syntax).ok()?;
     Some(Entry {
         addr,
         data: e.filter.as_bytes().to_vec(),
@@ -104,7 +105,8 @@ impl ReflectHandle {
             layer: spec.layer as u8,
             priority: spec.priority,
             attachments: Vec::new(),
-            filter: spec.filter.ir().native().to_string(),
+            filter: spec.source.to_owned(),
+            syntax: spec.syntax as u8,
         })?;
         Ok(handle)
     }

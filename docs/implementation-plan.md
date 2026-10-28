@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-28, Phases 2 and 3 done: Steps 1 to 18 and Spikes A and B, Spike C partly done; Phase 4: Steps 19 and 20 done, next Step 21)
+## Status (2026-10-28, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; next Phase 5, the Windows driver)
 
 | Area | State |
 | --- | --- |
@@ -20,7 +20,7 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
 | `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Steps 15 to 17: the FLOW, SOCKET and REFLECT layers (`events.rs`, `reflect.rs`), SOCKET refusing binds and connects in the kernel; `Address` version 2 (216 bytes) with the process name. Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
 | `crates/capi` (`avulse-capi`) | Step 18: the C ABI, `libavulse.so`/`.a`, header `include/avulse.h` (hand-written, layout pinned by asserts), 20 functions, tested from C (`tests/c.rs`, `tests/c/abi.c`). |
-| `crates/windivert-compat` | Steps 19 and 20: `libavulse_windivert.so`, libebpfdivert's C API over avulse (21 `ebpfdivert_*` exports, negative errno values, WinDivert's 80-byte address with avulse's reinjection context in its union). WinDivert's helpers (hash, checksums, `eval_filter` with `random*`) agree with WinDivert's own code on generated vectors (`scripts/gen_compat_vectors.py`). 14 unit tests, the exported-symbol test, and `tests/capture.rs` (6, `AVULSE_BPF=1`) on 6.8 and 5.15. `publish = false`. |
+| `crates/windivert-compat` | Steps 19 to 21: `libavulse_windivert.so`, libebpfdivert's C API over avulse (21 `ebpfdivert_*` exports, negative errno values, WinDivert's 80-byte address with avulse's reinjection context in its union). WinDivert's helpers (hash, checksums, `eval_filter` with `random*`) agree with WinDivert's own code on generated vectors (`scripts/gen_compat_vectors.py`). REFLECT's data is WinDivert's serialized filter object (`Filter::windivert_object`, matching WinDivert's compiler on 230 filters). 15 unit tests, the exported-symbol test, and `tests/capture.rs` (6, `AVULSE_BPF=1`) on 6.8 and 5.15. pydivert's suite (155) and jdivert's (334, JNA and Panama) pass against it unchanged. `publish = false`. |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
 | CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
 | Release (`.github/workflows/release.yml`) | Builds and publishes the Python placeholder on `v*` tags. **No crates.io job yet.** |
@@ -322,7 +322,7 @@ passes, and `exec` uses no `alloc`.
   (UDP payload end, IPv6 mobility header, ICMP after IPv6, truncated TCP options); compiled
   `@` filter objects are not accepted; `convert` refuses output over 10,000 tests.
 - **For Phase 4 (compat shim):** fill `Meta::hash` with WinDivert's packet hash, and at the REFLECT
-  layer `Meta::layer`/`priority` with the reflected handle's.
+  layer `Meta::layer`/`priority` with the reflected handle's. (Done: Step 17 and Step 19.)
 - **Fuzzing:** the new `windivert` target (seeded with the vectors) ran 10 minutes, 6.9 million
   inputs, clean. `filter` ran another 10 minutes after the parser changes, with inputs up to
   4 KiB (1 million), clean.
@@ -1441,7 +1441,8 @@ The original plan of the step follows.
 ebpfdivert.h`) over avulse, so that the pydivert and jdivert test suites run against it
 **unchanged**, through the hooks they already have (`PYDIVERT_EBPFDIVERT_LIB`,
 `-Debpfdivert.local`). **Exit:** both suites pass. They then become the conformance suite that the
-Windows driver (Phase 5) passes too, through the `WinDivert*` exports of the same crate.
+Windows driver (Phase 5) passes too, through the `WinDivert*` exports of the same crate. **Phase 4
+is done** (Steps 19 to 21).
 
 **Decisions for this phase** (change them here, with a reason, if the work proves them wrong):
 
@@ -1535,7 +1536,7 @@ NETWORK), the errno mapping, and vectors generated from libebpfdivert's helpers 
 - **`Stats`.** Most counters are the kernel's. `queue_drops` is the user-space queue's. REFLECT
   handles have only the queue's. The shim maps them to ebpfdivert's `STAT_*`, with
   `PARSING_ERR` ← `load_errors`.
-- **REFLECT data.** It is the native filter text, as Step 17 decided. A divergence, below.
+- **REFLECT data.** Native filter text at first, as Step 17 decided; Step 21 changed it (below).
 - **Linux's reinjection context fits in 56 bytes.** `record.rs` asserts it at compile time.
 
 The original plan of the step follows.
@@ -1561,7 +1562,40 @@ exactly the list above. `tests/capture.rs` (`AVULSE_BPF=1`, root, in the VMs) dr
 
 **Acceptance.** Those pass on both VMs.
 
-### Step 21: The binding suites (Phase 4 exit)
+### Step 21: The binding suites (Phase 4 exit) (done)
+
+**Outcome.** Both suites pass unchanged against `libavulse_windivert.so`. They ran in the
+bindings' own Ubuntu 24.04 VMs, with the host-built library, which needs GLIBC 2.34 at most.
+- pydivert: 155 passed, and 6 skipped, all Windows-only.
+- jdivert: 334 run, 0 failures, and 14 skipped, all Windows-only. It ran on JDK 25 (Panama)
+  and on JDK 8 (JNA), and the bundled library was checked to be the shim.
+
+The first pydivert run had one failure, `test_reflect_layer`. It expects REFLECT's data to be
+WinDivert's serialized filter object (`@WinDiv_…`).
+
+- **Owner decision: REFLECT carries the filter as written.** This supersedes Step 17's native
+  text.
+  - The registry records the filter's `Syntax` in byte 33. That byte was free, and it reads as
+    native in older entries, so the suffix stays.
+  - `Reflect` gains `syntax` in its reserved byte. `ADDRESS_VERSION` is now 3, and the C ABI
+    follows: `avulse_reflect.syntax`, `AVULSE_ADDRESS_VERSION` 3.
+  - `Syntax` is `#[repr(u8)]` with `TryFrom<u8>`.
+  - The backends register `Spec::source`.
+- **`Filter::windivert_object`** (`crates/filter/src/windivert/object.rs`) ports WinDivert's
+  compiler back end:
+  - `WinDivertSimplifyTest` reuses `Range::decide`. WinDivert's table leaves `loopback` and
+    `impostor` out, and so does the port.
+  - `WinDivertFlattenExpr` processes flat `and`/`or` lists right to left, which gives
+    WinDivert's labels.
+  - Then `WinDivertEmitFilter`, and the serialization: base-32 digits, labels, the length as a
+    byte.
+  - On 230 filters at every layer, it matches WinDivert's `WinDivertHelperCompileFilter` (the
+    `OBJECTS` vectors).
+- **The shim** turns a REFLECT event of a WinDivert-syntax filter into that object, with its NUL,
+  as WinDivert sends it. `recv_ex` takes REFLECT events one at a time.
+
+The original plan of the step follows.
+
 
 **Where.** No code of its own: the fixes the suites call for.
 - Build `cargo build --release -p avulse-windivert-compat` on the host and copy the library into
@@ -1580,7 +1614,7 @@ exactly the list above. `tests/capture.rs` (`AVULSE_BPF=1`, root, in the VMs) dr
 
 Listed for users in `book/src/libraries/windivert-compat.md`.
 
-- REFLECT data is the native filter text. WinDivert sends its serialized filter object.
+- REFLECT data of a handle opened with a native filter is its text. There is no WinDivert object for it.
 - `format_filter` is a canonical form of the source, not WinDivert's decompilation.
 - The address loses the VLAN tag and the process name: WinDivert has no room for them.
 - `compile_filter` reports avulse's messages, not WinDivert's fixed strings.
@@ -1645,7 +1679,7 @@ pre-release tag) passes, then the v0.0.1 tag publishes. The guide and README say
 - [x] Step 18: API v0.1 and the C ABI (`libavulse.so`)
 - [x] Step 19: compat shim core (address, errno, helpers)
 - [x] Step 20: compat shim handle exports, `Handle::stats`
-- [ ] Step 21: pydivert and jdivert suites against the shim (Phase 4 exit)
+- [x] Step 21: pydivert and jdivert suites against the shim (Phase 4 exit)
 - [ ] Phase 5: Windows driver
 - [ ] Phase 6: macOS system extension
 - [ ] Release v0.0.1 (crates.io, tarballs; after Phases 5 and 6)

@@ -170,6 +170,24 @@ impl Filter {
         windivert::format(src, layer)
     }
 
+    /// WinDivert's serialized filter object (`@WinDiv_…`, without the final NUL) for a WinDivert
+    /// filter at `layer`: the text `WinDivertHelperCompileFilter` produces, which WinDivert
+    /// reports as the data of a REFLECT event. The WinDivert-compatible libraries use it.
+    ///
+    /// ```
+    /// use avulse_filter::{Filter, Layer};
+    ///
+    /// let o = Filter::windivert_object("tcp.DstPort == 80", Layer::Network).unwrap();
+    /// assert!(o.starts_with("@WinDiv_"));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`compile_windivert`](Self::compile_windivert).
+    pub fn windivert_object(src: &str, layer: meta::Layer) -> Result<String, Diagnostic> {
+        windivert::object(src, layer)
+    }
+
     /// Whether `packet`, with metadata `meta`, matches the filter.
     ///
     /// This does not allocate unless the filter uses `matches`, and never panics.

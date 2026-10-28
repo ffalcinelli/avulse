@@ -293,7 +293,8 @@ impl Handle {
             layer: spec.layer as u8,
             priority: spec.priority,
             attachments,
-            filter: spec.filter.ir().native().to_string(),
+            filter: spec.source.to_owned(),
+            syntax: spec.syntax as u8,
         })?;
         lock(&LOCAL_TC_PRIORITIES).push(tc_priority);
         handle.tc_priority = Some(tc_priority);

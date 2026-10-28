@@ -51,7 +51,7 @@ fn passes(v: Num, op: Op, c: Num) -> bool {
 
 impl Range {
     /// The result of `field op c` when the range decides it, as WinDivert's compiler computes it.
-    fn decide(&self, op: Op, c: Num) -> Option<bool> {
+    pub(super) fn decide(&self, op: Op, c: Num) -> Option<bool> {
         let (lo, hi) = (cmp128(c, self.lo), cmp128(c, self.hi));
         let outside = lo.is_lt() || hi.is_gt();
         match op {

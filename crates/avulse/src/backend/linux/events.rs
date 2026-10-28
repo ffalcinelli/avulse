@@ -156,7 +156,8 @@ impl EventHandle {
             layer: spec.layer as u8,
             priority: spec.priority,
             attachments: Vec::new(),
-            filter: spec.filter.ir().native().to_string(),
+            filter: spec.source.to_owned(),
+            syntax: spec.syntax as u8,
         })?;
         drop(registry);
         heartbeat::add(&handle.beat);

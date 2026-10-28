@@ -11,12 +11,15 @@ use std::time::Duration;
 
 use avulse_filter::{Filter, Layer};
 
-use crate::{Address, Error, Flags, Param, Result, Shutdown, Stats};
+use crate::{Address, Error, Flags, Param, Result, Shutdown, Stats, Syntax};
 
 /// What a backend gets to open a handle.
 #[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
 pub(crate) struct Spec<'a> {
     pub filter: &'a Filter,
+    /// The filter as written, and its language: what REFLECT reports.
+    pub source: &'a str,
+    pub syntax: Syntax,
     pub layer: Layer,
     pub priority: i16,
     pub flags: Flags,

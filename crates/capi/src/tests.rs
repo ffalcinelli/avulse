@@ -58,9 +58,11 @@ fn addresses_round_trip() {
     a.flow.set_process_name("curl");
     a.reflect.flags = Flags::SNIFF;
     a.reflect.layer = Layer::Flow;
+    a.reflect.syntax = avulse_rs::Syntax::WinDivert;
     a.context = Context::from_bytes([9; 64]);
     let c = avulse_address::from(&a);
-    assert_eq!((c.layer, c.event, c.outbound, c.version), (3, 4, 1, 2));
+    assert_eq!((c.layer, c.event, c.outbound, c.version), (3, 4, 1, 3));
+    assert_eq!(c.reflect.syntax, 1);
     assert_eq!(&c.flow.process_name[..5], b"curl\0");
     assert_eq!(Address::try_from(&c).unwrap(), a);
 
@@ -70,6 +72,9 @@ fn addresses_round_trip() {
     assert!(Address::try_from(&bad).is_err());
     let mut bad = c;
     bad.event = 10;
+    assert!(Address::try_from(&bad).is_err());
+    let mut bad = c;
+    bad.reflect.syntax = 2;
     assert!(Address::try_from(&bad).is_err());
     let mut bad = c;
     bad.reflect.flags = 1 << 40;
@@ -82,7 +87,7 @@ fn addresses_round_trip() {
     let mut init = avulse_address::from(&Address::default());
     // SAFETY: a valid address.
     unsafe { avulse_address_init(&mut init, 5) };
-    assert_eq!((init.layer, init.version), (5, 2));
+    assert_eq!((init.layer, init.version), (5, 3));
 }
 
 #[test]

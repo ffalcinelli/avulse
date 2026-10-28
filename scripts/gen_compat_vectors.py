@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Generate crates/windivert-compat/src/tests/vectors.rs: what WinDivert's own helpers return for
 WinDivertHelperHashPacket, WinDivertHelperCalcChecksums and WinDivertHelperEvalFilter (the
-`random*` fields, and the packet and address checks) on a corpus of packets.
+`random*` fields, and the packet and address checks) on a corpus of packets, and the serialized
+filter objects of WinDivertHelperCompileFilter (REFLECT's data) for WinDivert's filters and more.
 
 It compiles a small C driver against ebpfdivert's vendored copy of WinDivert's helper code
 (src/wd/wd_port.c, which builds on Linux without root) and runs it.
@@ -62,6 +63,21 @@ int main(void) {
             printf("%d %u ", r, bits);
             for (i = 0; i < n; i++) printf("%02x", pkt[i]);
             printf("\n");
+        } else if (line[0] == 'O') {
+            unsigned layer = strtoul(p, &p, 10);
+            char *filter = p + 1;
+            struct wd_filter *f = NULL;
+            const char *err;
+            unsigned pos;
+            static char obj[1 << 16];
+            filter[strcspn(filter, "\n")] = 0;
+            if (wd_filter_compile(filter, layer, &f, &err, &pos) != 0 ||
+                wd_filter_serialize(f, obj, sizeof(obj)) < 0) {
+                printf("ERR\n");
+            } else {
+                printf("%s\n", obj);
+            }
+            wd_filter_free(f);
         } else if (line[0] == 'E') {
             long long ts = strtoll(p, &p, 10);
             unsigned layer = strtoul(p, &p, 10), ipv6 = strtoul(p, &p, 10);
@@ -185,6 +201,35 @@ def corpus(wd_packets):
     return out
 
 
+# Filters at every layer whose WinDivert object is recorded, besides WinDivert's vectors.
+OBJECT_FILTERS = [
+    (0, "true"),
+    (0, "false"),
+    (0, "zero"),
+    (0, "not true"),
+    (0, "impostor or loopback == 2"),
+    (0, "fragment and length > 100"),
+    (0, "packet32[-4b] == 0x34353637 and tcp.Payload[-1] == 10 and udp.Payload16[2b] != 0"),
+    (0, "random8 < 128 or random32 >= 5"),
+    (0, "ipv6.SrcAddr == ::1 or ip.SrcAddr == 10.0.0.1 or ipv6.DstAddr > 2001:db8::"),
+    (0, "ip.TOS < 0 or tcp.Syn <= 1 or udp.Length > 70000"),
+    (0, "(tcp? tcp.DstPort == 80: (udp? udp.DstPort == 53: icmp))"),
+    (0, "(false? tcp: udp) and (true? ip: ipv6)"),
+    (0, "timestamp > -5 and ifIdx == 3 and subIfIdx != 0"),
+    (1, "ip.TTL < 5 or ipv6.HopLimit < 5"),
+    (2, "tcp and remotePort == 443"),
+    (2, "localAddr == ::1 or remoteAddr == 10.0.0.1"),
+    (2, "processId == 1234 and endpointId > 5 and parentEndpointId != 0x100000000"),
+    (2, "event == ESTABLISHED and loopback"),
+    (3, "event == CONNECT and remotePort == 9306"),
+    (3, "outbound and (tcp ? localPort < 1024 : udp)"),
+    (3, "protocol == TCP or event == CLOSE"),
+    (4, "event == OPEN and priority == 1234"),
+    (4, "layer == NETWORK or priority < -100"),
+    (4, "processId >= 10 and timestamp != 0"),
+]
+
+
 def run(driver, lines):
     r = subprocess.run([driver], input="\n".join(lines) + "\n", capture_output=True, text=True, check=True)
     return r.stdout.splitlines()
@@ -232,6 +277,8 @@ def main():
                 ipv6_flag = 1 if data and data[0] >> 4 == 6 else 0
             e_lines.append(f"E {ts} {layer} {ipv6_flag} {data.hex() or '-'} {filt}")
         evals = run(exe, e_lines)
+        o_in = [(0, filt) for filt in dict.fromkeys(f for f, _, _ in tests)] + OBJECT_FILTERS
+        objects = run(exe, [f"O {layer} {filt}" for layer, filt in o_in])
 
     out = [
         "//! What WinDivert's helpers return, from ebpfdivert's vendored copy of WinDivert 2.2's helper",
@@ -279,10 +326,19 @@ def main():
         ipv6_flag = l.split(" ")[3] == "1"
         idx = "None" if i is None else f"Some({i})"
         out.append(f'    ("{filt}", {idx}, {ts}, {layer}, {str(ipv6_flag).lower()}, {line}),')
+    out += [
+        "];",
+        "",
+        "/// `WinDivertHelperCompileFilter`'s serialized objects: layer, filter, object (without its NUL).",
+        "pub(super) const OBJECTS: &[(u8, &str, &str)] = &[",
+    ]
+    for (layer, filt), obj in zip(o_in, objects):
+        assert obj != "ERR", filt
+        out.append(f'    ({layer}, "{filt}", "{obj}"),')
     out += ["];", ""]
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text("\n".join(out))
-    print(f"wrote {OUT}: {len(pkts)} packets, {len(h_in)} hashes, {len(c_in)} checksums, {len(e_in)} evaluations")
+    print(f"wrote {OUT}: {len(pkts)} packets, {len(h_in)} hashes, {len(c_in)} checksums, {len(e_in)} evaluations, {len(o_in)} objects")
 
 
 if __name__ == "__main__":

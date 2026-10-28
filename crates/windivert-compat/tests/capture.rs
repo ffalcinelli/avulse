@@ -343,8 +343,8 @@ fn flow_and_socket() {
     );
 }
 
-/// REFLECT reports the handles that open, with their filter as the data (in native syntax, where
-/// WinDivert serializes its filter object).
+/// REFLECT reports the handles that open, with WinDivert's serialized filter object as the data
+/// for the filters written in WinDivert's syntax, as WinDivert does.
 #[test]
 fn reflect() {
     if !enabled() {
@@ -352,23 +352,39 @@ fn reflect() {
     }
     let r = H::open("true", 4, SNIFF | RECV_ONLY);
     let h = H::open("udp.DstPort == 9307", 0, SNIFF);
-    let mut found = false;
+    let object = |src: &str, layer| {
+        let o = avulse_filter::Filter::windivert_object(src, layer).unwrap();
+        [o.as_bytes(), b"\0"].concat()
+    };
+    let (theirs, ours) = (
+        object("udp.DstPort == 9307", avulse_filter::Layer::Network),
+        object("true", avulse_filter::Layer::Reflect),
+    );
+    let (mut found, mut itself) = (false, false);
     for _ in 0..20 {
         let (rc, data, a) = r.recv(4096, 500);
         if rc != 0 {
             break;
         }
         assert_eq!(layer(&a), 4);
-        if (a.bits >> 8) & 0xff == 8 && String::from_utf8_lossy(&data).contains("dstport == 9307") {
-            assert_eq!(
-                u32::from_ne_bytes(a.data[8..12].try_into().unwrap()),
-                std::process::id()
-            );
-            assert_eq!(&a.data[16..24], &SNIFF.to_ne_bytes());
+        assert_eq!((a.bits >> 8) & 0xff, 8, "REFLECT_OPEN");
+        let pid = u32::from_ne_bytes(a.data[8..12].try_into().unwrap());
+        if pid != std::process::id() {
+            continue;
+        }
+        let flags = u64::from_ne_bytes(a.data[16..24].try_into().unwrap());
+        if data == theirs {
+            assert_eq!(flags, SNIFF);
             found = true;
+        } else if data == ours {
+            assert_eq!(flags, SNIFF | RECV_ONLY);
+            itself = true;
+        }
+        if found && itself {
             break;
         }
     }
+    assert!(itself, "REFLECT_OPEN of the REFLECT handle itself");
     assert!(found, "REFLECT_OPEN of the NETWORK handle");
     drop(h);
 }

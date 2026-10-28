@@ -2326,15 +2326,9 @@ fn reflect_layer() {
     assert_eq!(a.event, ReflectOpen);
     assert_eq!(a.reflect.layer, Layer::Flow);
     assert_eq!(a.reflect.flags, Flags::SNIFF | Flags::RECV_ONLY);
-    assert_eq!(
-        data.as_slice(),
-        Filter::compile("true")
-            .unwrap()
-            .ir()
-            .native()
-            .to_string()
-            .as_bytes()
-    );
+    // The filter as the child wrote it, in its language.
+    assert_eq!(data.as_slice(), b"true");
+    assert_eq!(a.reflect.syntax, avulse::Syntax::Native);
     assert!(a.reflect.timestamp <= a.timestamp);
     let seen = drain(&flows);
     assert!(

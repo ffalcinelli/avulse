@@ -267,8 +267,9 @@ below).
    `PYDIVERT_EBPFDIVERT_LIB` and `-Debpfdivert.local`.
 
 Progress (steps in `docs/implementation-plan.md`): `crates/windivert-compat` builds `libavulse_windivert.so`. It
-exports libebpfdivert's API over avulse, and its helpers agree with WinDivert's own code (Steps 19 and 20). Left: the
-binding suites (Step 21).
+exports libebpfdivert's API over avulse, and its helpers agree with WinDivert's own code (Steps 19 and 20). pydivert's
+suite and jdivert's suite (JNA and Panama) pass against it unchanged (Step 21). **Phase 4 is done.** Phase 5 comes
+next.
 
 Exit: both suites pass. The binding suites become a free cross-language conformance suite.
 

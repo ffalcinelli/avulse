@@ -27,7 +27,7 @@ extern "C" {
 #endif
 
 /* The layout version of struct avulse_address. */
-#define AVULSE_ADDRESS_VERSION 2
+#define AVULSE_ADDRESS_VERSION 3
 /* A buffer of this many bytes holds any packet. */
 #define AVULSE_MAX_PACKET_LEN 65600
 
@@ -108,7 +108,7 @@ struct avulse_reflect {
     uint32_t process_id;
     int16_t priority;
     uint8_t layer;
-    uint8_t reserved;
+    uint8_t syntax;    /* AVULSE_SYNTAX_* of its filter, the event's data */
 };
 
 /*
@@ -249,6 +249,7 @@ _Static_assert(offsetof(struct avulse_flow, protocol) == 56, "avulse_flow");
 _Static_assert(offsetof(struct avulse_flow, process_name) == 64, "avulse_flow");
 _Static_assert(sizeof(struct avulse_reflect) == 24, "avulse_reflect");
 _Static_assert(offsetof(struct avulse_reflect, layer) == 22, "avulse_reflect");
+_Static_assert(offsetof(struct avulse_reflect, syntax) == 23, "avulse_reflect");
 _Static_assert(sizeof(struct avulse_address) == 216, "avulse_address");
 _Static_assert(sizeof(struct avulse_stats) == 64, "avulse_stats");
 _Static_assert(offsetof(struct avulse_address, version) == 8, "avulse_address");

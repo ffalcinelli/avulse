@@ -128,8 +128,8 @@ pub struct avulse_reflect {
     pub priority: i16,
     /// Its layer.
     pub layer: u8,
-    /// Zero.
-    pub reserved: u8,
+    /// `AVULSE_SYNTAX_*` of its filter, the event's data.
+    pub syntax: u8,
 }
 
 /// `struct avulse_address`: [`Address`]'s layout, with integers for its `bool`s and enums.
@@ -222,7 +222,7 @@ impl From<&Address> for avulse_address {
                 process_id: r.process_id,
                 priority: r.priority,
                 layer: r.layer as u8,
-                reserved: 0,
+                syntax: r.syntax as u8,
             },
             context: *a.context.as_bytes(),
         }
@@ -267,6 +267,7 @@ impl TryFrom<&avulse_address> for Address {
         r.process_id = cr.process_id;
         r.priority = cr.priority;
         r.layer = Layer::try_from(cr.layer).map_err(|_| "unknown layer in reflect")?;
+        r.syntax = Syntax::try_from(cr.syntax).map_err(|_| "unknown syntax in reflect")?;
         a.context = Context::from_bytes(c.context);
         Ok(a)
     }
