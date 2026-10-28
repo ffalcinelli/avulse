@@ -1645,7 +1645,7 @@ reading only, as everywhere in this project.
     output) and `avulse-driver` (`avulse.sys`, WDM, with the NDIS filter in the same binary,
     installed by an INF as in the spike).
   - The user-mode side is `crates/avulse/src/backend/windows/`, a module like Linux's.
-- **One ABI crate for both sides.** `crates/driver-abi` (`avulse-driver-abi`) is `no_std` and
+- **One ABI crate for both sides.** `crates/abi` (`avulse-abi`) is `no_std` and
   `forbid(unsafe_code)`, in the main workspace so that host tests cover it. It holds:
   - the IOCTL codes, and the open request (layer, priority, flags, the bytecode, interface
     indexes, the filter text and its syntax for REFLECT);
@@ -1723,12 +1723,29 @@ reading only, as everywhere in this project.
 - **Tests:** `agree` compares a reused register file too, and a register left by an earlier run
   reads as empty.
 
-### Step 23: The ABI crate, the bindings, and the driver's skeleton
+### Step 23: The ABI crate, the bindings, and the driver's skeleton (in progress)
+
+**Progress.** The host half is done.
+- `crates/abi` (`avulse-abi`, `no_std`, `forbid(unsafe_code)`, in the `no_std` CI build) holds
+  `Address`, `Flow`, `Reflect`, `Context`, `Flags`, `Param`, `Shutdown`, `Stats` and `Syntax`.
+  They moved from `avulse`, which re-exports them unchanged. `Param::index` is public.
+- `abi::ioctl` is the driver protocol:
+  - the device path and `PROTOCOL_VERSION`;
+  - the `CTL_CODE`s (buffered, except `RECV` out-direct and `SEND` in-direct);
+  - `OpenRequest` (a 32-byte header, then interface indexes, program and filter text);
+  - `Record`s (the encoded address, the data's length, the data padded to 8 bytes);
+  - the parameters and the statistics.
+  
+  Every decoder checks what it reads (`Malformed`), and the address is encoded field by field
+  at its `repr(C)` offsets. 6 tests.
+
+Left: the bindings crate and the driver, in the `windows` VM.
+
 
 **Where.**
-- `crates/driver-abi`: the types above, with layout tests (`size_of`, offsets) and encode/decode
-  tests of the requests.
-- Move `Address` and friends there, and re-export them from `avulse`.
+- `crates/abi`: the types above, with layout tests (`size_of`, offsets) and encode/decode
+  tests of the requests. (Done.)
+- Move `Address` and friends there, and re-export them from `avulse`. (Done.)
 - `drivers/windows/avulse-wdk-sys`: the spike's `build.rs` and `sys.rs`, plus
   `IoCreateDevice`/symbolic link, IRP and cancel-safe queue functions, and the WFP injection
   calls.
@@ -1846,8 +1863,9 @@ system extension) when Phases 5 and 6 are expanded.
 
 **Where.** `.github/workflows/release.yml` and the crates' metadata.
 - A crates.io job (`rust-lang/crates-io-auth-action`, environment `crates-io`, `id-token:
-  write`). Publish in dependency order: `avulse-proto`, `avulse-filter`, `avulse-ebpf`, `avulse`,
-  then `avulse-cli`. `avulse-capi` ships in the tarballs only (owner decision), and keeps its
+  write`). Publish in dependency order: `avulse-proto`, `avulse-filter`, `avulse-abi`, `avulse-ebpf`,
+  `avulse`, then `avulse-cli`. (`avulse-abi` is new in Phase 5: claim the name and give it a
+  trusted publisher.) `avulse-capi` ships in the tarballs only (owner decision), and keeps its
   0.0.0 placeholder on crates.io, as does `avulse-windivert-compat`.
 - **Owner action:** a trusted publisher for every crate except `avulse`, which already has one.
 - `avulse-ebpf` ships `tc.bpf.o` and `events.bpf.o` prebuilt in the package. `build.rs` uses

@@ -12,6 +12,7 @@ keywords = ["windivert", "packet", "divert", "ebpf", "firewall"]
 categories = ["network-programming", "os"]
 
 [dependencies]
+avulse-abi.workspace = true
 # User space evaluates `matches` filters too (the fallback when the kernel cannot run a filter).
 avulse-filter = { workspace = true, features = ["regex"] }
 avulse-proto.workspace = true

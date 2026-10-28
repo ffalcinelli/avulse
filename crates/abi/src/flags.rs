@@ -3,7 +3,7 @@
 use core::fmt;
 use core::ops::{BitOr, BitOrAssign};
 
-/// Flags of [`Handle::open`](crate::Handle::open). The bit values are WinDivert's.
+/// Flags of `avulse::Handle::open`. The bit values are WinDivert's.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Flags(u64);
@@ -92,7 +92,7 @@ impl fmt::Debug for Flags {
     }
 }
 
-/// A queue parameter of a handle ([`Handle::set_param`](crate::Handle::set_param)).
+/// A queue parameter of a handle (`avulse::Handle::set_param`).
 ///
 /// Received packets wait in a queue until `recv` takes them. Packets that arrive when the queue is
 /// full, or that waited too long, are dropped.
@@ -129,18 +129,19 @@ impl Param {
         }
     }
 
-    pub(crate) const fn index(self) -> usize {
+    /// The parameter's index, 0 to 2: its WinDivert number, and its slot in [`Param::ALL`].
+    pub const fn index(self) -> usize {
         self as usize
     }
 }
 
-/// What [`Handle::shutdown`](crate::Handle::shutdown) stops.
+/// What `avulse::Handle::shutdown` stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Shutdown {
     /// Stop capturing. `recv` returns the packets already queued, then
-    /// [`Error::Shutdown`](crate::Error::Shutdown).
+    /// `avulse::Error::Shutdown`.
     Recv,
-    /// Stop sending: `send` fails with [`Error::Shutdown`](crate::Error::Shutdown).
+    /// Stop sending: `send` fails with `avulse::Error::Shutdown`.
     Send,
     /// Both.
     Both,

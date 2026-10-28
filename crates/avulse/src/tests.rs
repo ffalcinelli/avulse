@@ -1,8 +1,7 @@
 //! Tests of the API on a fake backend: argument checks, what reaches the backend, the address
 //! layout.
 
-use std::mem::{align_of, offset_of, size_of};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr};
 #[cfg(unix)]
 use std::os::fd::{AsFd, BorrowedFd};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -157,73 +156,6 @@ fn invalid(r: Result<Handle>) -> &'static str {
         Err(Error::InvalidArgument(what)) => what,
         other => panic!("expected InvalidArgument, got {other:?}"),
     }
-}
-
-#[test]
-fn address_layout() {
-    assert_eq!(size_of::<Address>(), 216);
-    assert_eq!(align_of::<Address>(), 8);
-    assert_eq!(offset_of!(Address, timestamp), 0);
-    assert_eq!(offset_of!(Address, version), 8);
-    assert_eq!(offset_of!(Address, layer), 10);
-    assert_eq!(offset_of!(Address, event), 11);
-    assert_eq!(offset_of!(Address, outbound), 12);
-    assert_eq!(offset_of!(Address, udp_checksum), 19);
-    assert_eq!(offset_of!(Address, if_idx), 20);
-    assert_eq!(offset_of!(Address, sub_if_idx), 24);
-    assert_eq!(offset_of!(Address, vlan_tci), 28);
-    assert_eq!(offset_of!(Address, vlan), 30);
-    assert_eq!(offset_of!(Address, flow), 32);
-    assert_eq!(offset_of!(Address, reflect), 128);
-    assert_eq!(offset_of!(Address, context), 152);
-    assert_eq!(size_of::<Flow>(), 96);
-    assert_eq!(offset_of!(Flow, process_name), 64);
-    assert_eq!(offset_of!(Flow, local_addr), 24);
-    assert_eq!(offset_of!(Flow, protocol), 56);
-    assert_eq!(size_of::<Reflect>(), 24);
-    assert_eq!(offset_of!(Reflect, syntax), 23);
-    assert_eq!(size_of::<Context>(), CONTEXT_LEN);
-    assert_eq!(size_of::<Flags>(), 8);
-}
-
-#[test]
-fn new_addresses() {
-    let a = Address::new(Layer::Ethernet);
-    assert_eq!(a.version(), ADDRESS_VERSION);
-    assert_eq!(a.layer, Layer::Ethernet);
-    assert_eq!(a.event, Event::Packet);
-    assert!(!a.outbound && !a.ip_checksum && a.context.is_empty());
-    assert_eq!(Address::default(), Address::new(Layer::Network));
-    assert_eq!(format!("{:?}", a.context), "Context(empty)");
-    let mut bytes = [0; CONTEXT_LEN];
-    bytes[0] = 0xab;
-    let c = Context::from_bytes(bytes);
-    assert!(!c.is_empty());
-    assert_eq!(c.as_bytes()[0], 0xab);
-    assert!(format!("{c:?}").starts_with("Context(ab00"));
-}
-
-#[test]
-fn flow_addresses() {
-    let mut f = Flow::default();
-    f.set_local_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
-    f.set_remote_addr(IpAddr::V6(Ipv6Addr::LOCALHOST));
-    assert_eq!(
-        f.local_addr,
-        Ipv4Addr::new(10, 0, 0, 1).to_ipv6_mapped().octets()
-    );
-    assert_eq!(f.local_addr(), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
-    assert_eq!(f.remote_addr(), IpAddr::V6(Ipv6Addr::LOCALHOST));
-
-    // The process name: none, then one, then one cut at a character boundary.
-    assert_eq!(f.process_name(), None);
-    f.set_process_name("curl");
-    assert_eq!(f.process_name(), Some("curl"));
-    let long = format!("{}é", "x".repeat(31));
-    f.set_process_name(&long);
-    assert_eq!(f.process_name(), Some("x".repeat(31).as_str()));
-    f.set_process_name(&"y".repeat(40));
-    assert_eq!(f.process_name(), Some("y".repeat(32).as_str()));
 }
 
 #[test]

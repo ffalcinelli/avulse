@@ -31,26 +31,22 @@
 //!
 //! [`capabilities`] tells what this platform's backend supports at each layer.
 
-mod address;
 mod backend;
 mod error;
-mod flags;
 mod handle;
-mod stats;
 #[cfg(test)]
 mod tests;
 
-pub use address::{
-    ADDRESS_VERSION, Address, CONTEXT_LEN, Context, Flow, PROCESS_NAME_LEN, Reflect,
+pub use avulse_abi::{
+    ADDRESS_VERSION, Address, CONTEXT_LEN, Context, Flags, Flow, PROCESS_NAME_LEN, Param, Reflect,
+    Shutdown, Stats, Syntax,
 };
 pub use avulse_filter as filter;
 pub use avulse_filter::{Diagnostic, Event, Filter, Layer};
 pub use avulse_proto as proto;
 pub use backend::{Capabilities, LayerSupport};
 pub use error::{Error, Result};
-pub use flags::{Flags, Param, Shutdown};
-pub use handle::{Handle, OpenOptions, PRIORITY_HIGHEST, PRIORITY_LOWEST, Syntax};
-pub use stats::Stats;
+pub use handle::{Handle, OpenOptions, PRIORITY_HIGHEST, PRIORITY_LOWEST};
 
 /// A buffer of this many bytes holds any packet: the largest IP packet with an Ethernet header
 /// and two VLAN tags.

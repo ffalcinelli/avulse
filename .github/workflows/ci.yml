@@ -67,7 +67,7 @@ jobs:
         with:
           toolchain: stable
           targets: thumbv7em-none-eabihf
-      - run: cargo build -p avulse-proto -p avulse-filter --target thumbv7em-none-eabihf
+      - run: cargo build -p avulse-proto -p avulse-filter -p avulse-abi --target thumbv7em-none-eabihf
       - run: cargo build -p avulse-filter --features regex --target thumbv7em-none-eabihf
 
   stack:

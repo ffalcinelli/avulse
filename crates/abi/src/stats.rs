@@ -1,7 +1,7 @@
 //! A handle's counters.
 
 /// What happened to the packets or events a handle's filter matched, since it opened
-/// ([`Handle::stats`](crate::Handle::stats)). The kernel counts most of them; counters a backend
+/// (`avulse::Handle::stats`). The kernel counts most of them; counters a backend
 /// does not keep stay 0.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]

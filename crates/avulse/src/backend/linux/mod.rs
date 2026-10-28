@@ -414,16 +414,16 @@ impl<R> Rx<R> {
     /// The handle's counters: the kernel's (indexed by [`abi::stat`]) and the queue's drops.
     fn stats(&self, kernel: [u64; abi::stat::COUNT]) -> Stats {
         use abi::stat;
-        Stats {
-            diverted: kernel[stat::DIVERTED],
-            sniffed: kernel[stat::SNIFFED],
-            dropped: kernel[stat::DROPPED],
-            ring_full: kernel[stat::RING_FULL],
-            owner_gone: kernel[stat::OWNER_GONE],
-            too_big: kernel[stat::TOO_BIG],
-            load_errors: kernel[stat::LOAD_ERR],
-            queue_drops: lock(&self.queue).queue.drops,
-        }
+        let mut s = Stats::default();
+        s.diverted = kernel[stat::DIVERTED];
+        s.sniffed = kernel[stat::SNIFFED];
+        s.dropped = kernel[stat::DROPPED];
+        s.ring_full = kernel[stat::RING_FULL];
+        s.owner_gone = kernel[stat::OWNER_GONE];
+        s.too_big = kernel[stat::TOO_BIG];
+        s.load_errors = kernel[stat::LOAD_ERR];
+        s.queue_drops = lock(&self.queue).queue.drops;
+        s
     }
 
     fn new(params: [u64; 3]) -> io::Result<Rx<R>> {

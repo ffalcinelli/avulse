@@ -4,6 +4,7 @@ exclude = ["fuzz", "spikes"]
 members = [
     "crates/proto",
     "crates/filter",
+    "crates/abi",
     "crates/ebpf",
     "crates/avulse",
     "crates/capi",
@@ -23,6 +24,7 @@ publish = false
 [workspace.dependencies]
 avulse-proto = { path = "crates/proto", version = "0.0.0" }
 avulse-filter = { path = "crates/filter", version = "0.0.0" }
+avulse-abi = { path = "crates/abi", version = "0.0.0" }
 avulse-ebpf = { path = "crates/ebpf", version = "0.0.0" }
 
 [workspace.lints.rust]

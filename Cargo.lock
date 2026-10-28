@@ -68,10 +68,18 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 name = "avulse"
 version = "0.0.0"
 dependencies = [
+ "avulse-abi",
  "avulse-ebpf",
  "avulse-filter",
  "avulse-proto",
  "libc",
+]
+
+[[package]]
+name = "avulse-abi"
+version = "0.0.0"
+dependencies = [
+ "avulse-filter",
 ]
 
 [[package]]
