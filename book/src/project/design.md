@@ -77,11 +77,14 @@ verifies it once, when the handle opens, before running it on each packet:
 
 | Phase | Content | State |
 | --- | --- | --- |
-| 0 | Repository, CI, names; spikes: eBPF codegen, Rust Windows driver, macOS | setup done; eBPF codegen spike done (go); the others pending |
+| 0 | Repository, CI, names; spikes: eBPF codegen, Rust Windows driver, macOS | done, except the macOS provider's measurements |
 | 1 | `proto` and `filter`: parser, checker, IR, evaluator, bytecode, WinDivert front-end, `tshark` validation, CLI | done |
-| 2 | Linux packet layers: NETWORK, NETWORK_FORWARD, ETHERNET | planned |
-| 3 | Linux event layers (FLOW, SOCKET, REFLECT); API v0.1 | planned |
-| 4 | WinDivert compatibility shim; pydivert and jdivert suites as conformance tests | planned |
+| 2 | Linux packet layers: NETWORK, NETWORK_FORWARD, ETHERNET | done |
+| 3 | Linux event layers (FLOW, SOCKET, REFLECT); API 0.x and the C library | done |
+| 4 | WinDivert compatibility shim; pydivert and jdivert suites as conformance tests | in progress |
 | 5 | Windows driver, signed | planned |
 | 6 | macOS system extension, notarized | planned |
 | 7 | Native Python and Java bindings; 1.0 | planned |
+
+Versions stay 0.0.x while the project is experimental. The first release, 0.0.1, comes after the
+Windows and macOS backends.

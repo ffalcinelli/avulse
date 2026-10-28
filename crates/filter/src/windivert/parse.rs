@@ -5,7 +5,9 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{Def, FIELDS, MACROS};
+use core::fmt;
+
+use super::{Def, FIELDS, Lower, MACROS};
 use crate::error::{Diagnostic, Span};
 use crate::meta::Layer;
 
@@ -239,6 +241,75 @@ pub(super) struct Test {
     /// The value: a sign and a 128-bit magnitude, as WinDivert keeps it.
     pub(super) neg: bool,
     pub(super) val: u128,
+}
+
+/// WinDivert syntax, in a canonical form that parses back to the same tree: one space around
+/// operators, `and` lists parenthesized inside `or`, flags as bare names, addresses in their
+/// notation and byte indexes with `b` (`packet16[3b]`).
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let list = |f: &mut fmt::Formatter<'_>, v: &[Expr], sep: &str| {
+            for (i, e) in v.iter().enumerate() {
+                if i > 0 {
+                    f.write_str(sep)?;
+                }
+                match e {
+                    Expr::Or(_) if sep == " and " => write!(f, "({e})")?,
+                    _ => write!(f, "{e}")?,
+                }
+            }
+            Ok(())
+        };
+        match self {
+            Expr::Test(t) => write!(f, "{t}"),
+            Expr::And(v) => list(f, v, " and "),
+            Expr::Or(v) => list(f, v, " or "),
+            Expr::Cond(a, b, c) => write!(f, "({a}? {b}: {c})"),
+        }
+    }
+}
+
+impl fmt::Display for Test {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = self.def.name;
+        let flag = matches!(
+            self.def.lower,
+            Lower::Present(_) | Lower::Flag(_) | Lower::Bit(..) | Lower::Const(_)
+        );
+        if flag && self.val == 0 && !self.neg {
+            match self.op {
+                Op::Ne => return f.write_str(name),
+                Op::Eq => return write!(f, "not {name}"),
+                _ => {}
+            }
+        }
+        f.write_str(name)?;
+        match self.def.indexed() {
+            Some(1) => write!(f, "[{}]", self.index)?,
+            Some(_) => write!(f, "[{}b]", self.index)?,
+            None => {}
+        }
+        let op = match self.op {
+            Op::Eq => "==",
+            Op::Ne => "!=",
+            Op::Lt => "<",
+            Op::Le => "<=",
+            Op::Gt => ">",
+            Op::Ge => ">=",
+        };
+        write!(f, " {op} ")?;
+        let v = self.val;
+        match self.def.lower {
+            Lower::Addr4(_) if !self.neg && v >> 32 == 0xffff => {
+                write!(f, "{}", core::net::Ipv4Addr::from(v as u32))
+            }
+            Lower::Addr6(_) | Lower::Addr(_) if !self.neg => {
+                write!(f, "{}", core::net::Ipv6Addr::from(v))
+            }
+            _ if self.neg => write!(f, "-{v}"),
+            _ => write!(f, "{v}"),
+        }
+    }
 }
 
 impl Expr {

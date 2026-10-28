@@ -10,3 +10,16 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[lib]
+# `libavulse_windivert.so`. The rlib is for the tests: no crate links this one.
+name = "avulse_windivert"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+avulse = { path = "../avulse", version = "0.0.0" }
+avulse-filter.workspace = true
+avulse-proto.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

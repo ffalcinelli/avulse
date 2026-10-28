@@ -40,7 +40,7 @@ use self::record::Entry;
 use self::registry::Registry;
 use self::send::Tx;
 use super::{Backend, Capabilities, LayerSupport, Opened, Spec};
-use crate::{Address, Error, Flags, Param, Result, Shutdown};
+use crate::{Address, Error, Flags, Param, Result, Shutdown, Stats};
 
 /// TC priority of a handle of priority 0 when no other handle is open, and the base of
 /// `30001 - priority`.
@@ -410,6 +410,21 @@ fn targets(all: Vec<sys::Interface>, names: &[String], layer: Layer) -> Result<T
 }
 
 impl<R> Rx<R> {
+    /// The handle's counters: the kernel's (indexed by [`abi::stat`]) and the queue's drops.
+    fn stats(&self, kernel: [u64; abi::stat::COUNT]) -> Stats {
+        use abi::stat;
+        Stats {
+            diverted: kernel[stat::DIVERTED],
+            sniffed: kernel[stat::SNIFFED],
+            dropped: kernel[stat::DROPPED],
+            ring_full: kernel[stat::RING_FULL],
+            owner_gone: kernel[stat::OWNER_GONE],
+            too_big: kernel[stat::TOO_BIG],
+            load_errors: kernel[stat::LOAD_ERR],
+            queue_drops: lock(&self.queue).queue.drops,
+        }
+    }
+
     fn new(params: [u64; 3]) -> io::Result<Rx<R>> {
         let ready = sys::Flag::new()?;
         let epoll = sys::Epoll::new()?;
@@ -624,6 +639,14 @@ impl Opened for Handle {
     fn set_param(&self, param: Param, value: u64) -> Result<()> {
         lock(&self.rx.queue).queue.set(param, value);
         Ok(())
+    }
+
+    fn stats(&self) -> Result<Stats> {
+        let kernel = match &self.classifier {
+            Some(c) => c.stats().map_err(io_error)?,
+            None => [0; abi::stat::COUNT],
+        };
+        Ok(self.rx.stats(kernel))
     }
 
     fn as_fd(&self) -> BorrowedFd<'_> {

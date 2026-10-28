@@ -2,7 +2,7 @@
 
 > **Preview.** Only Linux has a backend so far, for the packet layers (`Network`,
 > `NetworkForward` and `Ethernet`) and the event layers (`Flow`, `Socket` and `Reflect`). Elsewhere, `Handle::open` returns
-> `Error::Unsupported`. The API may still change before version 0.1.
+> `Error::Unsupported`. The API is experimental (0.0.x) and may still change.
 
 The model is WinDivert's. You open a **handle** at a **layer**, with a filter, a priority and
 flags. It receives the packets or events that the filter matches, each with an **address**. At
@@ -96,6 +96,13 @@ Sending follows WinDivert's rules:
 packet against another filter. Only `iface` is missing: the address has the interface's index,
 not its name. At the `Reflect` layer, `layer` and `priority` are those of the handle the event is
 about.
+
+## Statistics
+
+`Handle::stats()` returns the handle's counters: what it diverted, sniffed or dropped, and what it
+let through or lost, and why. That covers a full buffer to the handle, an owner that stopped
+answering, a packet too large to divert, a packet the kernel could not copy, and a full receive
+queue. On Linux the kernel keeps most of them, per handle.
 
 ## Capabilities
 

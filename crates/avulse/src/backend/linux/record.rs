@@ -39,6 +39,9 @@ pub struct Ctx {
     l2: [u8; Ctx::L2_MAX],
 }
 
+// The WinDivert-compatible library keeps the first 56 bytes of a context (`Context`).
+const _: () = assert!(Ctx::L2_AT + Ctx::L2_MAX <= 56);
+
 impl Ctx {
     const MAGIC: u8 = 0xa1;
     const L2_MAX: usize = 30;

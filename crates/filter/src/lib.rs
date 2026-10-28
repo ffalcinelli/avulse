@@ -77,6 +77,7 @@ pub mod regex;
 mod value;
 mod windivert;
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use avulse_proto::Packet;
@@ -147,6 +148,26 @@ impl Filter {
             warnings: Vec::new(),
             regexes: Vec::new(),
         })
+    }
+
+    /// A WinDivert filter for `layer`, reformatted in WinDivert syntax: one space around
+    /// operators, flags as bare names (`tcp`, `not outbound`), addresses in their notation, and
+    /// byte offsets for indexes (`packet16[4b]`). The result compiles to the same filter. This is
+    /// what the WinDivert-compatible libraries return for `WinDivertHelperFormatFilter`, whose
+    /// own output (a decompilation of WinDivert's filter object) can differ in form.
+    ///
+    /// ```
+    /// use avulse_filter::{Filter, Layer};
+    ///
+    /// let s = Filter::format_windivert("not  outbound and(tcp.DstPort==80 or udp)", Layer::Network);
+    /// assert_eq!(s.unwrap(), "not outbound and (tcp.DstPort == 80 or udp)");
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`compile_windivert`](Self::compile_windivert).
+    pub fn format_windivert(src: &str, layer: meta::Layer) -> Result<String, Diagnostic> {
+        windivert::format(src, layer)
     }
 
     /// Whether `packet`, with metadata `meta`, matches the filter.

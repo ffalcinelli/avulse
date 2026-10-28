@@ -148,6 +148,18 @@ struct avulse_open_options {
     size_t interface_count;
 };
 
+/* A handle's counters (avulse_stats): what happened to what its filter matched. */
+struct avulse_stats {
+    uint64_t diverted;    /* diverted to the handle */
+    uint64_t sniffed;     /* copied to it and passed on */
+    uint64_t dropped;     /* dropped */
+    uint64_t ring_full;   /* passed on: the kernel's buffer to the handle was full */
+    uint64_t owner_gone;  /* passed on: the owner stopped answering */
+    uint64_t too_big;     /* passed on: too large to divert whole */
+    uint64_t load_errors; /* passed on: the kernel could not copy them */
+    uint64_t queue_drops; /* lost in user space: the queue was full or they waited too long */
+};
+
 typedef struct avulse_handle avulse_handle;
 
 /* The library's version, such as "0.1.0". */
@@ -193,6 +205,8 @@ int avulse_shutdown(avulse_handle *handle, int how);
 /* Sets or reads a queue parameter (AVULSE_PARAM_*). */
 int avulse_set_param(avulse_handle *handle, int param, uint64_t value);
 int avulse_get_param(const avulse_handle *handle, int param, uint64_t *value);
+/* The handle's counters; AVULSE_E_UNSUPPORTED where the backend keeps none. */
+int avulse_stats(const avulse_handle *handle, struct avulse_stats *stats);
 /*
  * A file descriptor that is readable when avulse_recv would not block (for poll or epoll),
  * owned by the handle; -1 where the platform has none.
@@ -236,6 +250,7 @@ _Static_assert(offsetof(struct avulse_flow, process_name) == 64, "avulse_flow");
 _Static_assert(sizeof(struct avulse_reflect) == 24, "avulse_reflect");
 _Static_assert(offsetof(struct avulse_reflect, layer) == 22, "avulse_reflect");
 _Static_assert(sizeof(struct avulse_address) == 216, "avulse_address");
+_Static_assert(sizeof(struct avulse_stats) == 64, "avulse_stats");
 _Static_assert(offsetof(struct avulse_address, version) == 8, "avulse_address");
 _Static_assert(offsetof(struct avulse_address, outbound) == 12, "avulse_address");
 _Static_assert(offsetof(struct avulse_address, if_idx) == 20, "avulse_address");

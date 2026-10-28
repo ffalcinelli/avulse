@@ -27,7 +27,7 @@ use super::record::{self, Entry};
 use super::registry::{self, Registry};
 use super::{Rx, io_error, lock, sys};
 use crate::backend::{Opened, Spec};
-use crate::{Address, Error, Flags, Param, Result, Shutdown};
+use crate::{Address, Error, Flags, Param, Result, Shutdown, Stats};
 
 /// The size of an event handle's ring buffer: 1 MiB, about 11,000 events.
 const RING_BYTES: u32 = 1 << 20;
@@ -294,6 +294,14 @@ impl Opened for EventHandle {
     fn set_param(&self, param: Param, value: u64) -> Result<()> {
         lock(&self.rx.queue).queue.set(param, value);
         Ok(())
+    }
+
+    fn stats(&self) -> Result<Stats> {
+        let kernel = match &self.events {
+            Some(e) => e.stats().map_err(io_error)?,
+            None => [0; abi::stat::COUNT],
+        };
+        Ok(self.rx.stats(kernel))
     }
 
     fn as_fd(&self) -> BorrowedFd<'_> {

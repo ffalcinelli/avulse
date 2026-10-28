@@ -247,23 +247,28 @@ supported at the NETWORK layers since Step 13. Phase 3 comes next.
 Exit: privileged tests pass on both Vagrant VMs, covering divert, inject, GSO, forward, ETHERNET/ARP/VLAN, crash
 cleanup, and exact in-kernel match versus interpreter (`BPF_PROG_TEST_RUN`).
 
-### Phase 3: Linux event layers and API v0.1
+### Phase 3: Linux event layers and API 0.x
 
 1. Port `ebpfdivert/src/ebpfdivert_events.bpf.c` for FLOW and SOCKET, add `process.name` (comm), and REFLECT.
-2. Freeze the Rust API and C ABI as 0.x, publish `libavulse.so` (static, manylinux_2_28).
+2. Review the Rust API and the C ABI as 0.x (`libavulse.so`).
 
 Progress (steps in `docs/implementation-plan.md`): the event programs (Step 14), the FLOW layer (Step 15) and the
 SOCKET layer, which refuses binds and connects with eBPF matchers generated for the cgroup programs (Step 16), and
-`process.name` with the REFLECT layer (Step 17) are done: every layer works on Linux. The API is reviewed for 0.1
-(batch calls, `#[non_exhaustive]`) and the C ABI is `crates/capi` (Step 18). Left: the release.
+`process.name` with the REFLECT layer (Step 17) are done: every layer works on Linux. The API is reviewed for 0.x
+(batch calls, `#[non_exhaustive]`) and the C ABI is `crates/capi` (Step 18). **Phase 3 is done.**
 
-Exit: Linux release v0.1.
+Exit: every layer on Linux, and the C ABI. The release first planned here waits for Phases 5 and 6 (see "Releases"
+below).
 
 ### Phase 4: WinDivert compat shim on Linux and conformance
 
 1. Build `libavulse-windivert.so`, which exports ebpfdivert's C API surface.
 2. Run the **pydivert and jdivert test suites unchanged** against it, through the existing hooks:
    `PYDIVERT_EBPFDIVERT_LIB` and `-Debpfdivert.local`.
+
+Progress (steps in `docs/implementation-plan.md`): `crates/windivert-compat` builds `libavulse_windivert.so`. It
+exports libebpfdivert's API over avulse, and its helpers agree with WinDivert's own code (Steps 19 and 20). Left: the
+binding suites (Step 21).
 
 Exit: both suites pass. The binding suites become a free cross-language conformance suite.
 
@@ -284,6 +289,12 @@ Exit: the pydivert and jdivert Windows suites pass against it, and the driver is
 2. Notarize, and document every gap through `capabilities()`.
 
 Exit: a macOS test suite passes on real hardware, and the capability matrix is published.
+
+### Releases
+
+Versions stay 0.0.x while the project is experimental (owner decision, 2026-10-28). The first release, **v0.0.1**,
+comes after Phases 5 and 6, so that it covers Linux, Windows and macOS: the crates on crates.io, and signed
+`libavulse` tarballs (static, manylinux_2_28) with SBOMs. The plan is in `docs/implementation-plan.md`.
 
 ### Phase 7: Bindings and 1.0
 

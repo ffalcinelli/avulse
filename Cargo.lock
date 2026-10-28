@@ -131,6 +131,12 @@ dependencies = [
 [[package]]
 name = "avulse-windivert-compat"
 version = "0.0.0"
+dependencies = [
+ "avulse",
+ "avulse-filter",
+ "avulse-proto",
+ "libc",
+]
 
 [[package]]
 name = "aya"

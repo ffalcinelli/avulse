@@ -272,6 +272,28 @@ impl TryFrom<&avulse_address> for Address {
     }
 }
 
+/// `struct avulse_stats`: [`avulse_rs::Stats`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct avulse_stats {
+    /// Diverted to the handle.
+    pub diverted: u64,
+    /// Copied to the handle and passed on.
+    pub sniffed: u64,
+    /// Dropped.
+    pub dropped: u64,
+    /// Passed on: the kernel's buffer to the handle was full.
+    pub ring_full: u64,
+    /// Passed on: the owner stopped answering.
+    pub owner_gone: u64,
+    /// Passed on: too large to divert whole.
+    pub too_big: u64,
+    /// Passed on: the kernel could not copy them.
+    pub load_errors: u64,
+    /// Lost in user space: the queue was full, or they waited too long.
+    pub queue_drops: u64,
+}
+
 /// `struct avulse_open_options`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -669,6 +691,41 @@ pub unsafe extern "C" fn avulse_get_param(
     // SAFETY: valid per the contract.
     unsafe { *value = (*handle).handle.param(p) };
     AVULSE_OK
+}
+
+/// The handle's counters.
+///
+/// # Safety
+///
+/// `handle` is open; `stats` is valid for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn avulse_stats(
+    handle: *const avulse_handle,
+    stats: *mut avulse_stats,
+) -> c_int {
+    if handle.is_null() || stats.is_null() {
+        return invalid("a pointer is NULL");
+    }
+    // SAFETY: open, per the contract.
+    match unsafe { &(*handle).handle }.stats() {
+        Ok(s) => {
+            // SAFETY: valid for a write, per the contract.
+            unsafe {
+                *stats = avulse_stats {
+                    diverted: s.diverted,
+                    sniffed: s.sniffed,
+                    dropped: s.dropped,
+                    ring_full: s.ring_full,
+                    owner_gone: s.owner_gone,
+                    too_big: s.too_big,
+                    load_errors: s.load_errors,
+                    queue_drops: s.queue_drops,
+                }
+            };
+            AVULSE_OK
+        }
+        Err(e) => fail(e, ""),
+    }
 }
 
 /// The handle's pollable file descriptor, or -1.

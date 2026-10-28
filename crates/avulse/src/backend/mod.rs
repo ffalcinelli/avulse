@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use avulse_filter::{Filter, Layer};
 
-use crate::{Address, Flags, Param, Result, Shutdown};
+use crate::{Address, Error, Flags, Param, Result, Shutdown, Stats};
 
 /// What a backend gets to open a handle.
 #[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
@@ -55,6 +55,10 @@ pub(crate) trait Opened: Send + Sync {
     fn shutdown(&self, how: Shutdown) -> Result<()>;
     /// Applies a parameter; `value` is in range.
     fn set_param(&self, param: Param, value: u64) -> Result<()>;
+    /// The handle's counters.
+    fn stats(&self) -> Result<Stats> {
+        Err(Error::Unsupported("statistics"))
+    }
     /// A descriptor that is readable when `recv` would not block.
     #[cfg(unix)]
     fn as_fd(&self) -> BorrowedFd<'_>;

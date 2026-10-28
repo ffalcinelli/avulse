@@ -14,7 +14,7 @@ use super::record::Entry;
 use super::registry::{self, Registry};
 use super::{Rx, lock, sys};
 use crate::backend::{Opened, Spec};
-use crate::{Address, Error, Flags, Param, Result, Shutdown};
+use crate::{Address, Error, Flags, Param, Result, Shutdown, Stats};
 
 /// How often the registry is read.
 const PERIOD: Duration = Duration::from_millis(100);
@@ -160,6 +160,11 @@ impl Opened for ReflectHandle {
     fn set_param(&self, param: Param, value: u64) -> Result<()> {
         lock(&self.rx.queue).queue.set(param, value);
         Ok(())
+    }
+
+    /// Only the queue's drops: no program reports to this handle.
+    fn stats(&self) -> Result<Stats> {
+        Ok(self.rx.stats([0; avulse_ebpf::abi::stat::COUNT]))
     }
 
     fn as_fd(&self) -> BorrowedFd<'_> {

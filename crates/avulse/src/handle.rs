@@ -8,7 +8,7 @@ use std::time::Duration;
 use avulse_filter::{Filter, Layer};
 
 use crate::backend::{self, Backend, Opened, Spec};
-use crate::{Address, Error, Flags, MAX_PACKET_LEN, Param, Result, Shutdown};
+use crate::{Address, Error, Flags, MAX_PACKET_LEN, Param, Result, Shutdown, Stats};
 
 /// The highest priority: the handle sees packets before every other handle.
 pub const PRIORITY_HIGHEST: i16 = 30_000;
@@ -340,6 +340,16 @@ impl Handle {
         self.inner().set_param(param, value)?;
         self.params[param.index()].store(value, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// The handle's counters: what happened to the packets or events its filter matched.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unsupported`] where the backend keeps none, [`Error::Io`] if the kernel's
+    /// counters cannot be read.
+    pub fn stats(&self) -> Result<Stats> {
+        self.inner().stats()
     }
 
     /// The value of a queue parameter.

@@ -445,6 +445,8 @@ fn params_are_checked_and_kept() {
         fake.log().params,
         [(Param::QueueLength, 32), (Param::QueueTime, 16_000)]
     );
+    // A backend without counters says so.
+    assert!(matches!(h.stats(), Err(Error::Unsupported(_))));
 }
 
 #[test]

@@ -36,6 +36,7 @@ mod backend;
 mod error;
 mod flags;
 mod handle;
+mod stats;
 #[cfg(test)]
 mod tests;
 
@@ -49,6 +50,7 @@ pub use backend::{Capabilities, LayerSupport};
 pub use error::{Error, Result};
 pub use flags::{Flags, Param, Shutdown};
 pub use handle::{Handle, OpenOptions, PRIORITY_HIGHEST, PRIORITY_LOWEST, Syntax};
+pub use stats::Stats;
 
 /// A buffer of this many bytes holds any packet: the largest IP packet with an Ethernet header
 /// and two VLAN tags.

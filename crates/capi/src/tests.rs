@@ -36,6 +36,7 @@ fn layouts_match_the_header_and_the_rust_types() {
     assert_eq!(offset_of!(Address, reflect), 128);
     assert_eq!(offset_of!(Address, context), 152);
     assert_eq!(size_of::<avulse_open_options>(), 32);
+    assert_eq!(size_of::<avulse_stats>(), 64);
     assert_eq!(offset_of!(avulse_open_options, flags), 8);
     assert_eq!(offset_of!(avulse_open_options, interfaces), 16);
 }

@@ -57,6 +57,15 @@ pub(crate) fn compile(src: &str, layer: Layer) -> Result<ir::Test, Diagnostic> {
     Ok(ir::simplify(lower::expr(&e, layer)))
 }
 
+/// A WinDivert filter for `layer` in canonical WinDivert syntax (`Display` of the parse tree), after
+/// checking that it compiles.
+pub(crate) fn format(src: &str, layer: Layer) -> Result<alloc::string::String, Diagnostic> {
+    compile(src, layer)?;
+    Ok(alloc::string::ToString::to_string(&parse::parse(
+        src, layer,
+    )?))
+}
+
 fn layer_name(layer: Layer) -> &'static str {
     match layer {
         Layer::Network => "NETWORK",

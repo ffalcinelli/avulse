@@ -109,8 +109,8 @@ impl Address {
     }
 
     /// The metadata a filter sees for this packet or event, as
-    /// [`Filter::matches`](avulse_filter::Filter::matches) takes it. The interface name and the
-    /// The interface name is not part of the address, so `iface` never matches.
+    /// [`Filter::matches`](avulse_filter::Filter::matches) takes it. The interface name is not
+    /// part of the address, so `iface` never matches.
     pub fn meta(&self) -> Meta<'_> {
         let mut meta = Meta {
             layer: self.layer,
@@ -298,6 +298,9 @@ impl Default for Reflect {
 /// It is opaque to applications. Copy it with the rest of the address from a received packet to
 /// the packet you send back; a packet you build yourself goes out with an empty one, and the
 /// backend routes it.
+///
+/// A backend uses at most the first 56 bytes and leaves the rest zero: the WinDivert-compatible
+/// library keeps only those, in WinDivert's 80-byte address.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct Context([u8; CONTEXT_LEN]);

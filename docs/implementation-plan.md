@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-22, Phase 2 done: Steps 1 to 13 and Spikes A and B, Spike C partly done; Phase 3: Steps 14 to 18 done, next Step 19)
+## Status (2026-10-28, Phases 2 and 3 done: Steps 1 to 18 and Spikes A and B, Spike C partly done; Phase 4: Steps 19 and 20 done, next Step 21)
 
 | Area | State |
 | --- | --- |
@@ -20,7 +20,7 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
 | `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Steps 15 to 17: the FLOW, SOCKET and REFLECT layers (`events.rs`, `reflect.rs`), SOCKET refusing binds and connects in the kernel; `Address` version 2 (216 bytes) with the process name. Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
 | `crates/capi` (`avulse-capi`) | Step 18: the C ABI, `libavulse.so`/`.a`, header `include/avulse.h` (hand-written, layout pinned by asserts), 20 functions, tested from C (`tests/c.rs`, `tests/c/abi.c`). |
-| `crates/windivert-compat` | Empty stub (one doc line, `publish = false`). |
+| `crates/windivert-compat` | Steps 19 and 20: `libavulse_windivert.so`, libebpfdivert's C API over avulse (21 `ebpfdivert_*` exports, negative errno values, WinDivert's 80-byte address with avulse's reinjection context in its union). WinDivert's helpers (hash, checksums, `eval_filter` with `random*`) agree with WinDivert's own code on generated vectors (`scripts/gen_compat_vectors.py`). 14 unit tests, the exported-symbol test, and `tests/capture.rs` (6, `AVULSE_BPF=1`) on 6.8 and 5.15. `publish = false`. |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
 | CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
 | Release (`.github/workflows/release.yml`) | Builds and publishes the Python placeholder on `v*` tags. **No crates.io job yet.** |
@@ -34,7 +34,10 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
   use `rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5` with
   `environment: crates-io` and `permissions: id-token: write`. That is the same pattern as the PRs in
   kaji, pinner, mcp-airlock and astroceleste-engine. Every published crate must have a trusted
-  publisher; only `avulse` has one so far.
+  publisher; only `avulse` has one so far. On 2026-10-28, `avulse-proto`, `avulse-filter`,
+  `avulse-ebpf`, `avulse-cli`, `avulse-capi` and `avulse-windivert-compat` were claimed with
+  0.0.0 placeholders (a one-line `lib.rs` each, published with a token). Adding their trusted
+  publishers is an owner action.
 - **PyPI:** `avulse` 0.0.0 was published by `release.yml` through a trusted publisher (environment
   `pypi`).
 - **Maven:** groupId `com.github.ffalcinelli`, already owned through jdivert. Nothing to claim.
@@ -436,10 +439,16 @@ equivalent on the vector packets.
 
 ### After that
 
-Phase 2 and Phase 3 are expanded below. Then follow the roadmap: Phase 3 (events, API v0.1,
-crates.io release job; Steps 14 to 19) → 4 (compat shim + pydivert/jdivert suites) → 5 (Windows driver; read the Spike B note's
-requirements first) → 6 (macOS, after Spike C) → 7 (bindings, 1.0). Before starting each phase,
-expand it into steps in this file, in the same format as above.
+Phases 2 to 4 are expanded below. Then follow the roadmap: 5 (Windows driver; read the Spike B
+note's requirements first) → 6 (macOS, after Spike C) → the first release (v0.0.1, below) → 7
+(bindings, 1.0). Before starting each phase, expand it into steps in this file, in the same
+format as above.
+
+**Versions and releases (owner decisions, 2026-10-28).**
+- Versions stay **0.0.x** while the project is experimental. The first release is **v0.0.1**,
+  not 0.1.
+- Nothing is released before the Windows and macOS backends exist (Phases 5 and 6). The release
+  step that closed Phase 3 moved to "Release v0.0.1" at the end of this file.
 
 ## Phase 2: Linux packet layers (NETWORK, NETWORK_FORWARD, ETHERNET)
 
@@ -1047,11 +1056,11 @@ and `tests/kernel.rs` (15) pass on 6.8 and 5.15.
     cannot drive the `_ip` programs; it still checks that the verifier loads them on both
     kernels.
 
-## Phase 3: Linux event layers and API v0.1
+## Phase 3: Linux event layers and API 0.x
 
 **Goal** (roadmap, Phase 3): the FLOW, SOCKET and REFLECT layers on Linux, `process.name`, then the
-Rust API and the C ABI frozen as 0.x and released. **Exit:** Linux release v0.1 (crates.io, and
-`libavulse.so` tarballs).
+Rust API and the C ABI reviewed as 0.x. **Exit:** every layer on Linux, and the C ABI. (The
+release planned here moved after Phase 6; see "Versions and releases".) **Phase 3 is done.**
 
 **What to port.** ebpfdivert's `src/ebpfdivert_events.bpf.c` (cgroup and sockops programs),
 and the events, REFLECT and blocking parts of `src/handle.c`; its `docs/architecture.md` section 3
@@ -1340,7 +1349,7 @@ handle opened and closed by another process, and one that dies (CLOSE once it is
 **Acceptance.** Those pass on both VMs. `capabilities()` reports FLOW, SOCKET and REFLECT on
 Linux.
 
-### Step 18: API v0.1 and the C ABI (done)
+### Step 18: API 0.x and the C ABI (done)
 
 **Outcome.** The API was reviewed for 0.1, and `crates/capi` is `libavulse`. Host tests,
 `tests/kernel.rs` (20) and `tests/capture.rs` (46) pass on 6.8 and 5.15, and so does the C
@@ -1426,28 +1435,186 @@ The original plan of the step follows.
 - The C test passes on the host, and in a VM for the capture part.
 - The guide gets a C API page.
 
-### Step 19: Release v0.1
+## Phase 4: WinDivert compat shim on Linux and conformance
+
+**Goal** (roadmap, Phase 4): a library that exports ebpfdivert's C API (`../ebpfdivert/include/
+ebpfdivert.h`) over avulse, so that the pydivert and jdivert test suites run against it
+**unchanged**, through the hooks they already have (`PYDIVERT_EBPFDIVERT_LIB`,
+`-Debpfdivert.local`). **Exit:** both suites pass. They then become the conformance suite that the
+Windows driver (Phase 5) passes too, through the `WinDivert*` exports of the same crate.
+
+**Decisions for this phase** (change them here, with a reason, if the work proves them wrong):
+
+- **One crate, `crates/windivert-compat`** (`avulse-windivert-compat`, `[lib] name =
+  "avulse_windivert"`, `cdylib` and `rlib`): `libavulse_windivert.so`. Its core (the 80-byte
+  address, the errno mapping, the helpers) is platform-neutral; the `ebpfdivert_*` exports are
+  Linux only, and Phase 5 adds the `WinDivert*` ones beside them.
+- **Only what the bindings call is exported**: the handle API (`open`, `open_ex`, `recv`,
+  `recv_ex`, `send`, `send_ex`, `shutdown`, `close`, `set_param`, `get_param`, `get_event_fd`,
+  `get_handle_stats`, `unregister`, `strerror`, `version`, `set_print`) and the helpers
+  (`compile_filter`, `eval_filter`, `format_filter`, `calc_checksums`, `hash_packet`), each with
+  the `ebpfdivert_` prefix. The pinned global mode (`load`, `rules_*`) belongs to
+  `ebpfdivert-cli` and is left out.
+- **The reinjection context goes in the union.** At NETWORK and NETWORK_FORWARD, bytes 8 to 63
+  of WinDivert's 64-byte union (after `IfIdx` and `SubIfIdx`) carry the first 56 bytes of
+  avulse's `Context`. A backend's context must therefore fit in 56 bytes (`address.rs` says so;
+  Linux's `Ctx` uses 42). The bindings round-trip the union untouched, as they do for
+  libebpfdivert.
+- **Errors are negative errno values**, as in libebpfdivert: `Filter` and `InvalidArgument` →
+  `EINVAL`, `Unsupported` → `EOPNOTSUPP`, `Shutdown` → `ESHUTDOWN`, `Timeout` → `EAGAIN`,
+  `BufferTooSmall` → `ENOBUFS`, `Io` → its OS error (else `EIO`).
+- **The bindings are never changed.** A failure of their suites is fixed in the shim or in
+  avulse; an intended difference is listed under "Divergences from libebpfdivert" below and in
+  the guide.
+
+### Step 19: The shim's core: address, errors, helpers (done)
+
+**Outcome.** `crates/windivert-compat`: `address.rs` (`WdAddress`), `packet.rs` (WinDivert's
+packet parser), `helpers.rs`, and the helper exports. 14 unit tests pass.
+
+- **Vectors from WinDivert's code.** `scripts/gen_compat_vectors.py` compiles a driver against
+  ebpfdivert's vendored helpers. On 39 packets it records 117 hashes, 273 checksum runs and 148
+  evaluations. The packets are WinDivert's own plus edge cases: truncated, fragments, IPv6
+  extension headers, TCP options, a UDP checksum that comes out as 0. The evaluations cover
+  `random*` at several timestamps, and the packet and address checks. All of them agree, and so
+  do WinDivert's 241 filter vectors through `eval_filter`.
+- **`random*`.** `eval_filter` fills `Meta::hash` with WinDivert's hash, seeded with the
+  timestamp and made non-zero, as WinDivert's evaluator does.
+- **`format_filter` (decision).** It returns a canonical WinDivert syntax of the parse tree:
+  `Filter::format_windivert`, a `Display` for `windivert::parse::Expr`. It does not port
+  WinDivert's decompiler. Every vector formats to a filter that compiles to the same IR, and
+  formatting is stable. The bindings declare the function but never call it.
+- **Deviation: no `catch_unwind`.** Panics abort, as in `crates/capi` (`extern "C"`).
+- **A WinDivert bug left out of the vectors.** On a TCP data offset longer than the packet,
+  WinDivert's checksum reads past the end of the packet. The shim checksums only the bytes that
+  are there.
+
+The original plan of the step follows.
+
+
+**Where.** `crates/windivert-compat/src/`:
+- `address.rs`: `WdAddress` (`#[repr(C)]`, 80 bytes), accessors for the bitfield word (layer bits
+  0 to 7, event 8 to 15, then sniffed, outbound, loopback, impostor, ipv6, ip_checksum,
+  tcp_checksum, udp_checksum) and the union (network: `if_idx` at 0, `sub_if_idx` at 4;
+  flow/socket: endpoint 0, parent 8, PID 16, addresses 20 and 36 as host-order words with word 0
+  least significant and IPv4 as `::ffff:a.b.c.d`, ports 52 and 54, protocol 56; reflect:
+  timestamp 0, PID 8, layer 12, flags 16, priority 24). `to_avulse`/`from_avulse`.
+- `errno.rs`: the mapping above.
+- `helpers.rs`: `compile_filter` (`Filter::compile_windivert`, the diagnostic's message in a
+  thread-local `CString`, its span's start as the position), `eval_filter` (the address's layer
+  and `Address::meta()`, `Packet::parse(Link::Ip)`), `format_filter` (WinDivert syntax out: a
+  printer of the WinDivert parse tree in `crates/filter/src/windivert/`), `calc_checksums`
+  (`avulse_proto::checksum` with WinDivert's `NO_*` flags) and `hash_packet` (WinDivert's hash,
+  reimplemented from `windivert/dll/windivert_helper.c`, which is LGPL user-mode code, not the
+  driver).
+
+**Tests.** The address layout byte by byte, round trips at every layer (the union survives at
+NETWORK), the errno mapping, and vectors generated from libebpfdivert's helpers by
+`scripts/gen_compat_vectors.py` (a C program against `../ebpfdivert/src/wd/`, no root) for
+`hash_packet`, `calc_checksums` and `format_filter`. WinDivert's 241 filter vectors run through
+`eval_filter` (included by path from `crates/filter/src/tests/windivert_vectors.rs`).
+
+**Acceptance.** The helpers agree with libebpfdivert on every vector.
+
+### Step 20: The handle exports, and `Handle::stats` (done)
+
+**Outcome.** The 21 exports, `Handle::stats` (`avulse::Stats`), and `avulse_stats` in the C ABI.
+`tests/capture.rs` of the shim (6 tests), avulse's `tests/capture.rs` (46) and `tests/kernel.rs`
+(20), and `avulse-c-test` pass on 6.8 and 5.15.
+
+- **Closing while another thread waits.** The handle counts the calls in progress, as
+  libebpfdivert's `GUARDED` does. `close` marks the handle, shuts it down (which wakes waiting
+  receivers), waits for the calls to finish, then frees it. Calls on a closing handle return
+  `-EBADF`.
+- **libebpfdivert's rules, checked in the shim:**
+  - receiving on `SEND_ONLY` or sending on `RECV_ONLY` is `-EPERM`;
+  - sending above the MTU is `-EMSGSIZE`;
+  - `recv` with a NULL packet returns the length and the address (through a per-thread scratch
+    buffer);
+  - `send_ex` splits packets by their IP length.
+- **`Stats`.** Most counters are the kernel's. `queue_drops` is the user-space queue's. REFLECT
+  handles have only the queue's. The shim maps them to ebpfdivert's `STAT_*`, with
+  `PARSING_ERR` ← `load_errors`.
+- **REFLECT data.** It is the native filter text, as Step 17 decided. A divergence, below.
+- **Linux's reinjection context fits in 56 bytes.** `record.rs` asserts it at compile time.
+
+The original plan of the step follows.
+
+
+**Where.**
+- `crates/windivert-compat/src/ebpfdivert.rs` (Linux): the `#[unsafe(no_mangle)] unsafe extern
+  "C"` exports, each body under `catch_unwind` as in `crates/capi`. The handle is a boxed
+  `avulse::Handle`. `open` sets `errno` and returns NULL, `open_ex` returns the negative errno.
+  `ifnames` → `OpenOptions::interfaces`; `ring_bytes` is accepted and ignored unless a suite
+  needs it; a negative timeout blocks and 0 polls; `recv_ex`/`send_ex` → `recv_batch`/
+  `send_batch`; `get_param` answers 2 and 2 for the version parameters; `get_event_fd` →
+  `as_fd`; `unregister` → `avulse::cleanup`; `set_print` does nothing (avulse does not log).
+- `crates/avulse`: `Handle::stats()` returning a `#[non_exhaustive]` `Stats` (diverted, sniffed,
+  dropped, ring full, owner gone, too big, queue full), through `Opened::stats` (default
+  `Unsupported`); the Linux handles read their programs' counters. The shim maps them onto
+  ebpfdivert's `STAT_*` indexes. `crates/capi` gains `avulse_stats`.
+
+**Tests.** `tests/symbols.rs` builds the library and checks the exported symbols (`nm -D`) are
+exactly the list above. `tests/capture.rs` (`AVULSE_BPF=1`, root, in the VMs) drives the exports on
+`lo`: a bad filter (`-EINVAL` and its position), a timeout (`-EAGAIN`), divert and send back,
+`recv_ex`/`send_ex`, `-ENOBUFS`, the statistics, `-ESHUTDOWN`, and FLOW and SOCKET addresses.
+
+**Acceptance.** Those pass on both VMs.
+
+### Step 21: The binding suites (Phase 4 exit)
+
+**Where.** No code of its own: the fixes the suites call for.
+- Build `cargo build --release -p avulse-windivert-compat` on the host and copy the library into
+  each binding's synced folder, untracked. The binding VMs are Ubuntu 24.04 (glibc 2.39); build
+  in an `ubuntu:24.04` container if the host's library needs newer symbols.
+- pydivert: `vagrant up linux`, then its suite as `scripts/run-tests-linux.sh` runs it, with
+  `PYDIVERT_EBPFDIVERT_LIB` pointing at the library; `vagrant destroy -f linux`.
+- jdivert: `vagrant up linux`, `sudo mvn clean verify -Debpfdivert.skipDownload=true
+  -Debpfdivert.local=…` on JDK 25 (Panama) and JDK 8 (JNA); `vagrant destroy -f linux`.
+- One VM at a time. Then avulse's own privileged suites on `default` and `legacy` again.
+
+**Acceptance.** Both suites pass unchanged. The guide has a page on the shim
+(`book/src/libraries/windivert-compat.md`) with the divergences.
+
+### Divergences from libebpfdivert
+
+Listed for users in `book/src/libraries/windivert-compat.md`.
+
+- REFLECT data is the native filter text. WinDivert sends its serialized filter object.
+- `format_filter` is a canonical form of the source, not WinDivert's decompilation.
+- The address loses the VLAN tag and the process name: WinDivert has no room for them.
+- `compile_filter` reports avulse's messages, not WinDivert's fixed strings.
+- `ring_bytes` and `set_print` are accepted and have no effect.
+- On a TCP data offset longer than the packet, `calc_checksums` stays within the packet.
+- At FLOW and SOCKET, `eval_filter` accepts a non-NULL packet of length 0.
+
+## Release v0.0.1 (after Phases 5 and 6)
+
+The first release, once Windows and macOS have backends. The plan below was written for a
+Linux-only release; extend it with the Windows and macOS artifacts (the signed driver, the
+system extension) when Phases 5 and 6 are expanded.
 
 **Where.** `.github/workflows/release.yml` and the crates' metadata.
 - A crates.io job (`rust-lang/crates-io-auth-action`, environment `crates-io`, `id-token:
   write`). Publish in dependency order: `avulse-proto`, `avulse-filter`, `avulse-ebpf`, `avulse`,
-  then `avulse-cli`.
+  then `avulse-cli`. `avulse-capi` ships in the tarballs only (owner decision), and keeps its
+  0.0.0 placeholder on crates.io, as does `avulse-windivert-compat`.
 - **Owner action:** a trusted publisher for every crate except `avulse`, which already has one.
 - `avulse-ebpf` ships `tc.bpf.o` and `events.bpf.o` prebuilt in the package. `build.rs` uses
   them when clang is missing or `AVULSE_PREBUILT_BPF` is set, so users need no clang. CI checks
   that the shipped objects match a fresh build.
-- Tarballs `avulse-v0.1.0-linux-{amd64,arm64}.tar.gz`, with `libavulse.so`, `avulse.h` and the
+- Tarballs `avulse-v0.0.1-linux-{amd64,arm64}.tar.gz`, with `libavulse.so`, `avulse.h` and the
   `avulse` CLI. They are signed with cosign (keyless) and come with an SBOM.
   - Build them in `quay.io/pypa/manylinux_2_28_{x86_64,aarch64}` (moved here from Step 18), with
     Rust and clang installed in the container. aya is pure Rust, so glibc 2.28 is the only
     requirement.
   - Run `avulse-c-test` against the built library.
-- Version 0.1.0 across the workspace, a CHANGELOG, and the tag `v0.1.0`. The Python placeholder
+- Version 0.0.1 across the workspace, a CHANGELOG, and the tag `v0.0.1` (pre-release tags
+  `v0.0.1-rc.N` build and dry-run without publishing). The Python placeholder
   job stays as it is.
 
 **Acceptance.** A dry run (`cargo publish --dry-run` for each crate, and the workflow on a
-pre-release tag) passes, then the v0.1.0 tag publishes. The guide and README say what 0.1 covers
-(Linux only).
+pre-release tag) passes, then the v0.0.1 tag publishes. The guide and README say what 0.0.1 covers.
 
 ## Checklist
 
@@ -1476,5 +1643,10 @@ pre-release tag) passes, then the v0.1.0 tag publishes. The guide and README say
 - [x] Step 16: SOCKET layer, with blocking
 - [x] Step 17: `process.name` and REFLECT
 - [x] Step 18: API v0.1 and the C ABI (`libavulse.so`)
-- [ ] Step 19: release v0.1 (crates.io, tarballs)
+- [x] Step 19: compat shim core (address, errno, helpers)
+- [x] Step 20: compat shim handle exports, `Handle::stats`
+- [ ] Step 21: pydivert and jdivert suites against the shim (Phase 4 exit)
+- [ ] Phase 5: Windows driver
+- [ ] Phase 6: macOS system extension
+- [ ] Release v0.0.1 (crates.io, tarballs; after Phases 5 and 6)
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement

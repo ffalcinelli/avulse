@@ -68,6 +68,7 @@ static void without_privileges(void)
                       AVULSE_FLAG_SNIFF | AVULSE_FLAG_DROP, &h) == AVULSE_E_INVALID);
     CHECK(h == NULL);
     CHECK(avulse_close(NULL) == AVULSE_OK);
+    CHECK(avulse_stats(NULL, NULL) == AVULSE_E_INVALID);
 }
 
 static int udp_socket(void)
@@ -105,6 +106,7 @@ static void with_privileges(void)
     struct avulse_address addrs[4];
     size_t lens[4], len = 0, count = 0, sent = 0;
     uint64_t v = 0;
+    struct avulse_stats stats;
     const void *packets[4];
     char got[16];
     int s = udp_socket();
@@ -143,6 +145,7 @@ static void with_privileges(void)
     for (size_t i = 0, at = 0; i < count; at += lens[i], i++)
         packets[i] = buf + at;
     CHECK(avulse_send_batch(h, packets, lens, addrs, count, &sent) == AVULSE_OK && sent == 3);
+    CHECK(avulse_stats(h, &stats) == AVULSE_OK && stats.diverted >= 4 && stats.dropped == 0);
     usleep(100000);
     for (int i = 0; i < 3; i++)
         CHECK(recv(s, got, sizeof(got), MSG_DONTWAIT) == 5);

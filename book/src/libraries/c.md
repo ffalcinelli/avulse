@@ -62,6 +62,7 @@ int main(void)
 | `avulse_shutdown`, `avulse_close` | Stop receiving or sending; close and free the handle |
 | `avulse_set_param`, `avulse_get_param` | The queue parameters |
 | `avulse_fd` | A descriptor readable when `avulse_recv` would not block, for `poll` and `epoll` |
+| `avulse_stats` | The handle's counters: diverted, sniffed, dropped, and what was passed on or lost, and why |
 | `avulse_cleanup` | Remove what dead processes left behind |
 | `avulse_filter_check`, `avulse_filter_format`, `avulse_filter_convert`, `avulse_filter_eval` | The filter language without a handle: check, format, convert a WinDivert filter, evaluate on a packet |
 

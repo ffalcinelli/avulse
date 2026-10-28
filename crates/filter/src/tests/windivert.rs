@@ -234,6 +234,45 @@ fn windivert_convert() {
     }
 }
 
+/// `format_windivert` gives WinDivert syntax that compiles to the same IR, on every vector, and is
+/// stable when formatted again.
+#[test]
+fn windivert_format() {
+    for (src, _, _) in VECTORS.iter() {
+        let out = Filter::format_windivert(src, Layer::Network).unwrap();
+        assert_eq!(wd(&out).ir(), wd(src).ir(), "{src} => {out}");
+        assert_eq!(
+            Filter::format_windivert(&out, Layer::Network).unwrap(),
+            out,
+            "{src}"
+        );
+    }
+    for (src, out) in [
+        ("inbound and tcp.Syn", "inbound and tcp.Syn"),
+        ("not outbound", "not outbound"),
+        ("not tcp.Syn and !udp", "not tcp.Syn and not udp"),
+        ("ip.DstAddr==10.0.0.1", "ip.DstAddr == 10.0.0.1"),
+        ("localAddr == 127.0.0.1", "localAddr == ::ffff:127.0.0.1"),
+        (
+            "packet16[2] = 0x54 || packet[-1] < 3",
+            "packet16[4b] == 84 or packet[-1] < 3",
+        ),
+        (
+            "(tcp ? tcp.DstPort == 80 or tcp.SrcPort == 80 : (udp && udp.DstPort == 53))",
+            "(tcp? tcp.DstPort == 80 or tcp.SrcPort == 80: udp and udp.DstPort == 53)",
+        ),
+        ("(tcp or udp) and ip", "(tcp or udp) and ip"),
+        ("ip.TTL > -1", "ip.TTL > -1"),
+    ] {
+        assert_eq!(
+            Filter::format_windivert(src, Layer::Network).unwrap(),
+            out,
+            "{src}"
+        );
+    }
+    assert!(Filter::format_windivert("tcp.Bogus", Layer::Network).is_err());
+}
+
 /// WinDivert's deepest filters: 341 levels of parentheses, and conditionals nested 127 deep (the
 /// 256-test limit) in conditions and in branches. A conditional is one IR node, so nesting in
 /// conditions does not blow up.
