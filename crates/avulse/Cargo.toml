@@ -22,5 +22,17 @@ avulse-proto.workspace = true
 avulse-ebpf.workspace = true
 libc = "0.2"
 
+# The Windows backend: the service control manager, the driver's device and overlapped I/O.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Services",
+    "Win32_System_Threading",
+] }
+
 [lints]
 workspace = true

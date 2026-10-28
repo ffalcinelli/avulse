@@ -20,6 +20,7 @@ mod device;
 mod eval;
 mod handle;
 mod lock;
+mod rx;
 mod sys;
 
 #[cfg(not(test))]

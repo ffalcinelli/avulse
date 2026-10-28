@@ -11,7 +11,7 @@ publish = false
 [dependencies]
 avulse-abi = { path = "../../../crates/abi" }
 avulse-filter = { path = "../../../crates/filter" }
-windows-sys = { version = "0.60", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",

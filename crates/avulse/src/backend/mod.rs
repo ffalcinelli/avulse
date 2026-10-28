@@ -14,7 +14,10 @@ use avulse_filter::{Filter, Layer};
 use crate::{Address, Error, Flags, Param, Result, Shutdown, Stats, Syntax};
 
 /// What a backend gets to open a handle.
-#[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
+#[cfg_attr(
+    not(any(test, target_os = "linux", target_os = "windows")),
+    allow(dead_code)
+)]
 pub(crate) struct Spec<'a> {
     pub filter: &'a Filter,
     /// The filter as written, and its language: what REFLECT reports.
@@ -31,6 +34,8 @@ pub(crate) struct Spec<'a> {
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "windows")]
+mod windows;
 
 /// A platform backend.
 pub(crate) trait Backend: Sync {
@@ -73,15 +78,17 @@ pub(crate) trait Opened: Send + Sync {
 pub(crate) fn platform() -> &'static dyn Backend {
     #[cfg(target_os = "linux")]
     return &linux::Linux;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    return &windows::Windows;
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     return &Unavailable;
 }
 
 /// The backend of platforms that have none yet.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 struct Unavailable;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 impl Backend for Unavailable {
     fn capabilities(&self) -> Capabilities {
         Capabilities::NONE

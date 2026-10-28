@@ -13,7 +13,7 @@ use avulse_abi::{Param, Shutdown};
 use avulse_filter::Layer;
 use avulse_proto::Link;
 
-use crate::eval;
+use crate::{eval, rx};
 use crate::handle::{self, File, State};
 use crate::sys::{self, unicode, w};
 
@@ -109,9 +109,7 @@ unsafe extern "C" fn dispatch(
     let major = u32::from(unsafe { (*sl).MajorFunction });
     match major {
         sys::IRP_MJ_CREATE => {
-            let file = Box::new(File {
-                state: crate::lock::SpinLock::new(State::New),
-            });
+            let file = Box::new(File::new());
             // SAFETY: the file object is ours until IRP_MJ_CLOSE.
             unsafe { (*fo).FsContext = Box::into_raw(file).cast() };
             // SAFETY: the IRP is ours.
@@ -123,6 +121,7 @@ unsafe extern "C" fn dispatch(
                 // Closing drops this reference to the handle; the program goes with the last.
                 let old = core::mem::replace(&mut *file.state.lock(), State::Closed);
                 drop(old);
+                rx::cancel_all(file);
             }
             // SAFETY: the IRP is ours.
             unsafe { sys::complete(irp, sys::STATUS_SUCCESS, 0) }
@@ -154,6 +153,18 @@ unsafe extern "C" fn dispatch(
                     p.OutputBufferLength as usize,
                 )
             };
+            if code == ioctl::RECV {
+                let status = match handle::get(file) {
+                    Ok(h) if h.flags.contains(avulse_abi::Flags::SEND_ONLY) => {
+                        sys::STATUS_INVALID_DEVICE_REQUEST
+                    }
+                    // SAFETY: a RECV IRP for `file`, ours.
+                    Ok(_) => return unsafe { rx::recv(file, irp) },
+                    Err(s) => s,
+                };
+                // SAFETY: the IRP is ours.
+                return unsafe { sys::complete(irp, status, 0) };
+            }
             // The buffered IOCTLs share one system buffer, as long as the longer of the two.
             // SAFETY: the I/O manager allocated it for this request.
             let buf = unsafe { (*irp).AssociatedIrp.SystemBuffer.cast::<u8>() };
@@ -214,9 +225,12 @@ fn control(file: &File, code: u32, io: &Buffered) -> Result<usize, sys::NTSTATUS
                 _ => return Err(sys::STATUS_INVALID_PARAMETER),
             };
             let h = handle::get(file)?;
-            let mut m = h.mutable.lock();
-            m.shut_recv |= matches!(how, Shutdown::Recv | Shutdown::Both);
-            m.shut_send |= matches!(how, Shutdown::Send | Shutdown::Both);
+            h.mutable.lock().shut_send |= matches!(how, Shutdown::Send | Shutdown::Both);
+            if matches!(how, Shutdown::Recv | Shutdown::Both) {
+                file.rx.lock().shut = true;
+                // What is queued is still delivered; then waiting requests end.
+                rx::wake(file);
+            }
             Ok(0)
         }
         ioctl::SET_PARAM => {
@@ -253,7 +267,7 @@ fn control(file: &File, code: u32, io: &Buffered) -> Result<usize, sys::NTSTATUS
                 .ok_or(sys::STATUS_INSUFFICIENT_RESOURCES)?;
             io.output(&u32::from(matched).to_le_bytes())
         }
-        ioctl::RECV | ioctl::SEND => Err(sys::STATUS_NOT_IMPLEMENTED),
+        ioctl::SEND => Err(sys::STATUS_NOT_IMPLEMENTED),
         _ => Err(sys::STATUS_INVALID_DEVICE_REQUEST),
     }
 }

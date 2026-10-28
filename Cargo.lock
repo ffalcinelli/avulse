@@ -73,6 +73,7 @@ dependencies = [
  "avulse-filter",
  "avulse-proto",
  "libc",
+ "windows-sys",
 ]
 
 [[package]]

@@ -28,7 +28,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .allowlist_function("Ndis.*|Fwps.*|Fwpm.*")
         .allowlist_function(
             "IoCreateDevice|WdmlibIoCreateDeviceSecure|IoDeleteDevice|IoCreateSymbolicLink|\
-             IoDeleteSymbolicLink|IofCompleteRequest|IoGetStackLimits|\
+             IoDeleteSymbolicLink|IofCompleteRequest|IoGetStackLimits|IoReleaseCancelSpinLock|\
+             MmMapLockedPagesSpecifyCache|\
              KeExpandKernelStackAndCalloutEx|KeQueryMaximumProcessorCountEx|\
              KeGetCurrentProcessorNumberEx|\
              KeAcquireSpinLockRaiseToDpc|KeReleaseSpinLock|KeQueryPerformanceCounter|DbgPrint",

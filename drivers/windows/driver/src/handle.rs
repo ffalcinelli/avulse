@@ -11,11 +11,23 @@ use avulse_filter::Layer;
 use avulse_filter::bytecode::{self, VerifiedProgram};
 
 use crate::lock::SpinLock;
+use crate::rx::Rx;
 use crate::sys;
 
 /// What a file object holds (`FsContext`).
 pub struct File {
     pub state: SpinLock<State>,
+    /// The queue and the waiting `RECV` requests, which live as long as the file.
+    pub rx: SpinLock<Rx>,
+}
+
+impl File {
+    pub fn new() -> File {
+        File {
+            state: SpinLock::new(State::New),
+            rx: SpinLock::new(Rx::default()),
+        }
+    }
 }
 
 pub enum State {
@@ -53,7 +65,6 @@ unsafe impl Sync for Open {}
 pub struct Mutable {
     pub params: [u64; 3],
     pub stats: Stats,
-    pub shut_recv: bool,
     pub shut_send: bool,
 }
 
@@ -87,7 +98,6 @@ impl Open {
             mutable: SpinLock::new(Mutable {
                 params: Param::ALL.map(Param::default_value),
                 stats: Stats::default(),
-                shut_recv: false,
                 shut_send: false,
             }),
         })

@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-28, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5: Steps 22 and 23 done, next Step 24)
+## Status (2026-10-28, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5: Steps 22 to 24 done, next Step 25)
 
 | Area | State |
 | --- | --- |
@@ -1794,7 +1794,49 @@ The original plan of the step follows.
 test program opens the device, opens a handle with a valid program and with a bad one (refused),
 and closes it, also by exiting without closing.
 
-### Step 24: The user-mode backend
+### Step 24: The user-mode backend (done)
+
+**Outcome.** `Handle::open` works on Windows at the NETWORK layers, with `SNIFF`. In the
+`windows` VM, under Driver Verifier, `crates/avulse/tests/capture_windows.rs` (5 tests) and the
+driver test (243) pass. No packet arrives yet: the hooks are Step 25.
+
+- **`backend/windows/`.**
+  - The service: it is installed from `avulse.sys` (`AVULSE_DRIVER`, else next to the
+    executable) unless `NO_INSTALL` is set, and started. The service stays installed, on demand.
+  - The device is opened with `FILE_FLAG_OVERLAPPED`. The open request carries the bytecode,
+    and any non-default queue parameters follow.
+  - `recv` keeps one `RECV` in flight, waits with `GetOverlappedResultEx`, and on a timeout
+    cancels it (`CancelIoEx`) and waits for it to end. A zero timeout reports
+    `ERROR_IO_INCOMPLETE`.
+  - The records the driver returns beyond the first wait in a queue, which `recv_ready` serves.
+  - `ERROR_NO_DATA` is `Error::Shutdown`.
+  - Interfaces are numbers or `if_nametoindex` names.
+  - Filters that need user space (`matches`) are `Unsupported` until injection (Step 26).
+  - `capabilities()` reports NETWORK and NETWORK_FORWARD as open-only, so diverting and
+    dropping are `Unsupported` until the hooks; `send` is too.
+- **The driver's receive side** (`rx.rs`).
+  - A `RECV` takes the queued records that fit (dropping a first one that does not, as WinDivert
+    does), or waits with a cancel routine.
+  - `IoSetCancelRoutine`, `IoMarkIrpPending` and `MmGetSystemAddressForMdlSafe` are macros or
+    inlines, written by hand.
+  - Shutdown completes the waiting requests with `STATUS_PIPE_EMPTY` once the queue is empty.
+    Cleanup cancels them.
+  - `rx::push`, with the queue limits, is ready for the hooks.
+- **Deviation:** no readiness handle yet (`Opened::as_fd` stays Unix-only). The overlapped
+  `RECV` would give one; it comes when something needs it, with the C ABI's counterpart of
+  `avulse_fd`.
+- **Tests.** `capture_windows.rs` (with `AVULSE_DRIVER`, as Administrator) covers:
+  - timeouts, including zero;
+  - shutdown waking a receiver in another thread;
+  - parameters and counters;
+  - what is refused (diverting, sending);
+  - `NO_INSTALL` with the service installed;
+  - interfaces;
+  - 200 handles opened and closed.
+
+  `drivers/windows/scripts/test.ps1` runs it after the driver test.
+
+The original plan of the step follows.
 
 **Where.** `crates/avulse/src/backend/windows/`:
 - installing and starting the service, and opening the device;
@@ -1948,7 +1990,7 @@ pre-release tag) passes, then the v0.0.1 tag publishes. The guide and README say
 - [x] Step 21: pydivert and jdivert suites against the shim (Phase 4 exit)
 - [x] Step 22: the interpreter for the kernel (`matches_in`, borrowed operands, frame sizes in CI)
 - [x] Step 23: ABI crate (`avulse-abi`), driver skeleton (`avulse.sys`, device, handles, `EVAL`)
-- [ ] Step 24: user-mode Windows backend
+- [x] Step 24: user-mode Windows backend (service, device, overlapped `RECV`, timeouts, shutdown)
 - [ ] Step 25: NETWORK and NETWORK_FORWARD on Windows
 - [ ] Step 26: injection on Windows
 - [ ] Step 27: ETHERNET on Windows (NDIS LWF)

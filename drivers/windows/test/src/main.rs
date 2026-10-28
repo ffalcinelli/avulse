@@ -24,9 +24,7 @@ use windows_sys::Win32::System::IO::DeviceIoControl;
 mod windivert_vectors;
 
 const ERROR_INVALID_PARAMETER: u32 = 87;
-const ERROR_BAD_COMMAND: u32 = 22;
-const ERROR_INVALID_FUNCTION: u32 = 1;
-const ERROR_NOT_SUPPORTED: u32 = 50;
+const ERROR_NO_DATA: u32 = 232;
 
 /// A file of the control device, closed when dropped.
 struct Device(HANDLE);
@@ -224,13 +222,11 @@ fn main() -> ExitCode {
         bad == Err(ERROR_INVALID_PARAMETER),
         format_args!("SHUTDOWN 4: {bad:?}"),
     );
+    // Shut down with nothing queued: RECV ends at once (STATUS_PIPE_EMPTY).
     let recv = d.ioctl(ioctl::RECV, &[], 4096);
     c.check(
-        matches!(
-            recv,
-            Err(ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED | ERROR_BAD_COMMAND)
-        ),
-        format_args!("RECV is not there yet: {recv:?}"),
+        recv == Err(ERROR_NO_DATA),
+        format_args!("RECV after shutdown: {recv:?}"),
     );
     drop(d);
 
