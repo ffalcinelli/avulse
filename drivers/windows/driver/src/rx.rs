@@ -16,10 +16,10 @@ use avulse_abi::Address;
 use avulse_abi::ioctl::Record;
 
 use crate::handle::File;
+use crate::lock::SpinLock;
 use crate::sys;
 
-/// A packet or event waiting for user mode. The packet hooks (Step 25) make them.
-#[allow(dead_code)]
+/// A packet or event waiting for user mode.
 pub struct Entry {
     pub addr: Address,
     pub data: Vec<u8>,
@@ -47,7 +47,10 @@ enum Done {
 /// # Safety
 ///
 /// `irp` is a valid IRP.
-unsafe fn set_cancel_routine(irp: *mut sys::IRP, routine: sys::PDRIVER_CANCEL) -> sys::PDRIVER_CANCEL {
+unsafe fn set_cancel_routine(
+    irp: *mut sys::IRP,
+    routine: sys::PDRIVER_CANCEL,
+) -> sys::PDRIVER_CANCEL {
     // SAFETY: `CancelRoutine` is a pointer-sized field that the I/O manager also swaps
     // atomically; `Option<fn>` has the pointer's layout.
     unsafe {
@@ -140,9 +143,9 @@ unsafe fn fill(rx: &mut Rx, irp: *mut sys::IRP) -> Option<(sys::NTSTATUS, usize)
 /// # Safety
 ///
 /// `irp` is a valid `RECV` IRP for `file`, owned by the driver.
-pub unsafe fn recv(file: &File, irp: *mut sys::IRP) -> sys::NTSTATUS {
+pub unsafe fn recv(cell: &SpinLock<Rx>, irp: *mut sys::IRP) -> sys::NTSTATUS {
     let done = {
-        let mut rx = file.rx.lock();
+        let mut rx = cell.lock();
         // SAFETY: the caller's contract.
         match unsafe { fill(&mut rx, irp) } {
             Some((status, n)) => Done::Complete(irp, status, n),
@@ -185,10 +188,10 @@ fn take_pending(rx: &mut Rx) -> Option<*mut sys::IRP> {
 
 /// Completes the waiting requests that can complete now: with records while some are queued,
 /// then, if the handle is shut down, with `STATUS_PIPE_EMPTY`. At IRQL <= DISPATCH_LEVEL.
-pub fn wake(file: &File) {
+pub fn wake(cell: &SpinLock<Rx>) {
     let mut done = Vec::new();
     {
-        let mut rx = file.rx.lock();
+        let mut rx = cell.lock();
         while !rx.packets.is_empty() || rx.shut {
             let Some(irp) = take_pending(&mut rx) else {
                 break;
@@ -207,10 +210,10 @@ pub fn wake(file: &File) {
 }
 
 /// Cancels every waiting request: the file is being cleaned up.
-pub fn cancel_all(file: &File) {
+pub fn cancel_all(cell: &SpinLock<Rx>) {
     let mut done = Vec::new();
     {
-        let mut rx = file.rx.lock();
+        let mut rx = cell.lock();
         while let Some(irp) = take_pending(&mut rx) {
             done.push(irp);
         }
@@ -238,19 +241,17 @@ unsafe extern "C" fn cancel(_device: *mut sys::DEVICE_OBJECT, irp: *mut sys::IRP
     }
 }
 
-/// Queues `e` for `file`'s handle within the queue parameters, and completes a waiting request.
-/// Returns false if the queue is full (the entry is dropped). The packet hooks (Step 25) call it.
-#[allow(dead_code)]
-pub fn push(file: &File, e: Entry, max_len: usize, max_bytes: usize) -> bool {
+/// Queues `e` within the queue parameters, and completes a waiting request. Returns false if the
+/// queue is full or shut down (the entry is dropped).
+pub fn push(cell: &SpinLock<Rx>, e: Entry, max_len: usize, max_bytes: usize) -> bool {
     {
-        let mut rx = file.rx.lock();
+        let mut rx = cell.lock();
         if rx.shut || rx.packets.len() >= max_len || rx.bytes + e.data.len() > max_bytes {
             return false;
         }
         rx.bytes += e.data.len();
         rx.packets.push_back(e);
     }
-    wake(file);
+    wake(cell);
     true
 }
-

@@ -53,12 +53,13 @@ pub(crate) struct Windows;
 
 impl Backend for Windows {
     fn capabilities(&self) -> Capabilities {
-        // Handles open at the NETWORK layers; the packet hooks that divert, drop and inject come
-        // with the next steps of Phase 5.
+        // The NETWORK layers divert, sniff and drop; injection comes with Step 26.
         let mut c = Capabilities::NONE;
         for layer in [Layer::Network, Layer::NetworkForward] {
             c.layers[layer as usize] = LayerSupport {
                 open: true,
+                divert: true,
+                drop: true,
                 ..LayerSupport::default()
             };
         }

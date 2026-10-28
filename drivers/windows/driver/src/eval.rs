@@ -9,6 +9,7 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use avulse_filter::Meta;
 use avulse_filter::bytecode::{Registers, VerifiedProgram};
 use avulse_proto::{Link, Packet};
@@ -29,8 +30,7 @@ pub const MAX_PACKET: usize = 40 + 0xffff;
 pub struct Scratch {
     /// Written afresh before each evaluation, for that evaluation's lifetime.
     regs: MaybeUninit<Registers<'static>>,
-    /// For packets whose data is not contiguous (the packet hooks, from Step 25).
-    #[allow(dead_code)]
+    /// For packets whose data is not contiguous.
     pub copy: [u8; MAX_PACKET],
 }
 
@@ -115,6 +115,48 @@ unsafe extern "C" fn expanded(call: *mut c_void) {
     unsafe { (*call.cast::<Call<'_, '_>>()).run() }
 }
 
+/// Runs `program` on `bytes` with the register slot `regs`, on an expanded stack when too little
+/// is left. `None` if no stack could be had.
+fn run(
+    program: &VerifiedProgram<'_>,
+    bytes: &[u8],
+    link: Link,
+    meta: &Meta<'_>,
+    regs: *mut MaybeUninit<Registers<'static>>,
+) -> Option<bool> {
+    let stack = sys::remaining_stack();
+    MIN_STACK.fetch_min(stack as u64, Ordering::Relaxed);
+    let mut call = Call {
+        program,
+        bytes,
+        link,
+        meta,
+        regs,
+        matched: false,
+    };
+    if stack >= STACK_BUDGET {
+        call.run();
+        return Some(call.matched);
+    }
+    // SAFETY: `call` outlives the callout, which runs before this returns. `Wait` is FALSE, as it
+    // must be at DISPATCH_LEVEL; the call then fails instead of waiting for a stack.
+    let status = unsafe {
+        sys::KeExpandKernelStackAndCalloutEx(
+            Some(expanded),
+            (&raw mut call).cast(),
+            EXPANSION as _,
+            0,
+            null_mut(),
+        )
+    };
+    if status != sys::STATUS_SUCCESS {
+        EXPAND_FAILED.fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
+    EXPANDED.fetch_add(1, Ordering::Relaxed);
+    Some(call.matched)
+}
+
 /// Whether `program` matches the packet `bytes` (starting with the header `link` names) with
 /// metadata `meta`. `None` if it could not run: no scratch, or no stack. The packet hooks then let
 /// the packet through (fail open).
@@ -124,38 +166,42 @@ pub fn evaluate(
     link: Link,
     meta: &Meta<'_>,
 ) -> Option<bool> {
+    with_scratch(|scratch| run(program, bytes, link, meta, &raw mut scratch.regs)).flatten()
+}
+
+/// [`evaluate`] on the data of `nb`, read in place when it is contiguous and through the
+/// processor's copy buffer otherwise; with the packet's bytes when it matches and `keep` is set.
+/// `None` if the packet could not be read or evaluated.
+///
+/// # Safety
+///
+/// `nb` is a valid NET_BUFFER, at IRQL <= DISPATCH_LEVEL.
+pub unsafe fn evaluate_nb(
+    program: &VerifiedProgram<'_>,
+    nb: *mut sys::NET_BUFFER,
+    link: Link,
+    meta: &Meta<'_>,
+    keep: bool,
+) -> Option<(bool, Option<Vec<u8>>)> {
+    // SAFETY: `nb` is valid.
+    let len = unsafe { sys::nb_data_length(nb) } as usize;
+    if len == 0 || len > MAX_PACKET {
+        return None;
+    }
     with_scratch(|scratch| {
-        let stack = sys::remaining_stack();
-        MIN_STACK.fetch_min(stack as u64, Ordering::Relaxed);
-        let mut call = Call {
-            program,
-            bytes,
-            link,
-            meta,
-            regs: &raw mut scratch.regs,
-            matched: false,
+        // SAFETY: `nb` is valid; NDIS returns the data in place if it is contiguous, else copies
+        // it into `copy`, which has room for `len` bytes.
+        let p = unsafe {
+            sys::NdisGetDataBuffer(nb, len as u32, scratch.copy.as_mut_ptr().cast(), 1, 0)
         };
-        if stack >= STACK_BUDGET {
-            call.run();
-            return Some(call.matched);
-        }
-        // SAFETY: `call` outlives the callout, which runs before this returns. `Wait` is FALSE,
-        // as it must be at DISPATCH_LEVEL; the call then fails instead of waiting for a stack.
-        let status = unsafe {
-            sys::KeExpandKernelStackAndCalloutEx(
-                Some(expanded),
-                (&raw mut call).cast(),
-                EXPANSION as _,
-                0,
-                null_mut(),
-            )
-        };
-        if status != sys::STATUS_SUCCESS {
-            EXPAND_FAILED.fetch_add(1, Ordering::Relaxed);
+        if p.is_null() {
             return None;
         }
-        EXPANDED.fetch_add(1, Ordering::Relaxed);
-        Some(call.matched)
+        // SAFETY: NDIS returned `len` readable bytes, in the packet or in `copy`, which this
+        // closure does not otherwise touch while the slice lives.
+        let bytes = unsafe { core::slice::from_raw_parts(p.cast::<u8>(), len) };
+        let matched = run(program, bytes, link, meta, &raw mut scratch.regs)?;
+        Some((matched, (matched && keep).then(|| bytes.to_vec())))
     })
     .flatten()
 }

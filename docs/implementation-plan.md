@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-28, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5: Steps 22 to 24 done, next Step 25)
+## Status (2026-10-28, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5: Steps 22 to 25 done, next Step 26)
 
 | Area | State |
 | --- | --- |
@@ -1851,7 +1851,53 @@ signalled when `recv` would not block), and expose it as `Handle::as_handle` and
 **Acceptance.** In the VM, `Handle::open` at NETWORK loads the driver on first use, a receive
 times out, and close and process exit release the handle.
 
-### Step 25: NETWORK and NETWORK_FORWARD
+### Step 25: NETWORK and NETWORK_FORWARD (done, without the FRAGMENTS flag and QUEUE_TIME)
+
+**Outcome.** Handles divert, sniff and drop packets on Windows. In the `windows` VM, under Driver
+Verifier, `capture_windows.rs` (9 tests) and the driver test (243) pass.
+
+- **`drivers/windows/driver/src/wfp.rs`.**
+  - At load: six callouts (inbound and outbound IP packets, v4 and v6, and the forward layers)
+    with `FwpsCalloutRegister3`. A dynamic engine session holds the sublayer and the callouts;
+    closing it at unload removes everything.
+  - Per handle, at open: one WFP filter per layer of its own (`FWP_ACTION_CALLOUT_UNKNOWN`), with
+    weight `priority + 30001` (higher runs first in the sublayer). The filter's `rawContext` is
+    the handle's id in a table of open handles. Cleanup deletes the filters and the table entry.
+  - Classify:
+    - finds the handle by id (and holds a reference, so a classify racing a close is safe);
+    - retreats to the IP header inbound;
+    - reads the interface indexes and the loopback flag from the incoming values (their
+      indexes differ between layers, and are taken from the generated bindings);
+    - skips inbound loopback, so loopback is seen once, outbound, as in WinDivert;
+    - evaluates (`eval::evaluate_nb`: in place, or through the processor's copy buffer), and
+      copies the packet only when it matched and is kept.
+  - A match: sniff (copy, `CONTINUE`), drop (`BLOCK`), or divert (copy, then `BLOCK` with
+    `FWPS_CLASSIFY_OUT_FLAG_ABSORB`).
+  - `QUEUE_LENGTH` and `QUEUE_SIZE` apply, and the counters follow.
+  - Timestamps are `KeQueryPerformanceCounter` in nanoseconds.
+- **The receive queue is shared** (`Arc`) between the file and the open handle, so the hooks
+  never touch a freed file.
+- **Found on the way.**
+  - The layer GUIDs come from the WDK's `fwpmk.h`. `FWPM_LAYER_IPFORWARD_V6` is
+    `7b964818-19c7-…`.
+  - `FWPM_FILTER0`'s `rawContext` is in an anonymous union, and `FWP_UINT64` is in the
+    `FWP_DATA_TYPE_` module of the bindings.
+  - **Driver Verifier caught a leak at unload (bugcheck 0xC4/0x62):** an emptied `BTreeMap`
+    keeps its root node allocated, so the static handle table is freed explicitly. Its crash
+    dump read with `kd` gave the cause. After the reboot, `C:\avulse` was not mounted again
+    until `vagrant reload`.
+- **Left.**
+  - The `FRAGMENTS` flag (every fragment is evaluated for now).
+  - `QUEUE_TIME`.
+  - Packets in NBL chains past the first NET_BUFFER (the IP layers indicate one per NBL in
+    practice).
+  - The impostor flag, which needs injection (Step 26).
+- **Tests** (`capture_windows.rs`): loopback UDP over IPv4 and IPv6 is sniffed once, outbound,
+  with its flags, and still delivered. A diverted datagram is held; a dropped one is gone; both
+  come back once the handles close. A filter that misses sees nothing; two priorities both see a
+  sniffed packet; shutdown delivers what is queued.
+
+The original plan of the step follows.
 
 **Where.** `avulse-driver`'s `wfp.rs`:
 - callouts at `INBOUND`/`OUTBOUND_IPPACKET_V4`/`V6` and `IPFORWARD_V4`/`V6`;
@@ -1991,7 +2037,7 @@ pre-release tag) passes, then the v0.0.1 tag publishes. The guide and README say
 - [x] Step 22: the interpreter for the kernel (`matches_in`, borrowed operands, frame sizes in CI)
 - [x] Step 23: ABI crate (`avulse-abi`), driver skeleton (`avulse.sys`, device, handles, `EVAL`)
 - [x] Step 24: user-mode Windows backend (service, device, overlapped `RECV`, timeouts, shutdown)
-- [ ] Step 25: NETWORK and NETWORK_FORWARD on Windows
+- [x] Step 25: NETWORK and NETWORK_FORWARD on Windows (divert, sniff, drop; WFP callouts)
 - [ ] Step 26: injection on Windows
 - [ ] Step 27: ETHERNET on Windows (NDIS LWF)
 - [ ] Step 28: FLOW, SOCKET and REFLECT on Windows

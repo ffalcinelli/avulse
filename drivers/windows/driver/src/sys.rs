@@ -64,6 +64,33 @@ pub unsafe fn complete(irp: *mut IRP, status: NTSTATUS, information: usize) -> N
     status
 }
 
+/// `NDIS_STATUS_SUCCESS`, a cast macro that bindgen skips.
+pub const NDIS_STATUS_SUCCESS: NDIS_STATUS = 0;
+
+/// `NET_BUFFER_LIST_FIRST_NB`.
+///
+/// # Safety
+///
+/// `nbl` points to a valid NET_BUFFER_LIST.
+pub unsafe fn nbl_first_nb(nbl: *mut NET_BUFFER_LIST) -> *mut NET_BUFFER {
+    unsafe { (*nbl).__bindgen_anon_1.__bindgen_anon_1.FirstNetBuffer }
+}
+
+/// `NET_BUFFER_DATA_LENGTH`.
+///
+/// # Safety
+///
+/// `nb` points to a valid NET_BUFFER.
+pub unsafe fn nb_data_length(nb: *mut NET_BUFFER) -> u32 {
+    unsafe {
+        (*nb)
+            .__bindgen_anon_1
+            .__bindgen_anon_1
+            .__bindgen_anon_1
+            .DataLength
+    }
+}
+
 /// `IoGetRemainingStackSize`, an inline function in `wdm.h`.
 pub fn remaining_stack() -> usize {
     let (mut low, mut high) = (0, 0);

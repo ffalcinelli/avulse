@@ -13,9 +13,9 @@ use avulse_abi::{Param, Shutdown};
 use avulse_filter::Layer;
 use avulse_proto::Link;
 
-use crate::{eval, rx};
-use crate::handle::{self, File, State};
+use crate::handle::{self, File};
 use crate::sys::{self, unicode, w};
+use crate::{eval, rx};
 
 static DEVICE: AtomicPtr<sys::DEVICE_OBJECT> = AtomicPtr::new(null_mut());
 
@@ -77,6 +77,11 @@ pub unsafe fn create(driver: *mut sys::DRIVER_OBJECT) -> sys::NTSTATUS {
     sys::STATUS_SUCCESS
 }
 
+/// The device, for the WFP callouts.
+pub fn get() -> *mut sys::DEVICE_OBJECT {
+    DEVICE.load(Ordering::Acquire)
+}
+
 /// Deletes the link and the device.
 ///
 /// # Safety
@@ -118,10 +123,10 @@ unsafe extern "C" fn dispatch(
         sys::IRP_MJ_CLEANUP => {
             // SAFETY: set at IRP_MJ_CREATE, freed at IRP_MJ_CLOSE, which comes after.
             if let Some(file) = unsafe { (*fo).FsContext.cast::<File>().as_ref() } {
-                // Closing drops this reference to the handle; the program goes with the last.
-                let old = core::mem::replace(&mut *file.state.lock(), State::Closed);
-                drop(old);
-                rx::cancel_all(file);
+                // The program goes with the last reference to the handle.
+                // SAFETY: at PASSIVE_LEVEL, in the dispatch routine.
+                unsafe { handle::close(file) };
+                rx::cancel_all(&file.rx);
             }
             // SAFETY: the IRP is ours.
             unsafe { sys::complete(irp, sys::STATUS_SUCCESS, 0) }
@@ -159,7 +164,7 @@ unsafe extern "C" fn dispatch(
                         sys::STATUS_INVALID_DEVICE_REQUEST
                     }
                     // SAFETY: a RECV IRP for `file`, ours.
-                    Ok(_) => return unsafe { rx::recv(file, irp) },
+                    Ok(_) => return unsafe { rx::recv(&file.rx, irp) },
                     Err(s) => s,
                 };
                 // SAFETY: the IRP is ours.
@@ -229,7 +234,7 @@ fn control(file: &File, code: u32, io: &Buffered) -> Result<usize, sys::NTSTATUS
             if matches!(how, Shutdown::Recv | Shutdown::Both) {
                 file.rx.lock().shut = true;
                 // What is queued is still delivered; then waiting requests end.
-                rx::wake(file);
+                rx::wake(&file.rx);
             }
             Ok(0)
         }

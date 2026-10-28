@@ -10,22 +10,26 @@ use avulse_abi::{Flags, Param, Stats, Syntax};
 use avulse_filter::Layer;
 use avulse_filter::bytecode::{self, VerifiedProgram};
 
+use core::sync::atomic::AtomicU64;
+
 use crate::lock::SpinLock;
 use crate::rx::Rx;
 use crate::sys;
+use crate::wfp;
 
 /// What a file object holds (`FsContext`).
 pub struct File {
     pub state: SpinLock<State>,
-    /// The queue and the waiting `RECV` requests, which live as long as the file.
-    pub rx: SpinLock<Rx>,
+    /// The queue and the waiting `RECV` requests. The open handle shares it with the packet
+    /// hooks, which may still run briefly after the file is cleaned up.
+    pub rx: Arc<SpinLock<Rx>>,
 }
 
 impl File {
     pub fn new() -> File {
         File {
             state: SpinLock::new(State::New),
-            rx: SpinLock::new(Rx::default()),
+            rx: Arc::new(SpinLock::new(Rx::default())),
         }
     }
 }
@@ -54,6 +58,12 @@ pub struct Open {
     program: VerifiedProgram<'static>,
     code: *mut [u8],
     pub mutable: SpinLock<Mutable>,
+    /// The file's queue, which the packet hooks fill.
+    pub rx: Arc<SpinLock<Rx>>,
+    /// The id the WFP filters carry as their context (0 before `wfp::attach`).
+    pub id: AtomicU64,
+    /// The handle's WFP filters.
+    pub filters: SpinLock<Vec<u64>>,
 }
 
 // SAFETY: `code` is owned, and only freed when the last reference goes.
@@ -70,7 +80,7 @@ pub struct Mutable {
 
 impl Open {
     /// The handle a request describes, with its program verified.
-    pub fn new(req: &OpenRequest<'_>) -> Result<Open, sys::NTSTATUS> {
+    pub fn new(req: &OpenRequest<'_>, rx: Arc<SpinLock<Rx>>) -> Result<Open, sys::NTSTATUS> {
         if !(-30_000..=30_000).contains(&req.priority) {
             return Err(sys::STATUS_INVALID_PARAMETER);
         }
@@ -100,6 +110,9 @@ impl Open {
                 stats: Stats::default(),
                 shut_send: false,
             }),
+            rx,
+            id: AtomicU64::new(0),
+            filters: SpinLock::new(Vec::new()),
         })
     }
 
@@ -121,16 +134,38 @@ pub fn open(file: &File, input: &[u8]) -> Result<(), sys::NTSTATUS> {
         ioctl::Malformed::Version => sys::STATUS_REVISION_MISMATCH,
         _ => sys::STATUS_INVALID_PARAMETER,
     })?;
-    // Verify before taking the lock: it is linear in the program's size.
-    let open = Arc::new(Open::new(&req)?);
-    let mut state = file.state.lock();
-    match *state {
-        State::New => {
-            *state = State::Open(open);
-            Ok(())
-        }
-        _ => Err(sys::STATUS_INVALID_DEVICE_STATE),
+    if !matches!(*file.state.lock(), State::New) {
+        return Err(sys::STATUS_INVALID_DEVICE_STATE);
     }
+    // Verify outside the lock: it is linear in the program's size.
+    let open = Arc::new(Open::new(&req, file.rx.clone())?);
+    if matches!(open.layer, Layer::Network | Layer::NetworkForward) {
+        // SAFETY: at PASSIVE_LEVEL, in the dispatch routine.
+        unsafe { wfp::attach(&open)? };
+    }
+    let mut state = file.state.lock();
+    if !matches!(*state, State::New) {
+        drop(state);
+        // SAFETY: as above.
+        unsafe { wfp::detach(&open) };
+        return Err(sys::STATUS_INVALID_DEVICE_STATE);
+    }
+    *state = State::Open(open);
+    Ok(())
+}
+
+/// Closes the handle of `file`, if it is open: what `IRP_MJ_CLEANUP` does.
+///
+/// # Safety
+///
+/// At PASSIVE_LEVEL.
+pub unsafe fn close(file: &File) {
+    let old = core::mem::replace(&mut *file.state.lock(), State::Closed);
+    if let State::Open(open) = &old {
+        // SAFETY: the caller's contract.
+        unsafe { wfp::detach(open) };
+    }
+    drop(old);
 }
 
 /// The open handle of `file`, if it is open.

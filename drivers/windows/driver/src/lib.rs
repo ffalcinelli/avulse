@@ -22,6 +22,7 @@ mod handle;
 mod lock;
 mod rx;
 mod sys;
+mod wfp;
 
 #[cfg(not(test))]
 #[global_allocator]
@@ -45,6 +46,18 @@ pub unsafe extern "system" fn driver_entry(
         eval::free();
         return status;
     }
+    // SAFETY: at PASSIVE_LEVEL, once, with the device just created.
+    let status = unsafe { wfp::register(device::get()) };
+    if status != sys::STATUS_SUCCESS {
+        wdk::println!("avulse: WFP registration failed: {status:#x}");
+        // SAFETY: as above; nothing uses the device yet.
+        unsafe {
+            wfp::unregister();
+            device::delete();
+        }
+        eval::free();
+        return status;
+    }
     // SAFETY: `driver` is valid for the whole call.
     unsafe { (*driver).DriverUnload = Some(unload) };
     wdk::println!("avulse: loaded");
@@ -54,8 +67,11 @@ pub unsafe extern "system" fn driver_entry(
 /// Removes the device, then frees the scratch. The I/O manager only unloads a driver whose files
 /// are all closed.
 unsafe extern "C" fn unload(_driver: *mut sys::DRIVER_OBJECT) {
-    // SAFETY: at PASSIVE_LEVEL, after `driver_entry` succeeded.
-    unsafe { device::delete() };
+    // SAFETY: at PASSIVE_LEVEL, after `driver_entry` succeeded; no file is open.
+    unsafe {
+        wfp::unregister();
+        device::delete();
+    }
     eval::free();
     wdk::println!(
         "avulse: unloaded; least stack {} B, expanded {}, expansion failed {}",
