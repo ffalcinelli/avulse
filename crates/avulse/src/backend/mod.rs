@@ -14,11 +14,9 @@ use avulse_proto::{Link, Packet};
 
 use crate::{Address, Error, Flags, Param, Result, Shutdown, Stats, Syntax};
 
-/// What a backend gets to open a handle.
-#[cfg_attr(
-    not(any(test, target_os = "linux", target_os = "windows")),
-    allow(dead_code)
-)]
+/// What a backend gets to open a handle. Without a backend, only the tests' fake one reads it,
+/// and not all of it.
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 pub(crate) struct Spec<'a> {
     pub filter: &'a Filter,
     /// The filter as written, and its language: what REFLECT reports.

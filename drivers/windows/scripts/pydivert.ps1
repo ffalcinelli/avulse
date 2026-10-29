@@ -5,6 +5,8 @@
 #   vagrant up windows
 #   vagrant winrm windows -c 'bcdedit /set testsigning on; powershell -ExecutionPolicy Bypass -File C:\pydivert\.avulse\verifier.ps1; exit 0'
 #   vagrant reload windows
+# (If `vagrant up` timed out connecting, the folder is not mounted and verifier.ps1 is not found:
+# `vagrant reload windows` first. The run fails if Verifier did not watch the driver.)
 #   vagrant winrm windows -e -c 'powershell -ExecutionPolicy Bypass -File C:\pydivert\.avulse\pydivert.ps1'
 #   vagrant destroy -f windows; rm -r .avulse
 

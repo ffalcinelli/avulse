@@ -206,5 +206,7 @@ jobs:
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-fuzz
-      - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60
+      # cargo-fuzz defaults to the target it was built for, and the prebuilt one install-action
+      # fetches is musl's, whose static libc the sanitizer refuses.
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target }} -- -max_total_time=60
         working-directory: fuzz

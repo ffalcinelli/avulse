@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-29, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5 exit reached: Steps 22 to 29 done, next Step 30)
+## Status (2026-10-29, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5 done: Steps 22 to 30; next Phase 6)
 
 | Area | State |
 | --- | --- |
@@ -20,11 +20,11 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
 | `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Steps 15 to 17: the FLOW, SOCKET and REFLECT layers (`events.rs`, `reflect.rs`), SOCKET refusing binds and connects in the kernel; `Address` version 2 (216 bytes) with the process name. Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
 | `crates/capi` (`avulse-capi`) | Step 18: the C ABI, `libavulse.so`/`.a`, header `include/avulse.h` (hand-written, layout pinned by asserts), 20 functions, tested from C (`tests/c.rs`, `tests/c/abi.c`). |
-| `drivers/windows` | Step 23: `avulse.sys` (WDM, Rust, outside the workspace): the control device, handles opened with verified bytecode, parameters, statistics, shutdown, and `EVAL`, a test IOCTL that runs a handle's filter in the kernel. `test/` passes 243 checks in the `windows` VM under Driver Verifier, WinDivert's filter vectors included. Steps 25 and 26: WFP callouts divert, sniff, drop and inject at the NETWORK layers. Step 27: the NDIS lightweight filter (`lwf.rs`) gives the ETHERNET layer, with VLAN tags and large sends restored. Step 28: FLOW, SOCKET and REFLECT (`ale.rs`, `reflect.rs`). `capture_windows.rs` (27 tests) passes with the driver as a plain service and installed through `netcfg`. |
+| `drivers/windows` | Step 23: `avulse.sys` (WDM, Rust, outside the workspace): the control device, handles opened with verified bytecode, parameters, statistics, shutdown, and `EVAL`, a test IOCTL that runs a handle's filter in the kernel. `test/` passes 243 checks in the `windows` VM under Driver Verifier, WinDivert's filter vectors included. Steps 25 and 26: WFP callouts divert, sniff, drop and inject at the NETWORK layers. Step 27: the NDIS lightweight filter (`lwf.rs`) gives the ETHERNET layer, with VLAN tags and large sends restored. Step 28: FLOW, SOCKET and REFLECT (`ale.rs`, `reflect.rs`). `capture_windows.rs` (27 tests) passes with the driver as a plain service and installed through `netcfg`. Step 30: a panic bugchecks, packet and event paths allocate fallibly and fail open, every suite runs under Driver Verifier with code integrity checks among its extra flags, the images meet HVCI's layout rules, and the driver builds for ARM64 and in CI (`windows-driver`). |
 | `crates/abi` (`avulse-abi`) | Step 23: the types shared with the driver and the C ABI (`Address`, `Flags`, `Param`, `Shutdown`, `Stats`, `Syntax`), and `ioctl`, the driver protocol. `no_std`. |
 | `crates/windivert-compat` | Step 29: on Windows, `avulse_windivert.dll`, a drop-in for `WinDivert.dll` (WinDivert 2.2's exports, overlapped receives through the driver's `WD_RECV`); pydivert's (148) and jdivert's (334, JDK 25 and 8) Windows suites pass against it unchanged, under Driver Verifier. Steps 19 to 21: `libavulse_windivert.so`, libebpfdivert's C API over avulse (21 `ebpfdivert_*` exports, negative errno values, WinDivert's 80-byte address with avulse's reinjection context in its union). WinDivert's helpers (hash, checksums, `eval_filter` with `random*`) agree with WinDivert's own code on generated vectors (`scripts/gen_compat_vectors.py`). REFLECT's data is WinDivert's serialized filter object (`Filter::windivert_object`, matching WinDivert's compiler on 230 filters). 15 unit tests, the exported-symbol test, and `tests/capture.rs` (6, `AVULSE_BPF=1`) on 6.8 and 5.15. pydivert's suite (155) and jdivert's (334, JNA and Panama) pass against it unchanged. `publish = false`. |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
-| CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
+| CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows (x64 and `windows-11-arm`)/macos, the Windows driver's build for x64 and ARM64 (`windows-driver`, WDK from NuGet), tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
 | Release (`.github/workflows/release.yml`) | Builds and publishes the Python placeholder on `v*` tags. **No crates.io job yet.** |
 
 ### Accounts and registries (already set up)
@@ -45,7 +45,8 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 - **Maven:** groupId `com.github.ffalcinelli`, already owned through jdivert. Nothing to claim.
 - **Signing (not started, owner action):** the EV certificate and the Partner Center enrollment for
   the Windows driver; an Apple Developer ID and the Network Extension entitlement for macOS. OSSign
-  covers user-mode Windows artifacts only. See the roadmap, "Signing and distribution".
+  covers user-mode Windows artifacts only, and needs the owner's signing keys. All of it is part of
+  "Release v0.0.1" now (Step 30 moved it there). See the roadmap, "Signing and distribution".
 
 ### Environment quirks on this workstation
 
@@ -2202,7 +2203,92 @@ The original plan of the step follows.
 **Tests.** pydivert's and jdivert's Windows suites in their own `windows` VMs, with the DLL in
 place of WinDivert's. Divergences are listed in the guide.
 
-### Step 30: Hardening and distribution
+### Step 30: Hardening and distribution (done)
+
+**Outcome.** Every suite runs under Driver Verifier with more than its standard flags. The driver
+no longer hangs the machine on a panic, or panics when the pool runs out. It meets HVCI's image
+rules, and builds for ARM64 and in CI. Signing moved to the release (owner decision). The runs:
+- the driver test: 243 checks;
+- `capture_windows`: 27 tests as a plain service, and 27 with the `netcfg` filter, the
+  large-send test included;
+- the shim: 8 tests;
+- pydivert: 148 passed, 13 skipped;
+- jdivert: 334 run on JDK 25 and on JDK 8, no failures, 10 skipped as in Step 29;
+
+each under the flags `0x02A249BB`, with no crash dump.
+
+- **Two gaps found while scoping.**
+  - `wdk-panic`'s handler is `loop {}`: a panic, a failed bounds check for instance, spun the
+    processor forever, often at DISPATCH_LEVEL, with no dump. `lib.rs` now has its own handler,
+    which calls `KeBugCheckEx(0xA7E1_5E00, line, column, file address, file length)`.
+  - The packet and event paths allocated infallibly, so running out of pool was such a panic.
+    They now use `sys::try_copy`/`try_box`/`try_zeroed`/`try_new`, and `try_reserve` before
+    the receive queue's and the wait list's pushes. A packet or event that cannot be copied
+    goes on, counted in `Stats::load_errors`; a receive with no room on the wait list fails
+    with `STATUS_INSUFFICIENT_RESOURCES`.
+  - `FLOWS` is a `hashbrown` map, with a multiplicative hasher on flow handles, because a
+    `BTreeMap` cannot make room before an insert.
+  - Process names are decoded into a buffer on the stack.
+  - Open and attach paths still allocate infallibly: stable Rust has no `Arc::try_new`. They
+    run at PASSIVE_LEVEL, rarely, and now bugcheck with a dump.
+- **Driver Verifier.** `drivers/windows/scripts/verifier.ps1` is the VM's second provisioner
+  (`toolchain.ps1` no longer sets Verifier). It watches `avulse.sys`, `WinDivert64.sys` and
+  `avulse_spike.sys`, and turns on full memory dumps. Its flags are the standard ones plus:
+  - invariant MDL checking for the driver (0x4000);
+  - NDIS/WIFI verification (0x200000), which also watches `ndis.sys` and the Wi-Fi and mobile
+    broadband class drivers;
+  - kernel synchronization delay fuzzing (0x800000);
+  - code integrity checks (0x2000000).
+
+  `test.ps1` fails unless `verifier /query`'s "Verifier Flags" has them all and lists the driver
+  with at least one load, as a plain service and again after the `netcfg` install. The bindings'
+  runs are `pydivert.ps1` and `jdivert.ps1` (Step 29's steps, now in the repo), with
+  `verifier.ps1` copied into the binding's VM; they check the same for `WinDivert64.sys`. In
+  those VMs `vagrant up` can time out before the shared folder is mounted, so check that
+  `verifier.ps1` ran before rebooting. Low-resources simulation is not on: it would fail the
+  open paths' allocations, which still bugcheck.
+- **HVCI.**
+  - `check-image.ps1` checks a `.sys`: sections aligned on pages, none both writable and
+    executable, `NX_COMPAT` set. `build.ps1` and CI run it on both architectures; both pass.
+  - The code already used NX pool and `MdlMappingNoExecute`, and Verifier's code integrity
+    checks pass on every suite.
+  - Real HVCI could not run. With nested VT-x on (VirtualBox 7.2, Intel i7-3615QM) and VBS and
+    HVCI set in the registry, the VM no longer boots past Automatic Repair. Before that,
+    `Win32_DeviceGuard` showed no available security properties. Secure Boot is off too, as
+    test signing requires. The Device Guard readiness tool is retired.
+- **ARM64.**
+  - `toolchain.ps1` adds the ARM64 MSVC tools and Spectre libraries and the
+    `aarch64-pc-windows-msvc` target.
+  - `build.ps1` builds the driver (`cargo wdk build --target-arch arm64`, clippy included), the
+    test program and the user-mode crates for it.
+  - Nothing needed changing: `user.c` and the bindings build as they are.
+  - Nothing runs it. VirtualBox emulates x64 only, and GitHub's `windows-11-arm` runners cannot
+    boot into test signing; they run the workspace's unprivileged tests.
+- **CI.**
+  - `windows-driver`, on `windows-2025`, installs the WDK from NuGet
+    (`Microsoft.Windows.WDK.x64` and `.ARM64` 10.0.26100.6584), as windows-drivers-rs's
+    `install-wdk` action does, with the variables wdk-build reads. Then it runs clippy,
+    `cargo wdk build`, `check-image.ps1` and the test program's build, and uploads the package.
+    About 4 minutes for x64 and 6 for ARM64.
+  - The workflow's `RUSTFLAGS` replaces the driver's `.cargo/config.toml`, so the job repeats
+    `+crt-static`.
+  - The first run on the branch (draft PR #1) also showed three older failures that CI had never
+    seen, because it runs on main and on PRs only:
+    - `no_backend_yet` still expected no Windows backend;
+    - `Spec`'s dead-code allowance did not cover macOS tests;
+    - `fuzz` ran on musl's target, the one the prebuilt cargo-fuzz was built for, and now
+      passes `--target x86_64-unknown-linux-gnu`.
+- **Found in the VM.** `filters_and_priorities` sniffed `tcp`, which matches WinRM's traffic
+  to the VM (heavy under `--nocapture`). Its filters stay off it now.
+- **Left.**
+  - Fallible open paths, then a run under low-resources simulation.
+  - A run on an ARM64 machine.
+  - A run with HVCI on, on hardware that supports it.
+  - `FRAGMENTS` and `QUEUE_TIME` (from Step 25).
+  - The binding suites are not in CI.
+  - Signing moved to "Release v0.0.1".
+
+The original plan of the step follows.
 
 **Where.**
 - Driver Verifier (standard flags and special pool) on every suite, and HVCI compatibility (the
@@ -2220,6 +2306,12 @@ Linux-only release; extend it with the Windows and macOS artifacts (the signed d
 system extension) when Phases 5 and 6 are expanded.
 
 **Where.** `.github/workflows/release.yml` and the crates' metadata.
+- Signing (moved from Step 30; owner actions first):
+  - OSSign for the user-mode Windows artifacts (`avulse.dll`, the compat `WinDivert.dll`, the
+    CLI), with the owner's Azure Trusted Signing or Key Vault keys;
+  - the EV certificate, Partner Center and attestation signing of the driver package (CI
+    uploads it as `avulse-driver-{amd64,arm64}`);
+  - the Apple Developer ID and notarization for macOS.
 - A crates.io job (`rust-lang/crates-io-auth-action`, environment `crates-io`, `id-token:
   write`). Publish in dependency order: `avulse-proto`, `avulse-filter`, `avulse-abi`, `avulse-ebpf`,
   `avulse`, then `avulse-cli`. (`avulse-abi` is new in Phase 5: claim the name and give it a
@@ -2280,7 +2372,8 @@ pre-release tag) passes, then the v0.0.1 tag publishes. The guide and README say
 - [x] Step 27: ETHERNET on Windows (NDIS LWF; VLAN and LSO restored on reinjection)
 - [x] Step 28: FLOW, SOCKET and REFLECT on Windows (ALE callouts, flow contexts, the handle table)
 - [x] Step 29: `WinDivert.dll` and the binding suites on Windows (Phase 5 exit)
-- [ ] Step 30: hardening and distribution (Driver Verifier, HVCI, CI build, signing)
+- [x] Step 30: hardening and distribution (Driver Verifier, HVCI checks, CI build, ARM64; signing
+  moved to the release)
 - [ ] Phase 6: macOS system extension
 - [ ] Release v0.0.1 (crates.io, tarballs; after Phases 5 and 6)
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement

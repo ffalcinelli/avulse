@@ -450,7 +450,7 @@ fn the_linux_backend() {
 }
 
 #[test]
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn no_backend_yet() {
     for layer in [Layer::Network, Layer::Ethernet, Layer::Flow] {
         assert_eq!(capabilities().layer(layer), LayerSupport::default());
