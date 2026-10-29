@@ -44,10 +44,12 @@ function Add-MachinePath($dir) {
     if ($env:Path -notlike "*$dir*") { $env:Path = "$env:Path;$dir" }
 }
 
-# MSVC, the Windows SDK, and the Spectre-mitigated libraries drivers link by default.
+# MSVC, the Windows SDK, and the Spectre-mitigated libraries drivers link by default, for x64
+# and ARM64 (built only: no ARM64 machine runs it).
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $hasVc = (Test-Path $vswhere) -and
-    (& $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+    (& $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+        Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath)
 if (-not $hasVc) {
     Get-File "https://aka.ms/vs/17/release/vs_buildtools.exe" "$Downloads\vs_buildtools.exe"
     Install "Visual Studio Build Tools" "$Downloads\vs_buildtools.exe" (@(
@@ -55,6 +57,8 @@ if (-not $hasVc) {
         "--add", "Microsoft.VisualStudio.Workload.VCTools",
         "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
         "--add", "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre",
+        "--add", "Microsoft.VisualStudio.Component.VC.Tools.ARM64",
+        "--add", "Microsoft.VisualStudio.Component.VC.Runtimes.ARM64.Spectre",
         "--add", "Microsoft.VisualStudio.Component.Windows11SDK.26100"
     ) -join " ")
 }
@@ -92,18 +96,16 @@ if (-not (Test-Path "C:\rust\cargo\bin\cargo.exe")) {
     Install "Rust" "$Downloads\rustup-init.exe" `
         "-y --profile minimal --default-toolchain stable --default-host x86_64-pc-windows-msvc --no-modify-path"
 }
-# Clippy, which drivers/windows/scripts/build.ps1 runs on the driver.
+# Clippy, which drivers/windows/scripts/build.ps1 runs on the driver, and the ARM64 target.
 & C:\rust\cargo\bin\rustup.exe component add clippy rustfmt
+& C:\rust\cargo\bin\rustup.exe target add aarch64-pc-windows-msvc
 if (-not (Test-Path "C:\rust\cargo\bin\cargo-wdk.exe")) {
     Write-Host "Installing cargo-wdk..."
     & C:\rust\cargo\bin\cargo.exe install cargo-wdk --version 0.1.1 --locked
     if ($LASTEXITCODE -ne 0) { throw "cargo install cargo-wdk failed" }
 }
 
-# Test-signed drivers load only with test signing on. Driver Verifier watches the spike driver,
-# and a crash writes a kernel memory dump (C:\Windows\MEMORY.DMP) with the full stacks, not a
-# triage minidump. All three take effect after a reboot.
+# Test-signed drivers load only with test signing on, after a reboot. Driver Verifier and crash
+# dumps are drivers/windows/scripts/verifier.ps1's, the VM's next provisioner.
 bcdedit /set testsigning on | Out-Host
-verifier /standard /driver avulse_spike.sys avulse.sys | Out-Host
-Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl -Name CrashDumpEnabled -Value 2
 Write-Host "Toolchain ready. Reboot (vagrant reload windows) to turn test signing on."

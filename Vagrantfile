@@ -17,7 +17,8 @@
 #
 # "windows" (Windows 11 24H2) builds and loads the Windows driver (drivers/windows, and the
 # spike in spikes/windows-driver). Its provisioning installs the driver toolchain and turns on
-# test signing and Driver Verifier, which take effect after a reboot:
+# test signing and Driver Verifier (drivers/windows/scripts/verifier.ps1), which take effect
+# after a reboot:
 #
 #   vagrant up windows && vagrant reload windows
 #   vagrant winrm windows -e -c "C:\avulse\drivers\windows\scripts\build.ps1"
@@ -53,5 +54,6 @@ Vagrant.configure("2") do |config|
       vb.customize ["modifyvm", :id, "--vram", "128"]
     end
     m.vm.provision "toolchain", type: "shell", path: "spikes/windows-driver/scripts/toolchain.ps1"
+    m.vm.provision "verifier", type: "shell", path: "drivers/windows/scripts/verifier.ps1"
   end
 end

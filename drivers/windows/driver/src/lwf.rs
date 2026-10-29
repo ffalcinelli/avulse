@@ -446,7 +446,12 @@ unsafe fn process(
                 return (Fate::Taken, payload);
             }
             addr.sniffed = open.flags.contains(Flags::SNIFF);
-            open.deliver(addr, bytes.to_vec());
+            let Some(data) = sys::try_copy(bytes) else {
+                // Fail open: the frame goes on, uncopied.
+                open.mutable.lock().stats.load_errors += 1;
+                continue;
+            };
+            open.deliver(addr, data);
             if !addr.sniffed {
                 return (Fate::Taken, payload);
             }
@@ -537,7 +542,7 @@ unsafe fn copy_nb(
     if len == 0 {
         return None;
     }
-    let mut data: Box<[u8]> = alloc::vec![0u8; len].into_boxed_slice();
+    let mut data = sys::try_zeroed(len)?;
     // SAFETY: `data` has room for `len` bytes; NDIS returns the data in place or copies it there.
     let p = unsafe { sys::NdisGetDataBuffer(nb, len as u32, data.as_mut_ptr().cast(), 1, 0) };
     if p.is_null() {
@@ -908,7 +913,9 @@ pub fn send(frame: &[u8], addr: &Address, priority: i16) -> sys::NTSTATUS {
         return sys::STATUS_INVALID_PARAMETER;
     };
     let ctx = EthernetContext::decode(&addr.context).filter(|c| c.if_idx == addr.if_idx);
-    let mut data = frame.to_vec();
+    let Some(mut data) = sys::try_copy(frame) else {
+        return sys::STATUS_INSUFFICIENT_RESOURCES;
+    };
     let mut tag = 0;
     let mut lso = 0;
     if let Some(c) = ctx {
@@ -940,7 +947,9 @@ pub fn send(frame: &[u8], addr: &Address, priority: i16) -> sys::NTSTATUS {
     if !module.enter(1) {
         return sys::STATUS_DEVICE_NOT_READY;
     }
-    let Some(nbl) = alloc_own(&module, data.into_boxed_slice()) else {
+    // A new copy, of the frame's final length: boxing `data` after a tag was taken out would
+    // reallocate, which panics if it fails.
+    let Some(nbl) = sys::try_box(&data).and_then(|data| alloc_own(&module, data)) else {
         module.leave();
         return sys::STATUS_INSUFFICIENT_RESOURCES;
     };

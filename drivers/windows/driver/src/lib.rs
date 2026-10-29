@@ -11,8 +11,6 @@
 #![no_std]
 
 extern crate alloc;
-#[cfg(not(test))]
-extern crate wdk_panic;
 
 #[cfg(not(test))]
 use wdk_alloc::WdkAllocator;
@@ -32,6 +30,32 @@ mod wfp;
 #[cfg(not(test))]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
+
+/// The bug check code of a panic in the driver. Its parameters are the line, the column, and the
+/// address and length of the source file's name (`!analyze -v` shows them; `da <address>` the
+/// name).
+const BUGCHECK_PANIC: u32 = 0xA7E1_5E00;
+
+/// A panic stops the machine with a crash dump. `wdk-panic`'s handler spins forever instead,
+/// which hangs the processor, often at DISPATCH_LEVEL, and leaves nothing to debug. The packet
+/// paths do not allocate infallibly (`sys::try_copy`), so that running out of pool is not a panic.
+#[cfg(not(test))]
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
+    let (file, line, column) = info
+        .location()
+        .map_or(("", 0, 0), |l| (l.file(), l.line(), l.column()));
+    // SAFETY: stops the system; the file name is a static string.
+    unsafe {
+        sys::KeBugCheckEx(
+            BUGCHECK_PANIC,
+            line as sys::ULONG_PTR,
+            column as sys::ULONG_PTR,
+            file.as_ptr() as sys::ULONG_PTR,
+            file.len() as sys::ULONG_PTR,
+        )
+    }
+}
 
 /// The driver's entry point.
 ///

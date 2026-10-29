@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn Error>> {
              KeExpandKernelStackAndCalloutEx|KeQueryMaximumProcessorCountEx|\
              KeGetCurrentProcessorNumberEx|\
              KeAcquireSpinLockRaiseToDpc|KeReleaseSpinLock|KeQueryPerformanceCounter|DbgPrint|\
-             PsGetCurrentProcessId|MmUnlockPages|IoGetCurrentProcess",
+             PsGetCurrentProcessId|MmUnlockPages|IoGetCurrentProcess|KeBugCheckEx",
         )
         // These unions hold `NET_BUFFER_DATA;` and `NET_BUFFER_LIST_DATA;`, anonymous members of
         // a named type (a Microsoft extension), which bindgen drops, so it gets their size

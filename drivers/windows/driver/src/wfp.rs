@@ -413,14 +413,15 @@ pub fn handle(id: u64) -> Option<Arc<Open>> {
     HANDLES.lock().get(&id).cloned()
 }
 
-/// The open handles at `layer`.
+/// The open handles at `layer`; none if the list could not be allocated.
 pub fn handles_at(layer: Layer) -> Vec<Arc<Open>> {
-    HANDLES
-        .lock()
-        .values()
-        .filter(|h| h.layer == layer)
-        .cloned()
-        .collect()
+    let handles = HANDLES.lock();
+    let at = || handles.values().filter(|h| h.layer == layer);
+    let mut v = Vec::new();
+    if v.try_reserve_exact(at().count()).is_ok() {
+        v.extend(at().cloned());
+    }
+    v
 }
 
 unsafe extern "C" fn notify(
@@ -571,11 +572,17 @@ unsafe fn classify(
     let Some((true, copy)) = result else {
         return;
     };
-    if drop {
-        open.mutable.lock().stats.dropped += 1;
-    } else if let Some(data) = copy {
-        addr.sniffed = sniff;
-        open.deliver(addr, data);
+    match copy {
+        _ if drop => open.mutable.lock().stats.dropped += 1,
+        eval::Copied::Data(data) => {
+            addr.sniffed = sniff;
+            open.deliver(addr, data);
+        }
+        // Fail open: the packet goes on, uncopied.
+        eval::Copied::Failed | eval::Copied::None => {
+            open.mutable.lock().stats.load_errors += 1;
+            return;
+        }
     }
     if sniff {
         return;

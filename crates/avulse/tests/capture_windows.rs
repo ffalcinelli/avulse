@@ -211,8 +211,9 @@ fn filters_and_priorities() {
     }
     let _rx = receiver("127.0.0.1:9403");
     let high = Handle::open("udp.dstport == 9403", Layer::Network, 100, Flags::SNIFF).unwrap();
-    let low = Handle::open("udp", Layer::Network, -100, Flags::SNIFF).unwrap();
-    let miss = sniff("udp.dstport == 9404 or tcp");
+    let low = Handle::open("udp and loopback", Layer::Network, -100, Flags::SNIFF).unwrap();
+    // Not `tcp`: that matches WinRM, which drives the test VM.
+    let miss = sniff("udp.dstport == 9404 or tcp.port == 9404");
     send_to("127.0.0.1:9403", &[b"x"]);
     let (a, b) = (recv_one(&high), recv_one(&low));
     assert_eq!(a.0, b.0);

@@ -19,11 +19,12 @@
 //! so that its deletion comes back to the driver, which reports DELETED to the FLOW handles whose
 //! filter matches it. The contexts go when the last FLOW handle closes.
 
-use alloc::collections::BTreeMap;
-use alloc::string::String;
 use core::ffi::c_void;
+use core::hash::{BuildHasher, Hasher};
 
-use avulse_abi::{Address, Flags};
+use hashbrown::HashMap;
+
+use avulse_abi::{Address, Flags, PROCESS_NAME_LEN};
 use avulse_filter::{Event, Layer, Meta};
 use avulse_proto::Link;
 
@@ -334,7 +335,41 @@ struct FlowEntry {
 
 /// At most this many flows are followed; past it, flows end without a DELETED event.
 const MAX_FLOWS: usize = 16_384;
-static FLOWS: SpinLock<BTreeMap<u64, FlowEntry>> = SpinLock::new(BTreeMap::new());
+/// A hash table, unlike a `BTreeMap`, can make room before an insert (`try_reserve`), so that a
+/// flow is not followed when the pool is full, rather than panicking.
+static FLOWS: SpinLock<HashMap<u64, FlowEntry, FlowHash>> =
+    SpinLock::new(HashMap::with_hasher(FlowHash));
+
+/// Hashes flow handles (opaque 64-bit values) by multiplication, so that every bit counts.
+#[derive(Clone, Copy, Default)]
+struct FlowHash;
+
+impl BuildHasher for FlowHash {
+    type Hasher = FlowHasher;
+
+    fn build_hasher(&self) -> FlowHasher {
+        FlowHasher(0)
+    }
+}
+
+struct FlowHasher(u64);
+
+impl Hasher for FlowHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0 ^ n).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+
+    fn finish(&self) -> u64 {
+        // hashbrown takes its control bits from the top and the bucket from the bottom.
+        self.0 ^ (self.0 >> 32)
+    }
+}
 
 /// Removes the context of every flow followed. Their deletion is not reported.
 ///
@@ -412,21 +447,28 @@ fn is_loopback(a: &[u8; 16]) -> bool {
 }
 
 /// The image name of a process path (`\device\harddiskvolume3\...\curl.exe` to `curl.exe`),
-/// from UTF-16 bytes.
-fn image_name(path: &[u8]) -> String {
-    let units = path
-        .as_chunks::<2>()
-        .0
+/// from UTF-16 bytes, as UTF-8 in `buf`. Cut where `buf` is full; nothing is allocated.
+fn image_name<'a>(path: &[u8], buf: &'a mut [u8; PROCESS_NAME_LEN]) -> &'a str {
+    let units = path.as_chunks::<2>().0;
+    let end = units
         .iter()
-        .map(|&c| u16::from_le_bytes(c))
-        .take_while(|&u| u != 0);
-    let full: String = char::decode_utf16(units)
-        .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
-        .collect();
-    match full.rfind('\\') {
-        Some(i) => String::from(&full[i + 1..]),
-        None => full,
+        .position(|&c| c == [0, 0])
+        .unwrap_or(units.len());
+    let units = &units[..end];
+    let start = units
+        .iter()
+        .rposition(|&c| c == [b'\\', 0])
+        .map_or(0, |i| i + 1);
+    let mut n = 0;
+    for c in char::decode_utf16(units[start..].iter().map(|&c| u16::from_le_bytes(c))) {
+        let c = c.unwrap_or(char::REPLACEMENT_CHARACTER);
+        if n + c.len_utf8() > buf.len() {
+            break;
+        }
+        n += c.encode_utf8(&mut buf[n..]).len();
     }
+    // `n` bytes of whole characters.
+    core::str::from_utf8(&buf[..n]).unwrap_or_default()
 }
 
 /// The address of the event `hook` reports, from the classify's values and metadata.
@@ -479,7 +521,8 @@ unsafe fn event_address(
             let blob = &*m.processPath;
             if !blob.data.is_null() {
                 let path = core::slice::from_raw_parts(blob.data, blob.size as usize);
-                a.flow.set_process_name(&image_name(path));
+                let mut buf = [0; PROCESS_NAME_LEN];
+                a.flow.set_process_name(image_name(path, &mut buf));
             }
         }
         if has(sys::FWPS_METADATA_FIELD_TRANSPORT_ENDPOINT_HANDLE) {
@@ -580,7 +623,8 @@ unsafe fn follow(
     let callout_id = filter.action.calloutId;
     {
         let mut flows = FLOWS.lock();
-        if flows.contains_key(&handle) || flows.len() >= MAX_FLOWS {
+        if flows.contains_key(&handle) || flows.len() >= MAX_FLOWS || flows.try_reserve(1).is_err()
+        {
             return;
         }
         let mut addr = *addr;

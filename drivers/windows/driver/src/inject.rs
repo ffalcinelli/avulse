@@ -155,7 +155,9 @@ pub fn send(packet: &[u8], addr: &Address, layer: Layer, priority: i16) -> sys::
     if h.is_null() || pool.is_null() {
         return sys::STATUS_INVALID_DEVICE_STATE;
     }
-    let data: Box<[u8]> = packet.into();
+    let Some(data) = sys::try_box(packet) else {
+        return sys::STATUS_INSUFFICIENT_RESOURCES;
+    };
     let len = data.len() as u32;
     // SAFETY: a nonpaged buffer of `len` bytes, which lives until the completion.
     let mdl = unsafe { sys::IoAllocateMdl(data.as_ptr().cast_mut().cast(), len, 0, 0, null_mut()) };
@@ -174,7 +176,15 @@ pub fn send(packet: &[u8], addr: &Address, layer: Layer, priority: i16) -> sys::
         unsafe { sys::IoFreeMdl(mdl) };
         return status;
     }
-    let sent = Box::into_raw(Box::new(Sent { data, mdl }));
+    let Some(sent) = sys::try_new(Sent { data, mdl }) else {
+        // SAFETY: allocated above, unused.
+        unsafe {
+            sys::FwpsFreeNetBufferList0(nbl);
+            sys::IoFreeMdl(mdl);
+        }
+        return sys::STATUS_INSUFFICIENT_RESOURCES;
+    };
+    let sent = Box::into_raw(sent);
     let ctx = context(priority);
     // UNSPECIFIED_COMPARTMENT_ID: the default compartment.
     let compartment = 0;

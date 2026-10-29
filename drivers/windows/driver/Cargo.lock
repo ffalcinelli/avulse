@@ -76,10 +76,10 @@ dependencies = [
  "avulse-proto",
  "bindgen",
  "cc",
+ "hashbrown",
  "wdk",
  "wdk-alloc",
  "wdk-build",
- "wdk-panic",
  "wdk-sys",
 ]
 
@@ -288,6 +288,12 @@ name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
+name = "hashbrown"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "heck"
@@ -783,12 +789,6 @@ dependencies = [
  "serde_json",
  "syn 2.0.119",
 ]
-
-[[package]]
-name = "wdk-panic"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e594cced255434b29bfca586a74653985281377ff4e36b8cfa58fd4c4c63073a"
 
 [[package]]
 name = "wdk-sys"

@@ -141,6 +141,11 @@ outbound, as in WinDivert. `capabilities()` says what works.
 - **Impostors** are tracked per layer. A packet that a `Network` handle sends is not an
   impostor at the `Ethernet` layer, and the other way round. On Linux, both layers share the TC
   hooks and their marks.
+- **Out of memory**, the driver fails open. A packet or event it cannot copy goes on, and
+  `Stats::load_errors` counts it.
+- **Machines.** The driver builds for x64 and ARM64. It is tested on x64 only, under Driver
+  Verifier with its code integrity checks (what memory integrity, HVCI, requires). No ARM64
+  machine has run it yet.
 
 ## On Linux
 

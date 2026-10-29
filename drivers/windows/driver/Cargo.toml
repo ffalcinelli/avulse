@@ -29,9 +29,10 @@ wdk-build = "0.5.1"
 avulse-abi = { path = "../../../crates/abi" }
 avulse-filter = { path = "../../../crates/filter" }
 avulse-proto = { path = "../../../crates/proto" }
+# The flow table (ale.rs), whose inserts can fail without panicking.
+hashbrown = { version = "0.17", default-features = false }
 wdk = "0.4.1"
 wdk-alloc = "0.4.1"
-wdk-panic = "0.4.1"
 wdk-sys = "0.5.1"
 
 # Release builds only (docs/spikes/windows-driver.md, finding 2): the debug build's frames overflow

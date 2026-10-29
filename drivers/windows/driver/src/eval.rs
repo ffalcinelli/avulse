@@ -170,8 +170,9 @@ pub fn evaluate(
 }
 
 /// [`evaluate`] on the data of `nb`, read in place when it is contiguous and through the
-/// processor's copy buffer otherwise; with the packet's bytes when it matches and `keep` is set.
-/// `None` if the packet could not be read or evaluated.
+/// processor's copy buffer otherwise; with the packet's bytes when it matches and `keep` is set
+/// (`Copied::Failed` if they could not be allocated). `None` if the packet could not be read or
+/// evaluated.
 ///
 /// # Safety
 ///
@@ -182,7 +183,7 @@ pub unsafe fn evaluate_nb(
     link: Link,
     meta: &Meta<'_>,
     keep: bool,
-) -> Option<(bool, Option<Vec<u8>>)> {
+) -> Option<(bool, Copied)> {
     // SAFETY: `nb` is valid.
     let len = unsafe { sys::nb_data_length(nb) } as usize;
     if len == 0 || len > MAX_PACKET {
@@ -201,9 +202,24 @@ pub unsafe fn evaluate_nb(
         // closure does not otherwise touch while the slice lives.
         let bytes = unsafe { core::slice::from_raw_parts(p.cast::<u8>(), len) };
         let matched = run(program, bytes, link, meta, &raw mut scratch.regs)?;
-        Some((matched, (matched && keep).then(|| bytes.to_vec())))
+        let copy = match (matched && keep).then(|| sys::try_copy(bytes)) {
+            None => Copied::None,
+            Some(Some(data)) => Copied::Data(data),
+            Some(None) => Copied::Failed,
+        };
+        Some((matched, copy))
     })
     .flatten()
+}
+
+/// The copy [`evaluate_nb`] made of a packet.
+pub enum Copied {
+    /// None was asked for.
+    None,
+    /// The packet's bytes.
+    Data(Vec<u8>),
+    /// The pool had no room for it.
+    Failed,
 }
 
 /// A packet's bytes and the processor's register file, for [`with_frame`]: the handles of a hook

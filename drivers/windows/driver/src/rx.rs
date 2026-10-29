@@ -295,6 +295,10 @@ pub unsafe fn recv(cell: &SpinLock<Rx>, irp: *mut sys::IRP) -> sys::NTSTATUS {
         match unsafe { fill(&mut rx, irp) } {
             Some((status, n)) => Done::Complete(irp, status, n),
             None if rx.shut => Done::Complete(irp, sys::STATUS_PIPE_EMPTY, 0),
+            // No room to list it as waiting.
+            None if rx.pending.try_reserve(1).is_err() => {
+                Done::Complete(irp, sys::STATUS_INSUFFICIENT_RESOURCES, 0)
+            }
             None => {
                 // SAFETY: the IRP is ours; the cancel routine takes the same lock.
                 unsafe {
@@ -391,7 +395,11 @@ unsafe extern "C" fn cancel(_device: *mut sys::DEVICE_OBJECT, irp: *mut sys::IRP
 pub fn push(cell: &SpinLock<Rx>, e: Entry, max_len: usize, max_bytes: usize) -> bool {
     {
         let mut rx = cell.lock();
-        if rx.shut || rx.packets.len() >= max_len || rx.bytes + e.data.len() > max_bytes {
+        if rx.shut
+            || rx.packets.len() >= max_len
+            || rx.bytes + e.data.len() > max_bytes
+            || rx.packets.try_reserve(1).is_err()
+        {
             return false;
         }
         rx.bytes += e.data.len();

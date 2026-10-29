@@ -207,3 +207,44 @@ pub fn unicode(s: &'static [u16]) -> UNICODE_STRING {
         Buffer: s.as_ptr().cast_mut(),
     }
 }
+
+/// A copy of `bytes`, or `None` if the pool has no room: the packet and event paths must not
+/// panic when an allocation fails (a panic bugchecks), so they fail open instead.
+pub fn try_copy(bytes: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+    let mut v = alloc::vec::Vec::new();
+    v.try_reserve_exact(bytes.len()).ok()?;
+    v.extend_from_slice(bytes);
+    Some(v)
+}
+
+/// [`try_copy`], boxed (its capacity is its length, so boxing does not reallocate).
+pub fn try_box(bytes: &[u8]) -> Option<alloc::boxed::Box<[u8]>> {
+    try_copy(bytes).map(alloc::vec::Vec::into_boxed_slice)
+}
+
+/// A zeroed buffer of `len` bytes, or `None` if the pool has no room.
+pub fn try_zeroed(len: usize) -> Option<alloc::boxed::Box<[u8]>> {
+    let mut v = alloc::vec::Vec::new();
+    v.try_reserve_exact(len).ok()?;
+    v.resize(len, 0);
+    Some(v.into_boxed_slice())
+}
+
+/// `Box::new(value)`, or `None` if the pool has no room (`Box::try_new` is not stable).
+pub fn try_new<T>(value: T) -> Option<alloc::boxed::Box<T>> {
+    let layout = core::alloc::Layout::new::<T>();
+    if layout.size() == 0 {
+        return Some(alloc::boxed::Box::new(value));
+    }
+    // SAFETY: a layout of non-zero size.
+    let p = unsafe { alloc::alloc::alloc(layout) }.cast::<T>();
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: `p` is a fresh allocation of `T`'s layout, from the global allocator, as `Box`
+    // expects.
+    unsafe {
+        p.write(value);
+        Some(alloc::boxed::Box::from_raw(p))
+    }
+}

@@ -13,7 +13,7 @@ use avulse_proto::Link;
 use crate::handle::Open;
 use crate::lock::SpinLock;
 use crate::rx::Entry;
-use crate::{eval, wfp};
+use crate::{eval, sys, wfp};
 
 /// The open handles, in the order they opened.
 static HANDLES: SpinLock<Vec<Arc<Open>>> = SpinLock::new(Vec::new());
@@ -36,13 +36,18 @@ fn report(to: &Open, about: &Open, event: Event) {
     r.syntax = about.syntax;
     // At REFLECT, the metadata is the reflected handle's (its layer, priority and process).
     let m: Meta<'_> = addr.meta();
-    if eval::evaluate(to.program(), &[], Link::Ip, &m) == Some(true) {
-        to.queue(Entry {
-            addr,
-            data: about.filter.as_bytes().to_vec(),
-            windivert: about.windivert_object.clone(),
-        });
+    if eval::evaluate(to.program(), &[], Link::Ip, &m) != Some(true) {
+        return;
     }
+    let Some(data) = sys::try_copy(about.filter.as_bytes()) else {
+        to.mutable.lock().stats.load_errors += 1;
+        return;
+    };
+    to.queue(Entry {
+        addr,
+        data,
+        windivert: about.windivert_object.clone(),
+    });
 }
 
 /// A handle opened: reported to every REFLECT handle; a REFLECT handle also hears of every

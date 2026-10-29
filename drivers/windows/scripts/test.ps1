@@ -25,7 +25,23 @@ if (-not (bcdedit /enum "{current}" | Select-String "testsigning\s+Yes")) {
 }
 certutil -f -addstore Root "$pkg\WDRLocalTestCert.cer" | Out-Null
 certutil -f -addstore TrustedPublisher "$pkg\WDRLocalTestCert.cer" | Out-Null
-verifier /querysettings | Select-String "avulse" | Out-Host
+
+# Every suite runs under Driver Verifier, with verifier.ps1's flags: its "Level" must have them
+# all, and the driver must be among those it watches once loaded.
+$verifierFlags = 0x000209BB -bor 0x00004000 -bor 0x00200000 -bor 0x00800000 -bor 0x02000000
+function Assert-Verified($name) {
+    $q = verifier /query | Out-String
+    if ($q -notmatch "(?m)^\s*Verifier Flags:\s*0x([0-9A-Fa-f]+)") {
+        throw "Driver Verifier is off: run verifier.ps1, then reboot"
+    }
+    $level = [Convert]::ToInt64($Matches[1], 16)
+    if (($level -band $verifierFlags) -ne $verifierFlags) {
+        throw ("Driver Verifier's flags are 0x{0:X}, not 0x{1:X}: run verifier.ps1, then reboot" -f $level, $verifierFlags)
+    }
+    if ($q -notmatch "(?im)^\s*MODULE:\s*$([regex]::Escape($name))\s*\(load:\s*[1-9]") {
+        throw "Driver Verifier is not watching $name"
+    }
+}
 
 $start = Get-Date
 sc.exe stop avulse 2>&1 | Out-Null
@@ -34,6 +50,7 @@ Copy-Item "$pkg\avulse.sys" C:\Windows\System32\drivers\avulse.sys -Force
 sc.exe create avulse type= kernel start= demand binPath= System32\drivers\avulse.sys | Out-Host
 sc.exe start avulse | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "the driver did not start: $LASTEXITCODE" }
+Assert-Verified avulse.sys
 
 $failed = $false
 try {
@@ -68,6 +85,7 @@ Get-NetAdapterLso | Format-Table Name, IPv4Enabled, IPv6Enabled | Out-Host
 netcfg.exe -v -l "$pkg\avulse.inf" -c s -i avulse | Out-Host
 if ($LASTEXITCODE -ne 0) { $failed = $true; Write-Host "netcfg install failed: $LASTEXITCODE" }
 sc.exe query avulse | Out-Host
+try { Assert-Verified avulse.sys } catch { $failed = $true; Write-Host $_ }
 Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\Network\{4D36E974-E325-11CE-BFC1-08002BE10318}" |
     Where-Object { (Get-ItemProperty $_.PSPath).ComponentId -eq "avulse" } |
     Select-Object PSChildName | Out-Host
@@ -82,6 +100,9 @@ netcfg.exe -v -u avulse | Out-Host
 if ($LASTEXITCODE -ne 0) { $failed = $true; Write-Host "netcfg uninstall failed: $LASTEXITCODE" }
 sc.exe query avulse | Out-Host
 if ($LASTEXITCODE -eq 0) { sc.exe stop avulse | Out-Host; sc.exe delete avulse | Out-Host }
+
+# Driver Verifier's counters for the driver (pool allocations, failed ones included).
+verifier /query | Out-Host
 
 if (Get-ChildItem C:\Windows\Minidump, C:\Windows\MEMORY.DMP -ErrorAction SilentlyContinue |
         Where-Object LastWriteTime -gt $start) {
