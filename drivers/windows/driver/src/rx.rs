@@ -11,9 +11,11 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use alloc::collections::VecDeque;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use avulse_abi::Address;
-use avulse_abi::ioctl::Record;
+use avulse_abi::ioctl::{self, Record};
+use avulse_abi::windivert::WdAddress;
 
 use crate::handle::File;
 use crate::lock::SpinLock;
@@ -23,6 +25,16 @@ use crate::sys;
 pub struct Entry {
     pub addr: Address,
     pub data: Vec<u8>,
+    /// What a [`ioctl::WD_RECV`] returns in place of `data`, if it differs: WinDivert's filter
+    /// object in a REFLECT event.
+    pub windivert: Option<Arc<[u8]>>,
+}
+
+impl Entry {
+    /// The data as WinDivert's receive returns it.
+    fn windivert_data(&self) -> &[u8] {
+        self.windivert.as_deref().unwrap_or(&self.data)
+    }
 }
 
 #[derive(Default)]
@@ -61,16 +73,25 @@ unsafe fn set_cancel_routine(
     }
 }
 
-/// The output buffer of a `METHOD_OUT_DIRECT` request, mapped into system space
-/// (`MmGetSystemAddressForMdlSafe`, an inline function).
+/// The output buffer of a `METHOD_OUT_DIRECT` request, mapped into system space.
 ///
 /// # Safety
 ///
 /// `irp` is a valid IRP of a `METHOD_OUT_DIRECT` request.
 unsafe fn output(irp: *mut sys::IRP, len: usize) -> Option<&'static mut [u8]> {
     // SAFETY: the I/O manager built the MDL for the request's output buffer.
+    unsafe { mapped((*irp).MdlAddress, len) }
+}
+
+/// The `len` bytes an MDL describes, mapped into system space (`MmGetSystemAddressForMdlSafe`,
+/// an inline function).
+///
+/// # Safety
+///
+/// `mdl` is NULL or an MDL of locked pages, for at least `len` bytes.
+pub unsafe fn mapped(mdl: *mut sys::MDL, len: usize) -> Option<&'static mut [u8]> {
+    // SAFETY: the caller's contract.
     unsafe {
-        let mdl = (*irp).MdlAddress;
         if mdl.is_null() || len == 0 {
             return None;
         }
@@ -101,13 +122,24 @@ unsafe fn output_len(irp: *mut sys::IRP) -> usize {
     }
 }
 
-/// Writes as many queued records as fit `irp`'s buffer, at least one. With nothing queued, the
-/// IRP waits (`None`).
+/// Answers `irp` with what is queued, at least one record: as avulse's records, or as
+/// WinDivert's packets and addresses. With nothing queued, the IRP waits (`None`).
 ///
 /// # Safety
 ///
-/// `irp` is a valid `RECV` IRP.
+/// `irp` is a valid `RECV` or `WD_RECV` IRP; a `WD_RECV` one has the MDLs `wd_recv` chained.
 unsafe fn fill(rx: &mut Rx, irp: *mut sys::IRP) -> Option<(sys::NTSTATUS, usize)> {
+    // SAFETY: the caller's contract.
+    let code = unsafe {
+        (*sys::current_stack_location(irp))
+            .Parameters
+            .DeviceIoControl
+            .IoControlCode
+    };
+    if code == ioctl::WD_RECV {
+        // SAFETY: as above.
+        return unsafe { fill_windivert(rx, irp) };
+    }
     let first = rx.packets.front()?;
     // SAFETY: the caller's contract.
     let len = unsafe { output_len(irp) };
@@ -136,6 +168,119 @@ unsafe fn fill(rx: &mut Rx, irp: *mut sys::IRP) -> Option<(sys::NTSTATUS, usize)
     }
     out[..buf.len()].copy_from_slice(&buf);
     Some((sys::STATUS_SUCCESS, buf.len()))
+}
+
+/// Answers a `WD_RECV` IRP as WinDivert's driver does: packets back to back in the output
+/// buffer, at most as many as the caller has room for addresses, the addresses in the caller's
+/// buffer (the MDL after the output's), and their length in bytes in the caller's `UINT` (the
+/// MDL after that one, if any).
+///
+/// # Safety
+///
+/// As [`fill`].
+unsafe fn fill_windivert(rx: &mut Rx, irp: *mut sys::IRP) -> Option<(sys::NTSTATUS, usize)> {
+    let first = rx.packets.front()?;
+    // SAFETY: the caller's contract: the output MDL, then the addresses', then maybe the
+    // length's, all locked.
+    let (len, addrs_mdl, len_mdl) = unsafe {
+        let out = (*irp).MdlAddress;
+        let addrs = if out.is_null() {
+            null_mut()
+        } else {
+            (*out).Next
+        };
+        let len_mdl = if addrs.is_null() {
+            null_mut()
+        } else {
+            (*addrs).Next
+        };
+        (output_len(irp), addrs, len_mdl)
+    };
+    if first.windivert_data().len() > len {
+        let e = rx.packets.pop_front()?;
+        rx.bytes -= e.data.len();
+        return Some((sys::STATUS_BUFFER_TOO_SMALL, 0));
+    }
+    // SAFETY: as above; the addresses' MDL holds `ByteCount` bytes, a multiple of 80.
+    let (out, addrs, addr_len) = unsafe {
+        let count = if addrs_mdl.is_null() {
+            0
+        } else {
+            (*addrs_mdl).ByteCount as usize / 80
+        };
+        (
+            output(irp, len),
+            mapped(addrs_mdl, count * 80),
+            mapped(len_mdl, 4),
+        )
+    };
+    let (Some(out), Some(addrs)) = (out, addrs) else {
+        return Some((sys::STATUS_INSUFFICIENT_RESOURCES, 0));
+    };
+    let (mut n, mut i) = (0, 0);
+    while let Some(e) = rx.packets.front() {
+        let data = e.windivert_data();
+        if i == addrs.len() / 80 || n + data.len() > len {
+            break;
+        }
+        out[n..n + data.len()].copy_from_slice(data);
+        addrs[80 * i..80 * (i + 1)].copy_from_slice(&WdAddress::from_avulse(&e.addr).to_bytes());
+        n += data.len();
+        i += 1;
+        let e = rx.packets.pop_front()?;
+        rx.bytes -= e.data.len();
+    }
+    if let Some(l) = addr_len {
+        l.copy_from_slice(&((80 * i) as u32).to_le_bytes());
+    }
+    Some((sys::STATUS_SUCCESS, n))
+}
+
+/// Locks the caller's buffers of a `WD_RECV` request, `req`, and chains their MDLs after the
+/// output's, where `fill_windivert` finds them and the I/O manager unlocks and frees them when
+/// the IRP completes. Then receives as [`recv`] does.
+///
+/// # Safety
+///
+/// `irp` is a valid `WD_RECV` IRP for `file`, owned by the driver, in the caller's context.
+pub unsafe fn wd_recv(
+    cell: &SpinLock<Rx>,
+    irp: *mut sys::IRP,
+    req: &ioctl::WdRecvRequest,
+) -> sys::NTSTATUS {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let mode = (*irp).RequestorMode;
+        let mut last = (*irp).MdlAddress;
+        if last.is_null() {
+            return sys::complete(irp, sys::STATUS_INVALID_PARAMETER, 0);
+        }
+        let Some(bytes) = (req.count as usize)
+            .checked_mul(80)
+            .filter(|&b| b <= u32::MAX as usize)
+        else {
+            return sys::complete(irp, sys::STATUS_INVALID_PARAMETER, 0);
+        };
+        let buffers = [(req.addrs, bytes as u32), (req.addr_len, 4)];
+        for (va, len) in buffers {
+            if va == 0 {
+                continue;
+            }
+            let mdl = sys::IoAllocateMdl(va as *mut c_void, len, 0, 0, null_mut());
+            if mdl.is_null() {
+                return sys::complete(irp, sys::STATUS_INSUFFICIENT_RESOURCES, 0);
+            }
+            // IoWriteAccess.
+            let status = sys::avulse_probe_and_lock(mdl, mode, 1);
+            if status != sys::STATUS_SUCCESS {
+                sys::IoFreeMdl(mdl);
+                return sys::complete(irp, status, 0);
+            }
+            (*last).Next = mdl;
+            last = mdl;
+        }
+        recv(cell, irp)
+    }
 }
 
 /// A new `RECV` request on `file`: completed now, or left waiting. Returns its status.

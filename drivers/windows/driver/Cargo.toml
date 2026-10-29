@@ -22,6 +22,7 @@ test = false
 
 [build-dependencies]
 bindgen = "0.71"
+cc = "1"
 wdk-build = "0.5.1"
 
 [dependencies]

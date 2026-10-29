@@ -153,9 +153,10 @@ fn open_requests() {
         interfaces: vec![3, 9],
         filter: "tcp.DstPort == 80",
         syntax: Syntax::WinDivert,
+        windivert_object: b"@WinDiv_\0",
     };
     let b = req.encode();
-    assert_eq!(b.len(), 32 + 8 + 5 + 17);
+    assert_eq!(b.len(), 32 + 8 + 5 + 17 + 9);
     assert_eq!(OpenRequest::decode(&b), Ok(req.clone()));
     assert_eq!(
         OpenRequest::decode(&b[..b.len() - 1]),
@@ -164,9 +165,9 @@ fn open_requests() {
     let mut longer = b.clone();
     longer.push(0);
     assert_eq!(OpenRequest::decode(&longer), Err(Malformed::Value));
-    let mut v2 = b.clone();
-    v2[0] = 2;
-    assert_eq!(OpenRequest::decode(&v2), Err(Malformed::Version));
+    let mut v1 = b.clone();
+    v1[0] = 1;
+    assert_eq!(OpenRequest::decode(&v1), Err(Malformed::Version));
     let mut flags = b;
     flags[8] = 0x40;
     assert_eq!(OpenRequest::decode(&flags), Err(Malformed::Value));
@@ -235,4 +236,22 @@ fn ethernet_contexts() {
     let mut other = *bytes.as_bytes();
     other[40] = 1;
     assert_eq!(EthernetContext::decode(&Context::from_bytes(other)), None);
+}
+
+#[test]
+fn windivert_receive_requests() {
+    use crate::ioctl::{Malformed, WD_RECV, WdRecvRequest};
+    let r = WdRecvRequest {
+        addrs: 0x1000,
+        addr_len: 0x2000,
+        count: 4,
+    };
+    assert_eq!(WdRecvRequest::decode(&r.encode()), Ok(r));
+    let none = WdRecvRequest { count: 0, ..r };
+    assert_eq!(WdRecvRequest::decode(&none.encode()), Err(Malformed::Value));
+    assert_eq!(
+        WdRecvRequest::decode(&r.encode()[..20]),
+        Err(Malformed::Truncated)
+    );
+    assert_eq!(WD_RECV & 3, 2, "METHOD_OUT_DIRECT");
 }

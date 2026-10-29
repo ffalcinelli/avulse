@@ -12,6 +12,7 @@ use avulse_proto::Link;
 
 use crate::handle::Open;
 use crate::lock::SpinLock;
+use crate::rx::Entry;
 use crate::{eval, wfp};
 
 /// The open handles, in the order they opened.
@@ -36,7 +37,11 @@ fn report(to: &Open, about: &Open, event: Event) {
     // At REFLECT, the metadata is the reflected handle's (its layer, priority and process).
     let m: Meta<'_> = addr.meta();
     if eval::evaluate(to.program(), &[], Link::Ip, &m) == Some(true) {
-        to.deliver(addr, about.filter.as_bytes().to_vec());
+        to.queue(Entry {
+            addr,
+            data: about.filter.as_bytes().to_vec(),
+            windivert: about.windivert_object.clone(),
+        });
     }
 }
 

@@ -31,6 +31,12 @@ pub(crate) struct Spec<'a> {
     pub interfaces: &'a [String],
     /// The starting values of the parameters, indexed by [`Param::index`].
     pub params: [u64; 3],
+    /// The name of the driver's kernel service (Windows).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub service: &'a str,
+    /// Where the Windows driver is, if not in the default place.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub driver: Option<&'a std::path::Path>,
 }
 
 #[cfg(target_os = "linux")]
@@ -71,6 +77,11 @@ pub(crate) trait Opened: Send + Sync {
     /// A descriptor that is readable when `recv` would not block.
     #[cfg(unix)]
     fn as_fd(&self) -> BorrowedFd<'_>;
+    /// The file of the Windows driver's device that the handle uses, if it has one.
+    #[cfg(windows)]
+    fn device(&self) -> Option<std::os::windows::io::BorrowedHandle<'_>> {
+        None
+    }
     /// Detaches and frees everything, after any call in progress returns.
     fn close(self: Box<Self>) -> Result<()>;
 }

@@ -1,5 +1,6 @@
 # Loads avulse.sys as a kernel service and runs the test program against it; then runs the
-# Windows backend's tests, which install and start the service themselves; then installs the
+# Windows backend's tests and the WinDivert shim's, which install and start the service
+# themselves; then installs the
 # driver as a lightweight filter with its INF (netcfg) and runs the backend's tests again, with
 # the ETHERNET layer; and checks that no crash dump was written. Run after build.ps1, with test
 # signing on:
@@ -51,6 +52,12 @@ $env:AVULSE_DRIVER = "$pkg\avulse.sys"
 Set-Location C:\build\avulse
 cargo test -p avulse --test capture_windows -- --test-threads=1
 if ($LASTEXITCODE -ne 0) { $failed = $true }
+# WinDivert.dll's exports (crates/windivert-compat/tests/windows.rs), on the same service.
+Write-Host "== the WinDivert shim"
+cargo test -p avulse-windivert-compat --test windows -- --test-threads=1
+if ($LASTEXITCODE -ne 0) { $failed = $true }
+# The shim installs the driver as the WinDivert service too (not started: avulse's was running).
+sc.exe delete WinDivert | Out-Host
 sc.exe stop avulse | Out-Host
 sc.exe delete avulse | Out-Host
 

@@ -20,7 +20,7 @@ use avulse::{
     Syntax,
 };
 
-use crate::address::WdAddress;
+use crate::WdAddress;
 use crate::helpers::{self, Invalid};
 
 /// `EBPFDIVERT_MTU_MAX`: the largest packet `send` takes.
@@ -857,7 +857,7 @@ pub unsafe extern "C" fn ebpfdivert_helper_calc_checksums(
     let (ok, set) = helpers::calc_checksums(unsafe { bytes_mut(pkt, pkt_len) }, flags);
     // SAFETY: valid or NULL, per the contract.
     if let Some(a) = unsafe { addr.as_mut() } {
-        a.set_checksums(set);
+        a.set_checksums(set.ip, set.tcp, set.udp);
     }
     if ok { 0 } else { EINVAL }
 }

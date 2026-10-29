@@ -1,5 +1,6 @@
-//! Links the driver like any WDK driver, and generates bindings to the kernel, NDIS and WFP headers
-//! that `wdk-sys` does not cover (docs/spikes/windows-driver.md, finding 1).
+//! Links the driver like any WDK driver, generates bindings to the kernel, NDIS and WFP headers
+//! that `wdk-sys` does not cover (docs/spikes/windows-driver.md, finding 1), and compiles
+//! `src/user.c`, the one function that needs structured exception handling.
 
 use std::env;
 use std::error::Error;
@@ -20,6 +21,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     wdk_build::configure_wdk_binary_build()?;
     let out = PathBuf::from(env::var("OUT_DIR")?);
     let config = Config::from_env_auto()?;
+    // `src/user.c`, with the WDK's headers and definitions for the target, as a kernel-mode
+    // object (`/kernel`, no buffer security checks, which would need the kernel's cookie).
+    let mut c = cc::Build::new();
+    c.file("src/user.c")
+        .flag("/kernel")
+        .flag("/GS-")
+        .warnings_into_errors(true);
+    for path in config.include_paths()? {
+        c.include(path);
+    }
+    // `/kernel` defines _KERNEL_MODE itself, and defining it again is an error with -WX.
+    for (name, value) in config.preprocessor_definitions() {
+        if name != "_KERNEL_MODE" {
+            c.define(&name, value.as_deref());
+        }
+    }
+    c.compile("avulse_user");
+    println!("cargo::rerun-if-changed=src/user.c");
     bindgen::Builder::wdk_default(config)?
         .header_contents("avulse.h", HEADER)
         // An NDIS 6.80 (Windows 10 1709) filter driver.
@@ -33,7 +52,7 @@ fn main() -> Result<(), Box<dyn Error>> {
              KeExpandKernelStackAndCalloutEx|KeQueryMaximumProcessorCountEx|\
              KeGetCurrentProcessorNumberEx|\
              KeAcquireSpinLockRaiseToDpc|KeReleaseSpinLock|KeQueryPerformanceCounter|DbgPrint|\
-             PsGetCurrentProcessId",
+             PsGetCurrentProcessId|MmUnlockPages|IoGetCurrentProcess",
         )
         // These unions hold `NET_BUFFER_DATA;` and `NET_BUFFER_LIST_DATA;`, anonymous members of
         // a named type (a Microsoft extension), which bindgen drops, so it gets their size

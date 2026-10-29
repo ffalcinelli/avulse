@@ -55,6 +55,8 @@ pub struct Open {
     /// The process that opened it, and when, for REFLECT.
     pub process_id: u32,
     pub opened: i64,
+    /// Its data in a WinDivert REFLECT receive (WinDivert's filter object), if it has one.
+    pub windivert_object: Option<Arc<[u8]>>,
     /// The program, borrowing `code`, which it is freed with.
     program: VerifiedProgram<'static>,
     code: *mut [u8],
@@ -107,6 +109,8 @@ impl Open {
             // SAFETY: a plain query, in the context of the process that opens the handle.
             process_id: unsafe { sys::PsGetCurrentProcessId() } as usize as u32,
             opened: wfp::now_ns(),
+            windivert_object: (!req.windivert_object.is_empty())
+                .then(|| Arc::from(req.windivert_object)),
             program,
             code,
             mutable: SpinLock::new(Mutable {
@@ -138,12 +142,21 @@ impl Open {
     /// Queues a packet the handle matched (a copy if `addr.sniffed`), within its queue
     /// parameters, and counts it.
     pub fn deliver(&self, addr: Address, data: Vec<u8>) {
-        let sniff = addr.sniffed;
+        self.queue(Entry {
+            addr,
+            data,
+            windivert: None,
+        });
+    }
+
+    /// [`deliver`](Self::deliver), for an entry of its own.
+    pub fn queue(&self, e: Entry) {
+        let sniff = e.addr.sniffed;
         let (max_len, max_bytes) = {
             let m = self.mutable.lock();
             (m.params[0] as usize, m.params[2] as usize)
         };
-        let queued = rx::push(&self.rx, Entry { addr, data }, max_len, max_bytes);
+        let queued = rx::push(&self.rx, e, max_len, max_bytes);
         let mut m = self.mutable.lock();
         match (queued, sniff) {
             (false, _) => m.stats.queue_drops += 1,

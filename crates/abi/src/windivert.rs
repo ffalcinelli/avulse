@@ -1,9 +1,10 @@
 //! `WINDIVERT_ADDRESS`, WinDivert 2.2's 80-byte address (`struct ebpfdivert_address` on Linux),
-//! and its conversion to and from [`avulse::Address`].
+//! and its conversion to and from [`Address`]. The WinDivert shim (`avulse-windivert-compat`)
+//! uses it in user space, and the Windows driver to answer WinDivert's own receive request.
 
-use avulse::{Address, CONTEXT_LEN, Context, Event, Flags, Layer};
+use avulse_filter::{Event, Layer};
 
-use crate::helpers::Computed;
+use crate::{Address, CONTEXT_LEN, Context, Flags};
 
 /// How much of avulse's reinjection [`Context`] fits in the union at the NETWORK layers, after
 /// `IfIdx` and `SubIfIdx`. Backends keep their context within it.
@@ -36,7 +37,7 @@ pub struct WdAddress {
     pub data: [u8; 64],
 }
 
-const _: () = assert!(size_of::<WdAddress>() == 80);
+const _: () = assert!(core::mem::size_of::<WdAddress>() == 80);
 
 const SNIFFED: u32 = 1 << 16;
 const OUTBOUND: u32 = 1 << 17;
@@ -63,6 +64,17 @@ impl Default for WdAddress {
 }
 
 impl WdAddress {
+    /// The address's bytes, as `#[repr(C)]` lays them out on a little-endian machine (every
+    /// Windows target): what WinDivert's callers read.
+    pub fn to_bytes(&self) -> [u8; 80] {
+        let mut b = [0; 80];
+        b[..8].copy_from_slice(&self.timestamp.to_le_bytes());
+        b[8..12].copy_from_slice(&self.bits.to_le_bytes());
+        b[12..16].copy_from_slice(&self.reserved.to_le_bytes());
+        b[16..].copy_from_slice(&self.data);
+        b
+    }
+
     /// The `Layer` bitfield.
     pub fn layer(&self) -> u8 {
         self.bits as u8
@@ -77,15 +89,10 @@ impl WdAddress {
         self.bits & b != 0
     }
 
-    /// Sets the checksum bits of the checksums [`calc_checksums`] computed, as WinDivert does.
-    ///
-    /// [`calc_checksums`]: crate::helpers::calc_checksums
-    pub fn set_checksums(&mut self, set: Computed) {
-        for (on, b) in [
-            (set.ip, IP_CHECKSUM),
-            (set.tcp, TCP_CHECKSUM),
-            (set.udp, UDP_CHECKSUM),
-        ] {
+    /// Sets the bits of the checksums that are known to be right, as WinDivert's
+    /// `WinDivertHelperCalcChecksums` does for those it computed.
+    pub fn set_checksums(&mut self, ip: bool, tcp: bool, udp: bool) {
+        for (on, b) in [(ip, IP_CHECKSUM), (tcp, TCP_CHECKSUM), (udp, UDP_CHECKSUM)] {
             if on {
                 self.bits |= b;
             }

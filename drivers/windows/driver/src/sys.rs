@@ -165,6 +165,12 @@ pub unsafe fn nb_data_length(nb: *mut NET_BUFFER) -> u32 {
     }
 }
 
+unsafe extern "C" {
+    /// `src/user.c`: `MmProbeAndLockPages` under `__try`, so that a bad buffer fails instead of
+    /// raising. `op` is a `LOCK_OPERATION` (`IoReadAccess` 0, `IoWriteAccess` 1).
+    pub fn avulse_probe_and_lock(mdl: *mut MDL, mode: KPROCESSOR_MODE, op: i32) -> NTSTATUS;
+}
+
 /// `IoGetRemainingStackSize`, an inline function in `wdm.h`.
 pub fn remaining_stack() -> usize {
     let (mut low, mut high) = (0, 0);

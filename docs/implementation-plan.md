@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-29, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5: Steps 22 to 28 done, next Step 29)
+## Status (2026-10-29, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5 exit reached: Steps 22 to 29 done, next Step 30)
 
 | Area | State |
 | --- | --- |
@@ -22,7 +22,7 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `crates/capi` (`avulse-capi`) | Step 18: the C ABI, `libavulse.so`/`.a`, header `include/avulse.h` (hand-written, layout pinned by asserts), 20 functions, tested from C (`tests/c.rs`, `tests/c/abi.c`). |
 | `drivers/windows` | Step 23: `avulse.sys` (WDM, Rust, outside the workspace): the control device, handles opened with verified bytecode, parameters, statistics, shutdown, and `EVAL`, a test IOCTL that runs a handle's filter in the kernel. `test/` passes 243 checks in the `windows` VM under Driver Verifier, WinDivert's filter vectors included. Steps 25 and 26: WFP callouts divert, sniff, drop and inject at the NETWORK layers. Step 27: the NDIS lightweight filter (`lwf.rs`) gives the ETHERNET layer, with VLAN tags and large sends restored. Step 28: FLOW, SOCKET and REFLECT (`ale.rs`, `reflect.rs`). `capture_windows.rs` (27 tests) passes with the driver as a plain service and installed through `netcfg`. |
 | `crates/abi` (`avulse-abi`) | Step 23: the types shared with the driver and the C ABI (`Address`, `Flags`, `Param`, `Shutdown`, `Stats`, `Syntax`), and `ioctl`, the driver protocol. `no_std`. |
-| `crates/windivert-compat` | Steps 19 to 21: `libavulse_windivert.so`, libebpfdivert's C API over avulse (21 `ebpfdivert_*` exports, negative errno values, WinDivert's 80-byte address with avulse's reinjection context in its union). WinDivert's helpers (hash, checksums, `eval_filter` with `random*`) agree with WinDivert's own code on generated vectors (`scripts/gen_compat_vectors.py`). REFLECT's data is WinDivert's serialized filter object (`Filter::windivert_object`, matching WinDivert's compiler on 230 filters). 15 unit tests, the exported-symbol test, and `tests/capture.rs` (6, `AVULSE_BPF=1`) on 6.8 and 5.15. pydivert's suite (155) and jdivert's (334, JNA and Panama) pass against it unchanged. `publish = false`. |
+| `crates/windivert-compat` | Step 29: on Windows, `avulse_windivert.dll`, a drop-in for `WinDivert.dll` (WinDivert 2.2's exports, overlapped receives through the driver's `WD_RECV`); pydivert's (148) and jdivert's (334, JDK 25 and 8) Windows suites pass against it unchanged, under Driver Verifier. Steps 19 to 21: `libavulse_windivert.so`, libebpfdivert's C API over avulse (21 `ebpfdivert_*` exports, negative errno values, WinDivert's 80-byte address with avulse's reinjection context in its union). WinDivert's helpers (hash, checksums, `eval_filter` with `random*`) agree with WinDivert's own code on generated vectors (`scripts/gen_compat_vectors.py`). REFLECT's data is WinDivert's serialized filter object (`Filter::windivert_object`, matching WinDivert's compiler on 230 filters). 15 unit tests, the exported-symbol test, and `tests/capture.rs` (6, `AVULSE_BPF=1`) on 6.8 and 5.15. pydivert's suite (155) and jdivert's (334, JNA and Panama) pass against it unchanged. `publish = false`. |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
 | CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows/macos, tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
 | Release (`.github/workflows/release.yml`) | Builds and publishes the Python placeholder on `v*` tags. **No crates.io job yet.** |
@@ -2129,7 +2129,70 @@ The original plan of the step follows.
 **Tests.** The Linux event scenarios: connect, bind and accept, refusing by filter and by process
 name, flows of TCP and UDP, and REFLECT of another process's handle.
 
-### Step 29: `WinDivert.dll` and the binding suites (Phase 5 exit)
+### Step 29: `WinDivert.dll` and the binding suites (Phase 5 exit) (done)
+
+**Outcome.** `avulse_windivert.dll`, installed in place of WinDivert's two files
+(`WinDivert64.dll` for the DLL, and `avulse.sys` as `WinDivert64.sys`), runs pydivert's and
+jdivert's Windows suites unchanged, under Driver Verifier.
+- pydivert: 148 passed, 13 skipped, all of them Linux-only.
+- jdivert: 334 run, 0 failures, on JDK 25 (Panama) and on JDK 8 (JNA). It skips 10: 9 Linux-only,
+  plus `testInboundOutboundLogic`, which jdivert disables in VirtualBox.
+
+In the `windows` VM, the driver test (243), `capture_windows.rs` (27, in both phases) and the
+shim's `tests/windows.rs` (8) pass.
+
+- **Overlapped I/O is the kernel's (the finding of this step).** Both bindings call
+  `WinDivertRecvEx` with an `OVERLAPPED`, then kernel32's `WaitForSingleObject`,
+  `GetOverlappedResult` and `CancelIoEx` on the handle itself. So the handle is the device file
+  (`Handle::device`), and a receive is a kernel request, `ioctl::WD_RECV` (`METHOD_OUT_DIRECT`):
+  - it writes packets back to back in the output buffer, and WinDivert's 80-byte addresses into
+    the caller's address buffer;
+  - it writes their length into the caller's `UINT`;
+  - it completes whenever a packet comes, from any context.
+  
+  The driver locks the two caller buffers at dispatch and chains their MDLs after the output's,
+  where the I/O manager unlocks and frees them at completion (cancellation included).
+- **`drivers/windows/driver/src/user.c` (owner decision): the driver's one C function.**
+  `MmProbeAndLockPages` raises on a bad buffer, and only `__try`/`__except` catches that. So
+  `avulse_probe_and_lock` wraps it, and `build.rs` compiles it with `cc` and the WDK's include
+  paths and definitions from `wdk-build` (`/kernel`, `/GS-`, `-WX`; `_KERNEL_MODE` is not
+  defined again). It is the same source for x64 and ARM64.
+- **`avulse_abi::windivert`.** `WdAddress` moved from the shim into the ABI crate, with
+  `to_bytes`, so the driver writes WinDivert's addresses. The shim re-exports it.
+- **REFLECT's data.** `OpenRequest` carries `windivert_object` (`PROTOCOL_VERSION` 2, in the
+  header's last four bytes). User mode compiles WinDivert's object for a WinDivert filter
+  (`Filter::windivert_object`, with its NUL), so the recursive compiler stays off the kernel
+  stack. `WD_RECV` returns it for REFLECT events; avulse's own `RECV` returns the text.
+- **`crates/windivert-compat/src/windows.rs`: WinDivert 2.2's whole API.**
+  - Open, Recv/RecvEx, Send/SendEx, Shutdown, Close, Set/GetParam.
+  - The helpers: hash, parse packet, parse and format IPv4/IPv6 addresses, checksums,
+    decrement TTL, compile, eval and format filter, and the byte-order ones, old spellings
+    included.
+  - Errors are `GetLastError` codes.
+  - Sends are synchronous; an `OVERLAPPED` is completed in place.
+  - `WinDivertClose` cancels the I/O in progress and waits for the calls waiting in the module.
+- **Drop-in installation.**
+  - `OpenOptions::service` (Windows): the DLL installs the driver as the `WinDivert` service,
+    as WinDivert's does. pydivert's `is_registered` checks that name, and it was the one
+    failure of the first run.
+  - A driver already running is used whatever its service is named; the service is still
+    installed.
+  - `OpenOptions::driver`: the DLL finds `avulse.sys`, else `WinDivert64.sys`, next to itself.
+    So jdivert, which extracts only WinDivert's two file names, needs no `AVULSE_DRIVER`.
+  - The default driver path is next to the module avulse is linked into, not the executable.
+- **The binding runs.** The bindings' own `windows` VMs: test signing, Driver Verifier on
+  `avulse.sys` and `WinDivert64.sys`, and the test certificate in Root and TrustedPublisher.
+  The two files replaced WinDivert's, untracked, and were removed afterwards.
+  - pydivert: its runner's steps with `UV_PYTHON=3.13`, because uv picked CPython 3.15, which
+    has no `pyyaml` wheel yet.
+  - jdivert: `generate-resources`, then the two files copied over `target/native-resources`,
+    then `verify`.
+  - `verifier` exits non-zero to ask for the reboot, so chain it with `;`, not `&&`. A
+    driver's name in Verifier is its file name.
+- **Left.** `FRAGMENTS` and `QUEUE_TIME` (from Step 25). The binding suites are not in CI (the
+  VMs only).
+
+The original plan of the step follows.
 
 **Where.** `crates/windivert-compat` on Windows:
 - the `WinDivert*` exports (Open, Recv/RecvEx, Send/SendEx, Shutdown, Close, Set/GetParam and
@@ -2216,7 +2279,7 @@ pre-release tag) passes, then the v0.0.1 tag publishes. The guide and README say
 - [x] Step 26: injection on Windows (send, reinject, impostors)
 - [x] Step 27: ETHERNET on Windows (NDIS LWF; VLAN and LSO restored on reinjection)
 - [x] Step 28: FLOW, SOCKET and REFLECT on Windows (ALE callouts, flow contexts, the handle table)
-- [ ] Step 29: `WinDivert.dll` and the binding suites on Windows (Phase 5 exit)
+- [x] Step 29: `WinDivert.dll` and the binding suites on Windows (Phase 5 exit)
 - [ ] Step 30: hardening and distribution (Driver Verifier, HVCI, CI build, signing)
 - [ ] Phase 6: macOS system extension
 - [ ] Release v0.0.1 (crates.io, tarballs; after Phases 5 and 6)

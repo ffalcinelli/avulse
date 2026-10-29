@@ -142,9 +142,11 @@ name = "avulse-windivert-compat"
 version = "0.0.0"
 dependencies = [
  "avulse",
+ "avulse-abi",
  "avulse-filter",
  "avulse-proto",
  "libc",
+ "windows-sys",
 ]
 
 [[package]]

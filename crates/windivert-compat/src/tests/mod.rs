@@ -151,7 +151,7 @@ fn checksum_vectors() {
         let mut p = vectors::PACKETS[i].to_vec();
         let (ok, set) = helpers::calc_checksums(&mut p, flags);
         let mut w = WdAddress::default();
-        w.set_checksums(set);
+        w.set_checksums(set.ip, set.tcp, set.udp);
         assert_eq!((ok, w.bits), (ret == 0, bits), "packet {i}, flags {flags}");
         let mut want = vectors::PACKETS[i].to_vec();
         for &(at, b) in diff {

@@ -17,9 +17,11 @@
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::io;
-use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
-use std::path::PathBuf;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::io::{
+    AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle,
+};
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -32,8 +34,8 @@ use avulse_proto::checksum::{self, Updated};
 use windows_sys::Win32::Foundation::{
     ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_NOT_SUPPORTED,
     ERROR_OPERATION_ABORTED, ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_DOES_NOT_EXIST,
-    ERROR_SERVICE_EXISTS, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
-    WAIT_TIMEOUT,
+    ERROR_SERVICE_EXISTS, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, HANDLE, HMODULE,
+    INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::if_nametoindex;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -41,6 +43,10 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::{
     CancelIoEx, DeviceIoControl, GetOverlappedResult, GetOverlappedResultEx, OVERLAPPED,
+};
+use windows_sys::Win32::System::LibraryLoader::{
+    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    GetModuleFileNameW, GetModuleHandleExW,
 };
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegOpenKeyExW,
@@ -53,10 +59,10 @@ use windows_sys::Win32::System::Services::{
 use windows_sys::Win32::System::Threading::CreateEventW;
 
 use super::{Backend, Capabilities, LayerSupport, Opened, Spec};
-use crate::{Address, Error, Flags, MAX_PACKET_LEN, Param, Result, Shutdown, Stats};
+use crate::{
+    Address, Error, Filter, Flags, MAX_PACKET_LEN, Param, Result, Shutdown, Stats, Syntax,
+};
 
-/// The kernel service's name.
-const SERVICE: &str = "avulse";
 /// The registry key of the lightweight filter's network component, which `netcfg` creates when it
 /// installs `avulse.inf` (the class of network services, and the INF's `NetCfgInstanceId`).
 const FILTER_KEY: &str = r"SYSTEM\CurrentControlSet\Control\Network\{4D36E974-E325-11CE-BFC1-08002BE10318}\{3c1d6e52-8b7a-4f19-a2d4-5e9b0c71f846}";
@@ -122,23 +128,49 @@ impl Drop for Service {
     }
 }
 
-/// Where `avulse.sys` is: `AVULSE_DRIVER`, or next to the executable.
-fn driver_path() -> io::Result<PathBuf> {
+/// Where `avulse.sys` is: `AVULSE_DRIVER`, the handle's `driver` option, or next to the module
+/// this code is in: the executable, or a library that links avulse (such as the WinDivert shim's
+/// DLL, as WinDivert's DLL looks for its driver next to itself).
+fn driver_path(option: Option<&Path>) -> io::Result<PathBuf> {
     if let Some(p) = std::env::var_os("AVULSE_DRIVER") {
         return Ok(p.into());
     }
-    Ok(std::env::current_exe()?.with_file_name("avulse.sys"))
+    if let Some(p) = option {
+        return Ok(p.to_path_buf());
+    }
+    let mut module: HMODULE = null_mut();
+    // SAFETY: an address in this module, and an out-parameter; the reference count is unchanged,
+    // and the module outlives the call.
+    let found = unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            driver_path as *const u16,
+            &mut module,
+        )
+    } != 0;
+    if !found {
+        return Ok(std::env::current_exe()?.with_file_name("avulse.sys"));
+    }
+    let mut name = vec![0u16; 32_768];
+    // SAFETY: a valid module and buffer.
+    let n = unsafe { GetModuleFileNameW(module, name.as_mut_ptr(), name.len() as u32) } as usize;
+    if n == 0 || n >= name.len() {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(&name[..n])).with_file_name("avulse.sys"))
 }
 
-/// Installs the kernel service if it is missing (unless `NO_INSTALL`), and starts it.
-fn start_driver(flags: Flags) -> Result<()> {
+/// Installs the kernel service `spec.service` if it is missing (unless `NO_INSTALL`), and starts
+/// it if `start`.
+fn start_driver(spec: &Spec<'_>, start: bool) -> Result<()> {
+    let flags = spec.flags;
     // SAFETY: plain call; the result is checked.
     let scm = unsafe { OpenSCManagerW(null(), null(), SC_MANAGER_ALL_ACCESS) };
     if scm.is_null() {
         return Err(last_error());
     }
     let scm = Service(scm);
-    let name = wide(SERVICE);
+    let name = wide(spec.service);
     let open = || {
         // SAFETY: valid handle and name.
         let s = unsafe { OpenServiceW(scm.0, name.as_ptr(), SERVICE_ALL_ACCESS) };
@@ -154,7 +186,7 @@ fn start_driver(flags: Flags) -> Result<()> {
                     "the avulse driver is not installed, and NO_INSTALL is set",
                 ));
             }
-            let path = driver_path().map_err(Error::Io)?;
+            let path = driver_path(spec.driver).map_err(Error::Io)?;
             if !path.is_file() {
                 return Err(Error::Io(io::Error::new(
                     io::ErrorKind::NotFound,
@@ -192,6 +224,9 @@ fn start_driver(flags: Flags) -> Result<()> {
         }
         None => return Err(last_error()),
     };
+    if !start {
+        return Ok(());
+    }
     // SAFETY: a valid service handle, no arguments.
     if unsafe { StartServiceW(service.0, 0, null()) } == 0
         && io::Error::last_os_error().raw_os_error() != Some(ERROR_SERVICE_ALREADY_RUNNING as i32)
@@ -214,6 +249,27 @@ fn filter_installed() -> bool {
     // SAFETY: the key just opened.
     unsafe { RegCloseKey(key) };
     true
+}
+
+/// Opens the driver's device for overlapped I/O.
+fn open_device() -> Result<HANDLE> {
+    let path = wide(ioctl::DEVICE_PATH);
+    // SAFETY: a NUL-terminated path and valid arguments.
+    let device = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+            null_mut(),
+        )
+    };
+    if device == INVALID_HANDLE_VALUE {
+        return Err(last_error());
+    }
+    Ok(device)
 }
 
 /// An interface index from its name: a number, or what `if_nametoindex` knows.
@@ -303,23 +359,20 @@ impl Handle {
             .iter()
             .map(|n| interface_index(n))
             .collect::<Result<Vec<_>>>()?;
-        start_driver(spec.flags)?;
-        let path = wide(ioctl::DEVICE_PATH);
-        // SAFETY: a NUL-terminated path and valid arguments.
-        let device = unsafe {
-            CreateFileW(
-                path.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
-                0,
-                null(),
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
-                null_mut(),
-            )
+        // A driver already running serves the handle, whatever its service is named; the
+        // service is still installed under this name, unless NO_INSTALL.
+        let device = match open_device() {
+            Ok(d) => {
+                if !spec.flags.contains(Flags::NO_INSTALL) {
+                    start_driver(spec, false)?;
+                }
+                d
+            }
+            Err(_) => {
+                start_driver(spec, true)?;
+                open_device()?
+            }
         };
-        if device == INVALID_HANDLE_VALUE {
-            return Err(last_error());
-        }
         let h = Handle {
             // SAFETY: a fresh handle we own.
             device: unsafe { OwnedHandle::from_raw_handle(device as RawHandle) },
@@ -330,6 +383,17 @@ impl Handle {
                 ov: Overlapped::new()?,
             }),
         };
+        // What a WinDivert REFLECT receive reports for this handle: WinDivert's own object for a
+        // WinDivert filter, as WinDivert's driver does.
+        let object = match spec.syntax {
+            Syntax::WinDivert => Filter::windivert_object(spec.source, spec.layer)
+                .map(|mut o| {
+                    o.push('\0');
+                    o.into_bytes()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
         let req = OpenRequest {
             layer: spec.layer,
             priority: spec.priority,
@@ -338,6 +402,7 @@ impl Handle {
             interfaces,
             filter: spec.source,
             syntax: spec.syntax,
+            windivert_object: &object,
         };
         match h.call(ioctl::OPEN, &req.encode(), &mut []) {
             // The driver is not bound to the adapters as a filter (STATUS_NOT_SUPPORTED).
@@ -563,6 +628,10 @@ impl Opened for Handle {
         let mut out = [0u8; 64];
         self.call(ioctl::STATS, &[], &mut out)?;
         ioctl::decode_stats(&out).map_err(|_| Error::Io(io::Error::other("malformed statistics")))
+    }
+
+    fn device(&self) -> Option<BorrowedHandle<'_>> {
+        Some(self.device.as_handle())
     }
 
     fn close(self: Box<Self>) -> Result<()> {

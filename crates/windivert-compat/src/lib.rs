@@ -7,16 +7,22 @@
 //! `WINDIVERT_ADDRESS`. pydivert and jdivert load it in place of libebpfdivert
 //! (`PYDIVERT_EBPFDIVERT_LIB`, `-Debpfdivert.local`).
 //!
-//! The parts that do not depend on the platform are public, for the tests and for the Windows
-//! exports to come: [`WdAddress`] and its conversion to [`avulse::Address`], and WinDivert's
-//! helpers ([`helpers`]), which give WinDivert's results byte for byte.
+//! On Windows the library is built as `avulse_windivert.dll` and installed as `WinDivert.dll` (or
+//! `WinDivert64.dll`, the name the bindings load), next to `avulse.sys`: it exports WinDivert
+//! 2.2's own API (`windivert.h`), overlapped receives included.
+//!
+//! The parts that do not depend on the platform are public, for the tests: [`WdAddress`] and its
+//! conversion to [`avulse::Address`], and WinDivert's helpers ([`helpers`]), which give
+//! WinDivert's results byte for byte.
 
-mod address;
 #[cfg(target_os = "linux")]
 pub mod ebpfdivert;
 pub mod helpers;
 mod packet;
 #[cfg(test)]
 mod tests;
+#[cfg(windows)]
+#[allow(non_snake_case)]
+pub mod windows;
 
-pub use address::{BadAddress, CONTEXT_KEPT, WdAddress};
+pub use avulse_abi::windivert::{BadAddress, CONTEXT_KEPT, WdAddress};

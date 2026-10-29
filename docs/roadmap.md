@@ -282,7 +282,7 @@ Exit: both suites pass. The binding suites become a free cross-language conforma
 4. Ship the compat `WinDivert.dll` drop-in.
 
 Progress (steps in `docs/implementation-plan.md`, Steps 22 to 30): the interpreter is ready for the kernel stack
-(Step 22: a register file the caller provides, borrowed operands, about twice as fast, frames checked in CI); Step 23: the ABI crate and the driver's skeleton; Steps 24 to 26: the user-mode backend, the NETWORK layers and injection through WFP; Step 27: the ETHERNET layer through the NDIS lightweight filter, with VLAN tags and large sends restored on reinjection; Step 28: FLOW, SOCKET (refusing all four calls) and REFLECT, in the driver).
+(Step 22: a register file the caller provides, borrowed operands, about twice as fast, frames checked in CI); Step 23: the ABI crate and the driver's skeleton; Steps 24 to 26: the user-mode backend, the NETWORK layers and injection through WFP; Step 27: the ETHERNET layer through the NDIS lightweight filter, with VLAN tags and large sends restored on reinjection; Step 28: FLOW, SOCKET (refusing all four calls) and REFLECT, in the driver; Step 29: the drop-in `WinDivert.dll`, against which pydivert's and jdivert's Windows suites pass unchanged, under Driver Verifier: the exit, but for the attestation signature).
 
 Exit: the pydivert and jdivert Windows suites pass against it, and the driver is attestation-signed.
 

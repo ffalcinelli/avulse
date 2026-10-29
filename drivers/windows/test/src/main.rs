@@ -91,6 +91,7 @@ impl Device {
             interfaces: vec![],
             filter: src,
             syntax,
+            windivert_object: &[],
         };
         self.ioctl(ioctl::OPEN, &req.encode(), 0).map(drop)
     }
@@ -159,6 +160,7 @@ fn main() -> ExitCode {
         interfaces: vec![],
         filter: "tcp",
         syntax: Syntax::Native,
+        windivert_object: &[],
     };
     let got = d.ioctl(ioctl::OPEN, &bad.encode(), 0);
     c.check(

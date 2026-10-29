@@ -33,6 +33,8 @@ pub struct OpenOptions {
     flags: Flags,
     syntax: Syntax,
     interfaces: Vec<String>,
+    service: Option<String>,
+    driver: Option<std::path::PathBuf>,
 }
 
 impl OpenOptions {
@@ -71,6 +73,23 @@ impl OpenOptions {
         self
     }
 
+    /// On Windows, the name of the kernel service the driver is installed as, if it is not
+    /// installed yet (`avulse` by default). The WinDivert shim uses `WinDivert`, as WinDivert's
+    /// own DLL does. Whatever the name, a driver already running is used as it is. Other
+    /// platforms ignore it.
+    pub fn service(&mut self, name: impl Into<String>) -> &mut Self {
+        self.service = Some(name.into());
+        self
+    }
+
+    /// On Windows, where `avulse.sys` is, to install it from (`AVULSE_DRIVER` takes precedence).
+    /// By default it is next to the module avulse is linked into: the executable, or a library
+    /// such as the WinDivert shim's DLL. Other platforms ignore it.
+    pub fn driver(&mut self, path: impl Into<std::path::PathBuf>) -> &mut Self {
+        self.driver = Some(path.into());
+        self
+    }
+
     /// Opens a handle at `layer` for the packets or events `filter` matches.
     pub fn open(&self, filter: &str, layer: Layer) -> Result<Handle> {
         self.open_with(backend::platform(), filter, layer)
@@ -105,6 +124,8 @@ impl OpenOptions {
             flags: self.flags,
             interfaces: &self.interfaces,
             params,
+            service: self.service.as_deref().unwrap_or("avulse"),
+            driver: self.driver.as_deref(),
         })?;
         Ok(Handle {
             inner: Some(opened),
@@ -394,6 +415,17 @@ impl std::fmt::Debug for Handle {
             .field("priority", &self.priority)
             .field("flags", &self.flags)
             .finish_non_exhaustive()
+    }
+}
+
+impl Handle {
+    /// The handle's file of the avulse driver's device (`\\.\Avulse`), opened for overlapped
+    /// I/O, on Windows. It is what the WinDivert shim hands to WinDivert's callers, which wait on
+    /// it with `GetOverlappedResult` and `CancelIoEx`; requests sent through it besides avulse's
+    /// own receive go around [`recv`](Handle::recv) and its queue.
+    #[cfg(windows)]
+    pub fn device(&self) -> Option<std::os::windows::io::BorrowedHandle<'_>> {
+        self.inner().device()
     }
 }
 

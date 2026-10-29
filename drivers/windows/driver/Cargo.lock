@@ -75,6 +75,7 @@ dependencies = [
  "avulse-filter",
  "avulse-proto",
  "bindgen",
+ "cc",
  "wdk",
  "wdk-alloc",
  "wdk-build",

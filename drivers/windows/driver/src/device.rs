@@ -158,6 +158,29 @@ unsafe extern "C" fn dispatch(
                     p.OutputBufferLength as usize,
                 )
             };
+            if code == ioctl::WD_RECV {
+                // METHOD_OUT_DIRECT: the input is in the system buffer.
+                // SAFETY: the I/O manager allocated it for this request, `in_len` bytes long.
+                let input = unsafe {
+                    let buf = (*irp).AssociatedIrp.SystemBuffer.cast::<u8>();
+                    if buf.is_null() {
+                        &[][..]
+                    } else {
+                        slice::from_raw_parts(buf, in_len)
+                    }
+                };
+                let status = match (handle::get(file), ioctl::WdRecvRequest::decode(input)) {
+                    (Ok(h), _) if h.flags.contains(avulse_abi::Flags::SEND_ONLY) => {
+                        sys::STATUS_INVALID_DEVICE_REQUEST
+                    }
+                    // SAFETY: a WD_RECV IRP for `file`, ours, in the caller's context.
+                    (Ok(_), Ok(req)) => return unsafe { rx::wd_recv(&file.rx, irp, &req) },
+                    (Ok(_), Err(_)) => sys::STATUS_INVALID_PARAMETER,
+                    (Err(s), _) => s,
+                };
+                // SAFETY: the IRP is ours.
+                return unsafe { sys::complete(irp, status, 0) };
+            }
             if code == ioctl::RECV {
                 let status = match handle::get(file) {
                     Ok(h) if h.flags.contains(avulse_abi::Flags::SEND_ONLY) => {

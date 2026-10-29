@@ -14,6 +14,7 @@
 //! | [`GET_PARAM`] | [`Param::index`], `u32` | value, `u64` |
 //! | [`STATS`] | nothing | [`Stats`], eight `u64`s |
 //! | [`EVAL`] | one [`Record`] | 1 if the handle's filter matches it, else 0, `u32` |
+//! | [`WD_RECV`] | [`WdRecvRequest`] | packets, back to back, at least one |
 //!
 //! A handle is a file object of the device: `OPEN` once after creating it, then the others. Closing
 //! the file (or the process exiting) closes the handle.
@@ -29,7 +30,7 @@ use crate::{ADDRESS_VERSION, Address, CONTEXT_LEN, Context, Flags, Param, Stats,
 /// The control device, for `CreateFile`.
 pub const DEVICE_PATH: &str = r"\\.\Avulse";
 /// The version of this protocol, which [`OpenRequest`] carries. The driver refuses others.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// `FILE_DEVICE_NETWORK`.
 const DEVICE_TYPE: u32 = 0x12;
@@ -60,6 +61,12 @@ pub const STATS: u32 = ctl_code(0x927, METHOD_BUFFERED);
 /// Runs the handle's filter on a packet and its address, in the kernel, as the packet hooks do:
 /// what the tests compare with the evaluator. It changes nothing.
 pub const EVAL: u32 = ctl_code(0x928, METHOD_BUFFERED);
+/// Receives as WinDivert's driver does, for the WinDivert shim (`WinDivertRecvEx`): the packets
+/// go to the output buffer, back to back, and their addresses, as WinDivert's 80-byte
+/// [`WdAddress`](crate::windivert::WdAddress), to the caller's own buffer, which the driver locks.
+/// So an overlapped request completes on its own, whenever a packet comes, and the caller's
+/// `GetOverlappedResult` gives the packets' length.
+pub const WD_RECV: u32 = ctl_code(0x929, METHOD_OUT_DIRECT);
 
 /// Why bytes from the other side are refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,12 +221,13 @@ pub fn decode_address(b: &[u8]) -> Result<Address, Malformed> {
 }
 
 /// What [`OPEN`] carries: the handle's layer, priority and flags, the filter compiled to bytecode
-/// (which the driver verifies), the interfaces to capture on, and the filter's text and syntax
-/// (for REFLECT).
+/// (which the driver verifies), the interfaces to capture on, the filter's text and syntax (for
+/// REFLECT), and what WinDivert's REFLECT reports as the handle's data.
 ///
 /// The layout is a 32-byte header (version `u32`, layer `u8`, syntax `u8`, two zero bytes, flags
-/// `u64`, priority `i16`, interface count `u16`, program length `u32`, filter length `u32`, four
-/// zero bytes), then the interface indexes (`u32` each), the program and the filter text.
+/// `u64`, priority `i16`, interface count `u16`, program length `u32`, filter length `u32`, the
+/// WinDivert data's length `u32`), then the interface indexes (`u32` each), the program, the
+/// filter text and the WinDivert data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenRequest<'a> {
     /// The layer.
@@ -236,6 +244,10 @@ pub struct OpenRequest<'a> {
     pub filter: &'a str,
     /// Its language.
     pub syntax: Syntax,
+    /// The handle's data in a REFLECT event that [`WD_RECV`] returns: WinDivert's compiled filter
+    /// object, with its NUL, for a WinDivert filter (`Filter::windivert_object`); empty for a
+    /// native one, whose text is reported instead.
+    pub windivert_object: &'a [u8],
 }
 
 const OPEN_HEADER: usize = 32;
@@ -244,7 +256,11 @@ impl<'a> OpenRequest<'a> {
     /// The request's bytes.
     pub fn encode(&self) -> Vec<u8> {
         let mut b = Vec::with_capacity(
-            OPEN_HEADER + 4 * self.interfaces.len() + self.program.len() + self.filter.len(),
+            OPEN_HEADER
+                + 4 * self.interfaces.len()
+                + self.program.len()
+                + self.filter.len()
+                + self.windivert_object.len(),
         );
         b.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
         b.extend_from_slice(&[self.layer as u8, self.syntax as u8, 0, 0]);
@@ -253,12 +269,13 @@ impl<'a> OpenRequest<'a> {
         b.extend_from_slice(&(self.interfaces.len() as u16).to_le_bytes());
         b.extend_from_slice(&(self.program.len() as u32).to_le_bytes());
         b.extend_from_slice(&(self.filter.len() as u32).to_le_bytes());
-        b.extend_from_slice(&[0; 4]);
+        b.extend_from_slice(&(self.windivert_object.len() as u32).to_le_bytes());
         for i in &self.interfaces {
             b.extend_from_slice(&i.to_le_bytes());
         }
         b.extend_from_slice(self.program);
         b.extend_from_slice(self.filter.as_bytes());
+        b.extend_from_slice(self.windivert_object);
         b
     }
 
@@ -275,10 +292,11 @@ impl<'a> OpenRequest<'a> {
         let priority = r.u16()? as i16;
         let count = usize::from(r.u16()?);
         let (program_len, filter_len) = (r.u32()? as usize, r.u32()? as usize);
-        r.take(4)?;
+        let object_len = r.u32()? as usize;
         let interfaces = (0..count).map(|_| r.u32()).collect::<Result<_, _>>()?;
         let program = r.take(program_len)?;
         let filter = core::str::from_utf8(r.take(filter_len)?).map_err(|_| Malformed::Value)?;
+        let windivert_object = r.take(object_len)?;
         if !r.b.is_empty() {
             return Err(Malformed::Value);
         }
@@ -290,6 +308,7 @@ impl<'a> OpenRequest<'a> {
             interfaces,
             filter,
             syntax,
+            windivert_object,
         })
     }
 }
@@ -361,6 +380,49 @@ impl<'a> Iterator for Records<'a> {
             self.r.b = &[];
         }
         Some(record)
+    }
+}
+
+/// [`WD_RECV`]'s input: where the driver writes the addresses.
+///
+/// The layout is the addresses' buffer (`u64`), the pointer to the `UINT` that receives their
+/// length in bytes (`u64`, 0 for none), and how many addresses the buffer holds (`u32`), then four
+/// zero bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WdRecvRequest {
+    /// The caller's buffer of addresses: at least `count` of them.
+    pub addrs: u64,
+    /// The caller's `UINT` for the addresses' length in bytes, or 0.
+    pub addr_len: u64,
+    /// How many addresses `addrs` holds, at least 1: at most that many packets are returned.
+    pub count: u32,
+}
+
+impl WdRecvRequest {
+    /// The encoded length.
+    pub const LEN: usize = 24;
+
+    /// The request's bytes.
+    pub fn encode(&self) -> [u8; Self::LEN] {
+        let mut b = [0; Self::LEN];
+        b[..8].copy_from_slice(&self.addrs.to_le_bytes());
+        b[8..16].copy_from_slice(&self.addr_len.to_le_bytes());
+        b[16..20].copy_from_slice(&self.count.to_le_bytes());
+        b
+    }
+
+    /// The request in `b`, checked: a buffer and at least one address.
+    pub fn decode(b: &[u8]) -> Result<Self, Malformed> {
+        let mut r = Reader { b };
+        let req = WdRecvRequest {
+            addrs: r.u64()?,
+            addr_len: r.u64()?,
+            count: r.u32()?,
+        };
+        if r.u32()? != 0 || !r.b.is_empty() || req.addrs == 0 || req.count == 0 {
+            return Err(Malformed::Value);
+        }
+        Ok(req)
     }
 }
 
