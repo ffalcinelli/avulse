@@ -10,6 +10,7 @@ use std::os::fd::BorrowedFd;
 use std::time::Duration;
 
 use avulse_filter::{Filter, Layer};
+use avulse_proto::{Link, Packet};
 
 use crate::{Address, Error, Flags, Param, Result, Shutdown, Stats, Syntax};
 
@@ -98,6 +99,31 @@ impl Backend for Unavailable {
         Err(crate::Error::Unsupported(
             "there is no backend for this platform yet",
         ))
+    }
+}
+
+/// The length of an Ethernet header.
+const ETH_LEN: usize = 14;
+
+/// Where the IP header of `packet` starts, after checking that the packet suits the layer:
+/// `None` for a frame that carries no IP packet (ETHERNET).
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
+pub(crate) fn ip_offset(packet: &[u8], layer: Layer) -> Result<Option<usize>> {
+    if layer == Layer::Ethernet {
+        if packet.len() < ETH_LEN {
+            return Err(Error::InvalidArgument(
+                "the frame is shorter than an Ethernet header",
+            ));
+        }
+        let p = Packet::parse(packet, Link::Ethernet);
+        return Ok(p
+            .l3_offset()
+            .filter(|_| p.ipv4().is_some() || p.ipv6().is_some()));
+    }
+    match packet[0] >> 4 {
+        4 if packet.len() >= 20 => Ok(Some(0)),
+        6 if packet.len() >= 40 => Ok(Some(0)),
+        _ => Err(Error::InvalidArgument("not an IPv4 or IPv6 packet")),
     }
 }
 

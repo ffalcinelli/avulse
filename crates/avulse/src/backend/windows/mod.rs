@@ -5,6 +5,11 @@
 //! `avulse` kernel service from `avulse.sys`, next to the executable or at `AVULSE_DRIVER`, unless
 //! [`Flags::NO_INSTALL`] is set, and starts it. That needs Administrator rights.
 //!
+//! The ETHERNET layer also needs the driver installed as an NDIS lightweight filter, bound to the
+//! adapters (`netcfg -l avulse.inf -c s -i avulse`, as Administrator). Opening a handle never does
+//! that, because binding a filter restarts every adapter; [`capabilities`](Backend::capabilities)
+//! reports the layer only once it is installed.
+//!
 //! Receiving keeps one `RECV` request in flight per call, and waits for it with a timeout; a
 //! request that times out is cancelled (`CancelIoEx`). The driver returns as many records as fit,
 //! and the ones `recv` does not take yet wait in a queue here.
@@ -25,9 +30,10 @@ use avulse_filter::bytecode::EncodeError;
 use avulse_proto::Link;
 use avulse_proto::checksum::{self, Updated};
 use windows_sys::Win32::Foundation::{
-    ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_OPERATION_ABORTED,
-    ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_EXISTS,
-    GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+    ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_NOT_SUPPORTED,
+    ERROR_OPERATION_ABORTED, ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_DOES_NOT_EXIST,
+    ERROR_SERVICE_EXISTS, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::if_nametoindex;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -35,6 +41,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::{
     CancelIoEx, DeviceIoControl, GetOverlappedResult, GetOverlappedResultEx, OVERLAPPED,
+};
+use windows_sys::Win32::System::Registry::{
+    HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegOpenKeyExW,
 };
 use windows_sys::Win32::System::Services::{
     CloseServiceHandle, CreateServiceW, OpenSCManagerW, OpenServiceW, SC_HANDLE,
@@ -48,6 +57,9 @@ use crate::{Address, Error, Flags, MAX_PACKET_LEN, Param, Result, Shutdown, Stat
 
 /// The kernel service's name.
 const SERVICE: &str = "avulse";
+/// The registry key of the lightweight filter's network component, which `netcfg` creates when it
+/// installs `avulse.inf` (the class of network services, and the INF's `NetCfgInstanceId`).
+const FILTER_KEY: &str = r"SYSTEM\CurrentControlSet\Control\Network\{4D36E974-E325-11CE-BFC1-08002BE10318}\{3c1d6e52-8b7a-4f19-a2d4-5e9b0c71f846}";
 /// What one `RECV` may return: room for a few of the largest packets.
 const RECV_BUFFER: usize = 4 * (MAX_PACKET_LEN + 256);
 
@@ -56,7 +68,11 @@ pub(crate) struct Windows;
 impl Backend for Windows {
     fn capabilities(&self) -> Capabilities {
         let mut c = Capabilities::NONE;
-        for layer in [Layer::Network, Layer::NetworkForward] {
+        let ethernet = filter_installed().then_some(Layer::Ethernet);
+        for layer in [Layer::Network, Layer::NetworkForward]
+            .into_iter()
+            .chain(ethernet)
+        {
             c.layers[layer as usize] = LayerSupport {
                 open: true,
                 divert: true,
@@ -170,6 +186,21 @@ fn start_driver(flags: Flags) -> Result<()> {
     Ok(())
 }
 
+/// Whether the driver is installed as a lightweight filter, which the ETHERNET layer needs.
+fn filter_installed() -> bool {
+    let path = wide(FILTER_KEY);
+    let mut key: HKEY = null_mut();
+    // SAFETY: a NUL-terminated path and an out-parameter.
+    if unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.as_ptr(), 0, KEY_READ, &mut key) }
+        != ERROR_SUCCESS
+    {
+        return false;
+    }
+    // SAFETY: the key just opened.
+    unsafe { RegCloseKey(key) };
+    true
+}
+
 /// An interface index from its name: a number, or what `if_nametoindex` knows.
 fn interface_index(name: &str) -> Result<u32> {
     if let Ok(i) = name.parse() {
@@ -225,6 +256,7 @@ struct Rx {
 
 struct Handle {
     device: OwnedHandle,
+    layer: Layer,
     rx: Mutex<Rx>,
 }
 
@@ -278,6 +310,7 @@ impl Handle {
         let h = Handle {
             // SAFETY: a fresh handle we own.
             device: unsafe { OwnedHandle::from_raw_handle(device as RawHandle) },
+            layer: spec.layer,
             rx: Mutex::new(Rx {
                 buf: vec![0; RECV_BUFFER],
                 queue: VecDeque::new(),
@@ -293,7 +326,18 @@ impl Handle {
             filter: spec.source,
             syntax: spec.syntax,
         };
-        h.call(ioctl::OPEN, &req.encode(), &mut [])?;
+        match h.call(ioctl::OPEN, &req.encode(), &mut []) {
+            // The driver is not bound to the adapters as a filter (STATUS_NOT_SUPPORTED).
+            Err(Error::Io(e))
+                if spec.layer == Layer::Ethernet
+                    && e.raw_os_error() == Some(ERROR_NOT_SUPPORTED as i32) =>
+            {
+                return Err(Error::Unsupported(
+                    "the ETHERNET layer needs the avulse filter installed (netcfg -l avulse.inf -c s -i avulse)",
+                ));
+            }
+            r => r?,
+        };
         for p in Param::ALL {
             if spec.params[p.index()] != p.default_value() {
                 h.call(
@@ -304,6 +348,15 @@ impl Handle {
             }
         }
         Ok(h)
+    }
+
+    /// What the handle's packets start with.
+    fn link(&self) -> Link {
+        if self.layer == Layer::Ethernet {
+            Link::Ethernet
+        } else {
+            Link::Ip
+        }
     }
 
     fn raw(&self) -> HANDLE {
@@ -391,7 +444,14 @@ impl Handle {
         for r in Record::decode_all(&buf[..n as usize]) {
             let r =
                 r.map_err(|_| Error::Io(io::Error::other("a malformed record from the driver")))?;
-            queue.push_back((r.data.to_vec(), r.addr));
+            // Which checksums are right, as on Linux: those that are not get computed when the
+            // packet is sent back.
+            let mut addr = r.addr;
+            let valid = checksum::verify(r.data, self.link());
+            addr.ip_checksum = valid.ipv4;
+            addr.tcp_checksum = valid.tcp;
+            addr.udp_checksum = valid.udp;
+            queue.push_back((r.data.to_vec(), addr));
         }
         Ok(())
     }
@@ -426,11 +486,20 @@ impl Opened for Handle {
     }
 
     /// WinDivert's rules, as on Linux: an impostor loses a hop of TTL, and the checksums whose
-    /// address flags are clear are computed; then the driver injects the packet.
+    /// address flags are clear are computed; then the driver injects the packet. At the ETHERNET
+    /// layer the frame goes out of, or in through, the adapter `if_idx` names.
     fn send(&self, packet: &[u8], addr: &Address) -> Result<usize> {
+        if self.layer == Layer::Ethernet && addr.if_idx == 0 {
+            return Err(Error::InvalidArgument(
+                "an ETHERNET packet needs its interface (if_idx)",
+            ));
+        }
+        let at = super::ip_offset(packet, self.layer)?;
         let mut pkt = packet.to_vec();
-        if addr.impostor && !pkt.is_empty() {
-            super::decrement_ttl(&mut pkt)?;
+        if addr.impostor
+            && let Some(at) = at
+        {
+            super::decrement_ttl(&mut pkt[at..])?;
         }
         let fix = Updated {
             ipv4: !addr.ip_checksum,
@@ -438,7 +507,7 @@ impl Opened for Handle {
             udp: !addr.udp_checksum,
             ..Updated::default()
         };
-        checksum::recalculate_only(&mut pkt, Link::Ip, fix);
+        checksum::recalculate_only(&mut pkt, self.link(), fix);
         let mut input = Vec::with_capacity(Record::encoded_len(pkt.len()));
         Record {
             addr: *addr,

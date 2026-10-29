@@ -119,6 +119,22 @@ the driver from `avulse.sys`, next to the executable or at `AVULSE_DRIVER`, unle
 `Flags::NO_INSTALL` is set; that needs Administrator rights. Loopback packets are seen once,
 outbound, as in WinDivert. `capabilities()` says what works.
 
+- **The `Ethernet` layer** needs the driver installed as an NDIS lightweight filter, bound to the
+  Ethernet adapters, once, as Administrator: `netcfg -l avulse.inf -c s -i avulse` (and
+  `netcfg -u avulse` to remove it). `Handle::open` never does this itself, because binding a
+  filter restarts every adapter. Until it is installed, `capabilities()` leaves the layer out
+  and opening a handle there fails with `Error::Unsupported`. Handles see every frame of their
+  adapters, non-IP included. Sending needs `if_idx`: the frame goes out of that adapter, or in
+  through it.
+- **What the card does.** A VLAN tag the network card inserts or removes (802.1Q offload) is
+  put back into the frame, and into `vlan`/`vlan_tci`. A frame sent back on the same adapter
+  with its `context` gets its tag taken out again. Large TCP sends (LSO), which the card
+  segments, are captured whole and sent back as large sends; other frames must fit the
+  adapter's MTU.
+- **Impostors** are tracked per layer. A packet that a `Network` handle sends is not an
+  impostor at the `Ethernet` layer, and the other way round. On Linux, both layers share the TC
+  hooks and their marks.
+
 ## On Linux
 
 The Linux backend runs eBPF programs on the traffic-control (TC) hooks of each interface. Opening

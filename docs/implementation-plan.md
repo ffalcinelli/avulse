@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-28, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5: Steps 22 to 26 done, next Step 27)
+## Status (2026-10-29, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5: Steps 22 to 27 done, next Step 28)
 
 | Area | State |
 | --- | --- |
@@ -20,7 +20,7 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
 | `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Steps 15 to 17: the FLOW, SOCKET and REFLECT layers (`events.rs`, `reflect.rs`), SOCKET refusing binds and connects in the kernel; `Address` version 2 (216 bytes) with the process name. Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
 | `crates/capi` (`avulse-capi`) | Step 18: the C ABI, `libavulse.so`/`.a`, header `include/avulse.h` (hand-written, layout pinned by asserts), 20 functions, tested from C (`tests/c.rs`, `tests/c/abi.c`). |
-| `drivers/windows` | Step 23: `avulse.sys` (WDM, Rust, outside the workspace): the control device, handles opened with verified bytecode, parameters, statistics, shutdown, and `EVAL`, a test IOCTL that runs a handle's filter in the kernel. `test/` passes 243 checks in the `windows` VM under Driver Verifier, WinDivert's filter vectors included. No packet hook yet. |
+| `drivers/windows` | Step 23: `avulse.sys` (WDM, Rust, outside the workspace): the control device, handles opened with verified bytecode, parameters, statistics, shutdown, and `EVAL`, a test IOCTL that runs a handle's filter in the kernel. `test/` passes 243 checks in the `windows` VM under Driver Verifier, WinDivert's filter vectors included. Steps 25 and 26: WFP callouts divert, sniff, drop and inject at the NETWORK layers. Step 27: the NDIS lightweight filter (`lwf.rs`) gives the ETHERNET layer, with VLAN tags and large sends restored. `capture_windows.rs` (20 tests) passes with the driver as a plain service and installed through `netcfg`. |
 | `crates/abi` (`avulse-abi`) | Step 23: the types shared with the driver and the C ABI (`Address`, `Flags`, `Param`, `Shutdown`, `Stats`, `Syntax`), and `ioctl`, the driver protocol. `no_std`. |
 | `crates/windivert-compat` | Steps 19 to 21: `libavulse_windivert.so`, libebpfdivert's C API over avulse (21 `ebpfdivert_*` exports, negative errno values, WinDivert's 80-byte address with avulse's reinjection context in its union). WinDivert's helpers (hash, checksums, `eval_filter` with `random*`) agree with WinDivert's own code on generated vectors (`scripts/gen_compat_vectors.py`). REFLECT's data is WinDivert's serialized filter object (`Filter::windivert_object`, matching WinDivert's compiler on 230 filters). 15 unit tests, the exported-symbol test, and `tests/capture.rs` (6, `AVULSE_BPF=1`) on 6.8 and 5.15. pydivert's suite (155) and jdivert's (334, JNA and Panama) pass against it unchanged. `publish = false`. |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
@@ -1969,7 +1969,78 @@ The original plan of the step follows.
 **Tests.** Reinject diverted pings unchanged and modified, inject built packets both ways,
 loopback, two handles at different priorities, and no loop.
 
-### Step 27: The ETHERNET layer
+### Step 27: The ETHERNET layer (done; offloaded VLAN tags untested)
+
+**Outcome.** ETHERNET handles on Windows capture every frame of their adapters, and divert,
+sniff, drop, reinject and inject frames both ways. In the `windows` VM, under Driver Verifier,
+the driver test (243) and `capture_windows.rs` (20 tests) pass in two phases: first with the
+driver as a plain service, where ETHERNET is refused, then installed with `netcfg` as a
+lightweight filter, which also serves the WFP layers. Both phases passed twice in a row, with
+`netcfg` installing and removing the filter each time and no crash dump.
+
+- **`drivers/windows/driver/src/lwf.rs`.**
+  - Registration happens in `DriverEntry`, after WFP. It fails without the INF install, which
+    is not fatal: ETHERNET opens then get `STATUS_NOT_SUPPORTED` (`Error::Unsupported`), and
+    the other layers work.
+  - One module per adapter, with `if_idx = BaseMiniportIfIndex`, which is the index WFP and IP
+    Helper use. Pause waits for the module's own sends and indications to come back.
+  - A priority-sorted snapshot of the ETHERNET handles (`Arc<[Arc<Open>]>`, cloned per chain)
+    runs on every NET_BUFFER (`process`). Handles of equal priority run in open order.
+  - An NBL whose frames all pass goes on untouched. Otherwise it is completed (send) or
+    returned (receive), and the frames that passed go on as copies.
+  - With `NDIS_RECEIVE_FLAGS_RESOURCES`, the chain is never relinked: once a frame is taken,
+    the passing frames go up as copies in an indication of the filter's own.
+  - The filter's own NBLs come from a pool of its own, because WFP-injected NBLs reach the
+    filter too. The completion handlers recognise them by `NdisPoolHandle` and free them,
+    finding the copy through the MDL (`MappedSystemVa`, `ByteCount`).
+- **Impostors.** The filter never sees its own sends and indications. `SEND` therefore runs an
+  injected frame through the handles below the sender's priority first, as impostors, and they
+  may take it. This is Linux's mark rule inside the module. Impostors are per layer: a
+  NETWORK injection is not an impostor at ETHERNET, and the other way round.
+- **Out-of-band info.** The `NetBufferListInfo` indexes are hard-coded in `sys.rs` (checksum
+  0, LSO 2, 802.1Q 4).
+  - An offloaded 802.1Q tag is put back into the frame the handles see (through the
+    processor's copy buffer, now 4 bytes longer) and into `vlan`/`vlan_tci`.
+  - `avulse_abi::ioctl::EthernetContext` (marker, flags, `if_idx`, LSO MSS) in the address's
+    context takes the tag out of the frame again on reinjection to the same adapter.
+  - Large sends (LSOv1 and v2) are captured whole. On reinjection they get their LSO request
+    back, and `checksum::tcp_large_send` (new in `avulse-proto`) writes the partial TCP
+    checksum.
+  - An absorbed LSOv1 send reports its TCP payload in the completion.
+  - Copies of passing frames keep the checksum, LSO and tag requests.
+- **User mode.**
+  - `capabilities()` lists ETHERNET when the filter's NetCfg key exists
+    (`HKLM\SYSTEM\CurrentControlSet\Control\Network\{4D36E974-…}\{3C1D6E52-8B7A-4F19-A2D4-5E9B0C71F846}`,
+    confirmed in the VM).
+  - `recv` sets the checksum flags with `checksum::verify`, as Linux does, so a modified
+    packet needs its flag cleared (the `reinject` test does that now).
+  - `send` takes frames at ETHERNET, with `if_idx` required. `ip_offset` moved to
+    `backend/mod.rs`, shared with Linux.
+  - `Handle::open` never runs `netcfg`: binding a filter restarts every adapter.
+- **Also:** the WFP hooks now honour the handle's interfaces (`Open::captures_on`), which they
+  ignored before. `Open::deliver` is shared by both hooks.
+- **Deviation:** there is no MTU check on injection. NDIS does not pass the MTU at attach
+  (`NDIS_FILTER_ATTACH_PARAMETERS` has no `MtuSize`), and querying it takes an OID request, so
+  the card drops an oversized frame.
+- **Tests** (`capture_windows.rs`, `AVULSE_ETHERNET=1`; on the NAT adapter, with narrow
+  filters, as WinRM shares it):
+  - ETHERNET is refused without the filter;
+  - pings to the gateway are sniffed both ways, and not on another interface;
+  - outbound echo requests are dropped;
+  - ARP is diverted and reinjected both ways, and the gateway still resolves;
+  - a built ARP request goes out (a lower handle sees it as an impostor, then the gateway's
+    reply);
+  - an ARP request injected inbound is answered by Windows;
+  - an in-band 802.1Q tag is seen with `vlan.id`/`vlan.priority`;
+  - `lso_reinject` (`AVULSE_TCP_PEER`, `drivers/windows/scripts/tcp-sink.py` on the host): a
+    4 MiB upload diverted and reinjected frame by frame arrives whole, with frames of up to
+    46,774 bytes sent back as large sends.
+- **Left.**
+  - Offloaded VLAN tags: the VM's adapter does not offload them, so restoring and stripping the
+    tag ran only on frames without one.
+  - NBLs that mix taken and passing frames: tcpip did not send any in the tests.
+
+The original plan of the step follows.
 
 **Where.** `avulse-driver`'s `lwf.rs`:
 - per handle, the frames of its adapters, from the send and receive NBL hooks;
@@ -2080,7 +2151,7 @@ pre-release tag) passes, then the v0.0.1 tag publishes. The guide and README say
 - [x] Step 24: user-mode Windows backend (service, device, overlapped `RECV`, timeouts, shutdown)
 - [x] Step 25: NETWORK and NETWORK_FORWARD on Windows (divert, sniff, drop; WFP callouts)
 - [x] Step 26: injection on Windows (send, reinject, impostors)
-- [ ] Step 27: ETHERNET on Windows (NDIS LWF)
+- [x] Step 27: ETHERNET on Windows (NDIS LWF; VLAN and LSO restored on reinjection)
 - [ ] Step 28: FLOW, SOCKET and REFLECT on Windows
 - [ ] Step 29: `WinDivert.dll` and the binding suites on Windows (Phase 5 exit)
 - [ ] Step 30: hardening and distribution (Driver Verifier, HVCI, CI build, signing)

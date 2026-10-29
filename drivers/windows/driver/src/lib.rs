@@ -3,9 +3,9 @@
 //! It creates the control device `\\.\Avulse`, through which the user-mode backend opens handles
 //! (`avulse_abi::ioctl`). Each handle carries a filter compiled to avulse bytecode, which the
 //! driver verifies when the handle opens and runs with the `no_std` interpreter on the packets of
-//! its hooks. The hooks (WFP callouts for the WinDivert layers, an NDIS lightweight filter for
-//! ETHERNET) come in the steps of Phase 5 (`docs/implementation-plan.md`); for now `EVAL` runs a
-//! handle's filter on a packet user mode passes.
+//! its hooks: WFP callouts for the NETWORK layers (`wfp`), and an NDIS lightweight filter for
+//! ETHERNET (`lwf`), which needs the driver installed with its INF. `EVAL` runs a handle's filter
+//! on a packet user mode passes, for the tests.
 
 #![no_std]
 
@@ -21,6 +21,7 @@ mod eval;
 mod handle;
 mod inject;
 mod lock;
+mod lwf;
 mod rx;
 mod sys;
 mod wfp;
@@ -64,6 +65,12 @@ pub unsafe extern "system" fn driver_entry(
         eval::free();
         return status;
     }
+    // SAFETY: at PASSIVE_LEVEL, once, with the driver object. Without the INF's install there is
+    // no filter to register: the ETHERNET layer is then unavailable, and the rest works.
+    let status = unsafe { lwf::register(driver) };
+    if status != sys::NDIS_STATUS_SUCCESS {
+        wdk::println!("avulse: no lightweight filter ({status:#x}): no ETHERNET layer");
+    }
     // SAFETY: `driver` is valid for the whole call.
     unsafe { (*driver).DriverUnload = Some(unload) };
     wdk::println!("avulse: loaded");
@@ -73,8 +80,10 @@ pub unsafe extern "system" fn driver_entry(
 /// Removes the device, then frees the scratch. The I/O manager only unloads a driver whose files
 /// are all closed.
 unsafe extern "C" fn unload(_driver: *mut sys::DRIVER_OBJECT) {
-    // SAFETY: at PASSIVE_LEVEL, after `driver_entry` succeeded; no file is open.
+    // SAFETY: at PASSIVE_LEVEL, after `driver_entry` succeeded; no file is open. The filter's
+    // modules detach first, so no frame reaches the scratch once it is freed.
     unsafe {
+        lwf::unregister();
         wfp::unregister();
         inject::free();
         device::delete();

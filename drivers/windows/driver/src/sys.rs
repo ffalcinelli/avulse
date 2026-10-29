@@ -33,6 +33,8 @@ pub const STATUS_INSUFFICIENT_RESOURCES: NTSTATUS = 0xC000_009A_u32 as NTSTATUS;
 pub const STATUS_BUFFER_TOO_SMALL: NTSTATUS = 0xC000_0023_u32 as NTSTATUS;
 pub const STATUS_REVISION_MISMATCH: NTSTATUS = 0xC000_0059_u32 as NTSTATUS;
 pub const STATUS_INVALID_DEVICE_STATE: NTSTATUS = 0xC000_0184_u32 as NTSTATUS;
+pub const STATUS_NOT_SUPPORTED: NTSTATUS = 0xC000_00BB_u32 as NTSTATUS;
+pub const STATUS_DEVICE_NOT_READY: NTSTATUS = 0xC000_00A3_u32 as NTSTATUS;
 
 /// `IoGetCurrentIrpStackLocation`, an inline function in `wdm.h`.
 ///
@@ -64,8 +66,80 @@ pub unsafe fn complete(irp: *mut IRP, status: NTSTATUS, information: usize) -> N
     status
 }
 
-/// `NDIS_STATUS_SUCCESS`, a cast macro that bindgen skips.
+/// `NDIS_STATUS_SUCCESS` and the others: cast macros, which bindgen skips.
 pub const NDIS_STATUS_SUCCESS: NDIS_STATUS = 0;
+pub const NDIS_STATUS_PENDING: NDIS_STATUS = STATUS_PENDING;
+pub const NDIS_STATUS_RESOURCES: NDIS_STATUS = STATUS_INSUFFICIENT_RESOURCES;
+pub const NDIS_STATUS_NOT_SUPPORTED: NDIS_STATUS = STATUS_NOT_SUPPORTED;
+
+/// Indexes in `NetBufferListInfo` (`NDIS_NET_BUFFER_LIST_INFO`): the checksum offload request,
+/// the large send (LSO) request, and the 802.1Q tag.
+pub const TCP_IP_CHECKSUM_INFO: usize = 0;
+pub const TCP_LARGE_SEND_INFO: usize = 2;
+pub const IEEE_8021Q_INFO: usize = 4;
+
+/// `NET_BUFFER_LIST_NEXT_NBL`.
+///
+/// # Safety
+///
+/// `nbl` points to a valid NET_BUFFER_LIST.
+pub unsafe fn nbl_next(nbl: *mut NET_BUFFER_LIST) -> *mut NET_BUFFER_LIST {
+    unsafe { (*nbl).__bindgen_anon_1.__bindgen_anon_1.Next }
+}
+
+/// Sets `NET_BUFFER_LIST_NEXT_NBL`.
+///
+/// # Safety
+///
+/// `nbl` points to a valid NET_BUFFER_LIST the caller owns.
+pub unsafe fn set_nbl_next(nbl: *mut NET_BUFFER_LIST, next: *mut NET_BUFFER_LIST) {
+    unsafe { (*nbl).__bindgen_anon_1.__bindgen_anon_1.Next = next }
+}
+
+/// `NET_BUFFER_LIST_INFO(nbl, i)`, as an integer.
+///
+/// # Safety
+///
+/// `nbl` points to a valid NET_BUFFER_LIST.
+pub unsafe fn nbl_info(nbl: *mut NET_BUFFER_LIST, i: usize) -> usize {
+    unsafe { (*nbl).NetBufferListInfo[i] as usize }
+}
+
+/// Sets `NET_BUFFER_LIST_INFO(nbl, i)`.
+///
+/// # Safety
+///
+/// `nbl` points to a valid NET_BUFFER_LIST the caller owns.
+pub unsafe fn set_nbl_info(nbl: *mut NET_BUFFER_LIST, i: usize, value: usize) {
+    unsafe { (*nbl).NetBufferListInfo[i] = value as *mut core::ffi::c_void }
+}
+
+/// `NET_BUFFER_LIST_STATUS`, set.
+///
+/// # Safety
+///
+/// `nbl` points to a valid NET_BUFFER_LIST the caller owns.
+pub unsafe fn set_nbl_status(nbl: *mut NET_BUFFER_LIST, status: NDIS_STATUS) {
+    unsafe { (*nbl).__bindgen_anon_2.Status = status }
+}
+
+/// `NET_BUFFER_NEXT_NB`.
+///
+/// # Safety
+///
+/// `nb` points to a valid NET_BUFFER.
+pub unsafe fn nb_next(nb: *mut NET_BUFFER) -> *mut NET_BUFFER {
+    unsafe { (*nb).__bindgen_anon_1.__bindgen_anon_1.Next }
+}
+
+/// `NET_BUFFER_FIRST_MDL`.
+///
+/// # Safety
+///
+/// `nb` points to a valid NET_BUFFER.
+pub unsafe fn nb_first_mdl(nb: *mut NET_BUFFER) -> *mut MDL {
+    unsafe { (*nb).__bindgen_anon_1.__bindgen_anon_1.MdlChain }
+}
 
 /// `NET_BUFFER_LIST_FIRST_NB`.
 ///

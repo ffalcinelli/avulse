@@ -213,6 +213,37 @@ pub fn recalculate_only(buf: &mut [u8], link: Link, which: Updated) -> Updated {
     updated
 }
 
+/// Writes the TCP checksum a large send (LSO, TSO) carries for the network card: the folded,
+/// uncomplemented sum of the pseudo-header without its length. The card adds each segment's
+/// length and bytes, and completes the checksum. Returns the TCP header's offset in `buf`, or
+/// `None` (and changes nothing) for anything but an unfragmented TCP segment.
+///
+/// ```
+/// use avulse_proto::checksum;
+/// use avulse_proto::Link;
+///
+/// let mut bytes = [0u8; 40];
+/// bytes[..20].copy_from_slice(&[0x45, 0, 0, 40, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2]);
+/// bytes[32] = 0x50; // data offset: 5 words
+/// assert_eq!(checksum::tcp_large_send(&mut bytes, Link::Ip), Some(20));
+/// // 10.0.0.1 + 10.0.0.2 + protocol 6
+/// assert_eq!(bytes[36..38], [0x14, 0x09]);
+/// ```
+pub fn tcp_large_send(buf: &mut [u8], link: Link) -> Option<usize> {
+    let Located { l4, .. } = locate(buf, link);
+    let (proto, field, range, pseudo) = l4?;
+    if proto != ip_proto::TCP {
+        return None;
+    }
+    let mut acc = pseudo.sum(proto, 0);
+    while acc >> 16 != 0 {
+        acc = (acc & 0xffff) + (acc >> 16);
+    }
+    let at = range.start;
+    buf[at + field..at + field + 2].copy_from_slice(&(acc as u16).to_be_bytes());
+    Some(at)
+}
+
 /// Which checksums of the packet in `buf` are present and correct, among those [`recalculate`]
 /// computes. A UDP datagram over IPv4 with a zero checksum (none) counts as correct.
 ///

@@ -364,6 +364,67 @@ impl<'a> Iterator for Records<'a> {
     }
 }
 
+/// What the driver keeps in [`Address::context`] for a frame it captured at the ETHERNET layer,
+/// so that sending it back restores what the network card was to do with it: put a VLAN tag back
+/// into the out-of-band information, or segment a large send (LSO).
+///
+/// The layout is a marker byte ([`EthernetContext::MARKER`]), the flags, two zero bytes, the
+/// interface index (`u32`) and the LSO MSS (`u32`); the rest of the context is zero. It applies
+/// only when the frame goes back on the interface it was captured on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EthernetContext {
+    /// The interface the frame was captured on.
+    pub if_idx: u32,
+    /// [`EthernetContext::VLAN_OFFLOADED`], [`EthernetContext::LSO_V1`],
+    /// [`EthernetContext::LSO_V2`].
+    pub flags: u8,
+    /// The segment size of a large send (with `LSO_V1` or `LSO_V2`).
+    pub lso_mss: u32,
+}
+
+impl EthernetContext {
+    /// The first byte of an encoded context, so that an empty one decodes as none.
+    pub const MARKER: u8 = 0xe7;
+    /// The outer VLAN tag (802.1Q) came out of band: the driver put it into the frame.
+    pub const VLAN_OFFLOADED: u8 = 1;
+    /// The frame is a large send, version 1.
+    pub const LSO_V1: u8 = 2;
+    /// The frame is a large send, version 2.
+    pub const LSO_V2: u8 = 4;
+    const ALL: u8 = Self::VLAN_OFFLOADED | Self::LSO_V1 | Self::LSO_V2;
+
+    /// The context's bytes.
+    pub fn encode(&self) -> Context {
+        let mut b = [0; CONTEXT_LEN];
+        b[0] = Self::MARKER;
+        b[1] = self.flags;
+        b[4..8].copy_from_slice(&self.if_idx.to_le_bytes());
+        b[8..12].copy_from_slice(&self.lso_mss.to_le_bytes());
+        Context::from_bytes(b)
+    }
+
+    /// The ETHERNET context in `c`, if it holds one (any other bytes are `None`).
+    pub fn decode(c: &Context) -> Option<EthernetContext> {
+        let b = c.as_bytes();
+        if b[0] != Self::MARKER || b[1] & !Self::ALL != 0 || b[2..4] != [0, 0] {
+            return None;
+        }
+        if b[12..].iter().any(|&x| x != 0) {
+            return None;
+        }
+        Some(EthernetContext {
+            flags: b[1],
+            if_idx: u32::from_le_bytes([b[4], b[5], b[6], b[7]]),
+            lso_mss: u32::from_le_bytes([b[8], b[9], b[10], b[11]]),
+        })
+    }
+
+    /// Whether the frame is a large send.
+    pub fn lso(&self) -> bool {
+        self.flags & (Self::LSO_V1 | Self::LSO_V2) != 0
+    }
+}
+
 /// [`SET_PARAM`]'s input.
 pub fn encode_set_param(p: Param, value: u64) -> [u8; 12] {
     let mut b = [0; 12];

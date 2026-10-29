@@ -7,10 +7,19 @@
 //! $env:AVULSE_DRIVER = "C:\build\avulse\drivers\windows\driver\target\release\avulse_package\avulse.sys"
 //! cargo test -p avulse --test capture_windows -- --test-threads=1
 //! ```
+//!
+//! The ETHERNET tests need the driver installed as a lightweight filter (`netcfg`), and run with
+//! `AVULSE_ETHERNET` set; without it they check that the layer is refused. They use the VM's NAT
+//! adapter and its gateway, 10.0.2.2, with narrow filters (WinRM goes over the same adapter).
+//! `AVULSE_TCP_PEER` (`10.0.2.2:<port>`, a byte-counting sink on the host,
+//! `drivers/windows/scripts/tcp-sink.py`) adds a large TCP upload through a diverting handle.
 
 #![cfg(target_os = "windows")]
 
-use std::net::UdpSocket;
+use std::io::{Read, Write};
+use std::net::{Shutdown as NetShutdown, TcpStream, UdpSocket};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use avulse::{Error, Flags, Handle, Layer, MAX_PACKET_LEN, OpenOptions, Param, Shutdown};
@@ -280,6 +289,8 @@ fn reinject() {
     // Modified: the checksums are computed again, as the address's flags are clear.
     let (mut p, a) = recv_one(&h);
     p[28..33].copy_from_slice(b"WORLD");
+    let mut a = a;
+    a.udp_checksum = false;
     h.send(&p, &a).unwrap();
     assert_eq!(rx.recv(&mut got).unwrap(), 5);
     assert_eq!(&got[..5], b"WORLD");
@@ -350,4 +361,308 @@ fn priorities_and_impostors() {
     assert!(matches!(r, Err(Error::Timeout)), "{r:?}");
     let mut got = [0; 16];
     assert_eq!(rx.recv(&mut got).unwrap(), 5);
+}
+
+/// Whether the ETHERNET tests run: the driver is installed as a lightweight filter.
+fn ethernet() -> bool {
+    enabled() && std::env::var_os("AVULSE_ETHERNET").is_some()
+}
+
+/// The VM's gateway, behind its NAT adapter.
+const GATEWAY: [u8; 4] = [10, 0, 2, 2];
+
+/// Whether `ping` got an answer from `to`.
+fn ping(to: &str, count: u32) -> bool {
+    let out = Command::new("ping")
+        .args(["-n", &count.to_string(), "-w", "1000", to])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).contains("TTL=")
+}
+
+/// The NAT adapter, as a ping to the gateway shows it.
+struct Nat {
+    if_idx: u32,
+    mac: [u8; 6],
+    gateway_mac: [u8; 6],
+    ip: [u8; 4],
+}
+
+fn nat() -> Nat {
+    let h = Handle::open(
+        "icmp.type == 8 and ip.dst == 10.0.2.2",
+        Layer::Ethernet,
+        0,
+        Flags::SNIFF,
+    )
+    .unwrap();
+    assert!(ping("10.0.2.2", 1), "the gateway answers pings");
+    let (f, a) = recv_one(&h);
+    assert!(a.outbound && a.if_idx != 0, "{a:?}");
+    Nat {
+        if_idx: a.if_idx,
+        mac: f[6..12].try_into().unwrap(),
+        gateway_mac: f[..6].try_into().unwrap(),
+        ip: f[26..30].try_into().unwrap(),
+    }
+}
+
+/// An ARP frame from `src_mac`/`src_ip` to `dst_mac`, about `target_ip` (request: `op` 1).
+fn arp_frame(
+    dst_mac: [u8; 6],
+    src_mac: [u8; 6],
+    op: u8,
+    src_ip: [u8; 4],
+    target_ip: [u8; 4],
+) -> Vec<u8> {
+    let mut f = Vec::new();
+    f.extend_from_slice(&dst_mac);
+    f.extend_from_slice(&src_mac);
+    f.extend_from_slice(&[0x08, 0x06, 0, 1, 0x08, 0, 6, 4, 0, op]);
+    f.extend_from_slice(&src_mac);
+    f.extend_from_slice(&src_ip);
+    f.extend_from_slice(&[0; 6]);
+    f.extend_from_slice(&target_ip);
+    f.resize(60, 0);
+    f
+}
+
+/// Receives from `h` for up to `wait` until `want` accepts a frame.
+fn recv_until(
+    h: &Handle,
+    wait: Duration,
+    mut want: impl FnMut(&[u8], &avulse::Address) -> bool,
+) -> Option<(Vec<u8>, avulse::Address)> {
+    let end = Instant::now() + wait;
+    let mut buf = vec![0; MAX_PACKET_LEN];
+    while let Some(left) = end.checked_duration_since(Instant::now()) {
+        match h.recv_timeout(&mut buf, left) {
+            Ok((n, a)) if want(&buf[..n], &a) => return Some((buf[..n].to_vec(), a)),
+            Ok(_) | Err(Error::Timeout) => {}
+            Err(e) => panic!("recv: {e}"),
+        }
+    }
+    None
+}
+
+/// Without the lightweight filter installed, the ETHERNET layer is refused.
+#[test]
+fn ethernet_needs_the_filter() {
+    if !enabled() || ethernet() {
+        return;
+    }
+    let r = Handle::open("arp", Layer::Ethernet, 0, Flags::SNIFF);
+    assert!(matches!(r, Err(Error::Unsupported(_))), "{:?}", r.err());
+}
+
+/// Pings to the gateway are seen both ways, as Ethernet frames of the NAT adapter; a handle on
+/// another interface sees none of them.
+#[test]
+fn ethernet_sniff() {
+    if !ethernet() {
+        return;
+    }
+    let filter = "icmp and ip.addr == 10.0.2.2";
+    let h = Handle::open(filter, Layer::Ethernet, 0, Flags::SNIFF).unwrap();
+    let other = OpenOptions::new()
+        .flags(Flags::SNIFF)
+        .interfaces(["1"])
+        .open(filter, Layer::Ethernet)
+        .unwrap();
+    assert!(ping("10.0.2.2", 2));
+    let (mut out, mut inb) = (0, 0);
+    while let Some((f, a)) = recv_until(&h, Duration::from_millis(500), |_, _| true) {
+        assert_eq!(f[12..14], [0x08, 0x00], "IPv4 in Ethernet");
+        assert!(
+            a.if_idx != 0 && !a.loopback && a.sniffed && !a.ipv6,
+            "{a:?}"
+        );
+        match (a.outbound, f[34]) {
+            (true, 8) => out += 1,
+            (false, 0) => inb += 1,
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+    assert_eq!((out, inb), (2, 2));
+    let r = recv_until(&other, Duration::from_millis(300), |_, _| true);
+    assert!(r.is_none(), "another interface: {r:?}");
+}
+
+/// Dropped pings get no answer, and do again once the handle closes.
+#[test]
+fn ethernet_drop() {
+    if !ethernet() {
+        return;
+    }
+    let d = Handle::open(
+        "icmp.type == 8 and ip.dst == 10.0.2.2",
+        Layer::Ethernet,
+        0,
+        Flags::DROP,
+    )
+    .unwrap();
+    assert!(!ping("10.0.2.2", 1));
+    assert!(d.stats().unwrap().dropped >= 1);
+    d.close().unwrap();
+    assert!(ping("10.0.2.2", 1));
+}
+
+/// ARP diverted both ways and sent back: the gateway still resolves, and a ping goes through.
+#[test]
+fn arp_divert_and_reinject() {
+    if !ethernet() {
+        return;
+    }
+    let h = Handle::open("arp", Layer::Ethernet, 0, Flags::NONE).unwrap();
+    // Forget the gateway's address (an error if it was not known), so that it is resolved again.
+    let _ = Command::new("arp").args(["-d", "10.0.2.2"]).status();
+    let stop = AtomicBool::new(false);
+    let (out, inb) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let mut buf = vec![0; MAX_PACKET_LEN];
+            while !stop.load(Ordering::Relaxed) {
+                let Ok((n, a)) = h.recv_timeout(&mut buf, Duration::from_millis(100)) else {
+                    continue;
+                };
+                assert_eq!(buf[12..14], [0x08, 0x06]);
+                if a.outbound { &out } else { &inb }.fetch_add(1, Ordering::Relaxed);
+                h.send(&buf[..n], &a).unwrap();
+            }
+        });
+        let answered = ping("10.0.2.2", 2);
+        stop.store(true, Ordering::Relaxed);
+        assert!(answered, "the ping goes through");
+    });
+    let (out, inb) = (out.into_inner(), inb.into_inner());
+    assert!(out >= 1 && inb >= 1, "{out} out, {inb} in");
+}
+
+/// A built ARP request goes out of the adapter: a lower handle sees it as an impostor, then
+/// the gateway's reply.
+#[test]
+fn inject_outbound_frame() {
+    if !ethernet() {
+        return;
+    }
+    let nat = nat();
+    let tx = Handle::open("false", Layer::Ethernet, 100, Flags::SEND_ONLY).unwrap();
+    let low = Handle::open("arp", Layer::Ethernet, 0, Flags::SNIFF).unwrap();
+    let req = arp_frame([0xff; 6], nat.mac, 1, nat.ip, GATEWAY);
+    let mut a = avulse::Address::new(Layer::Ethernet);
+    a.outbound = true;
+    a.if_idx = nat.if_idx;
+    tx.send(&req, &a).unwrap();
+    let seen = recv_until(&low, Duration::from_secs(2), |f, b| {
+        b.outbound && f == &req[..]
+    });
+    let (_, b) = seen.expect("the lower handle sees the request");
+    assert!(b.impostor && b.if_idx == nat.if_idx, "{b:?}");
+    let reply = recv_until(&low, Duration::from_secs(3), |f, b| {
+        !b.outbound && f[20..22] == [0, 2] && f[28..32] == GATEWAY
+    });
+    let (f, b) = reply.expect("the gateway replies");
+    assert!(!b.impostor);
+    assert_eq!(f[6..12], nat.gateway_mac);
+}
+
+/// A built ARP request injected inbound reaches Windows, which answers it.
+#[test]
+fn inject_inbound_frame() {
+    if !ethernet() {
+        return;
+    }
+    let nat = nat();
+    let tx = Handle::open("false", Layer::Ethernet, 100, Flags::SEND_ONLY).unwrap();
+    let low = Handle::open("arp", Layer::Ethernet, 0, Flags::SNIFF).unwrap();
+    let (peer_mac, peer_ip) = ([0x02, 0, 0, 0, 0, 0x77], [10, 0, 2, 77]);
+    let req = arp_frame(nat.mac, peer_mac, 1, peer_ip, nat.ip);
+    let mut a = avulse::Address::new(Layer::Ethernet);
+    a.if_idx = nat.if_idx;
+    tx.send(&req, &a).unwrap();
+    let seen = recv_until(&low, Duration::from_secs(2), |f, b| {
+        !b.outbound && f == &req[..]
+    });
+    assert!(seen.expect("the lower handle sees it").1.impostor);
+    let reply = recv_until(&low, Duration::from_secs(3), |f, b| {
+        b.outbound && f[20..22] == [0, 2] && f[38..42] == peer_ip
+    });
+    let (f, _) = reply.expect("Windows answers");
+    assert_eq!(f[..6], peer_mac);
+}
+
+/// A frame with a VLAN tag in it is seen with its tag by a lower handle.
+#[test]
+fn vlan_tag_in_band() {
+    if !ethernet() {
+        return;
+    }
+    let nat = nat();
+    let tx = Handle::open("false", Layer::Ethernet, 100, Flags::SEND_ONLY).unwrap();
+    let low = Handle::open(
+        "vlan.id == 5 and vlan.priority == 1",
+        Layer::Ethernet,
+        0,
+        Flags::SNIFF,
+    )
+    .unwrap();
+    let mut f = vec![0xff; 6];
+    f.extend_from_slice(&nat.mac);
+    // 802.1Q, priority 1, VLAN 5, then the local experimental ethertype.
+    f.extend_from_slice(&[0x81, 0x00, 0x20, 0x05, 0x88, 0xb5]);
+    f.resize(64, 0xab);
+    let mut a = avulse::Address::new(Layer::Ethernet);
+    a.outbound = true;
+    a.if_idx = nat.if_idx;
+    tx.send(&f, &a).unwrap();
+    let (got, b) = recv_until(&low, Duration::from_secs(2), |_, _| true).expect("seen");
+    assert_eq!(got, f);
+    assert!(b.vlan && b.vlan_tci == 0x2005 && b.impostor, "{b:?}");
+}
+
+/// A 4 MiB upload whose frames a handle diverts and sends back still arrives whole; with large
+/// send offload on, the frames are larger than the MTU and go back as large sends.
+#[test]
+fn lso_reinject() {
+    let Some(peer) = std::env::var("AVULSE_TCP_PEER").ok().filter(|_| ethernet()) else {
+        return;
+    };
+    let port: u16 = peer.rsplit(':').next().unwrap().parse().unwrap();
+    let h = Handle::open(
+        &format!("tcp.dstport == {port}"),
+        Layer::Ethernet,
+        0,
+        Flags::NONE,
+    )
+    .unwrap();
+    const LEN: usize = 4 << 20;
+    let stop = AtomicBool::new(false);
+    let (largest, frames) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let reply = std::thread::scope(|s| {
+        s.spawn(|| {
+            let mut buf = vec![0; MAX_PACKET_LEN];
+            while !stop.load(Ordering::Relaxed) {
+                let Ok((n, a)) = h.recv_timeout(&mut buf, Duration::from_millis(100)) else {
+                    continue;
+                };
+                largest.fetch_max(n, Ordering::Relaxed);
+                frames.fetch_add(1, Ordering::Relaxed);
+                h.send(&buf[..n], &a).unwrap();
+            }
+        });
+        let mut c = TcpStream::connect(&peer).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        c.write_all(&vec![0x5a; LEN]).unwrap();
+        c.shutdown(NetShutdown::Write).unwrap();
+        let mut reply = String::new();
+        c.read_to_string(&mut reply).unwrap();
+        stop.store(true, Ordering::Relaxed);
+        reply
+    });
+    eprintln!(
+        "{} frames diverted, the largest {} bytes",
+        frames.into_inner(),
+        largest.into_inner()
+    );
+    assert_eq!(reply.trim(), LEN.to_string());
 }

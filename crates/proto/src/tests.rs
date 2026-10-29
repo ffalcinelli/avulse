@@ -327,6 +327,31 @@ fn verify_finds_correct_checksums() {
 }
 
 #[test]
+fn tcp_large_send_checksums() {
+    let seg = tcp(1234, 80, Tcp::ACK, &[7; 3000]);
+    let mut frame = eth(ethertype::IPV4, &[], &ipv4(ip_proto::TCP, 0, &seg));
+    assert_eq!(
+        checksum::tcp_large_send(&mut frame, Link::Ethernet),
+        Some(34)
+    );
+    // The full checksum is the complement of the partial one plus the length and the segment.
+    let partial = u16::from_be_bytes([frame[50], frame[51]]);
+    let mut full = frame.clone();
+    checksum::recalculate(&mut full, Link::Ethernet);
+    let mut s = partial as u64 + (frame.len() - 34) as u64;
+    s = sum(&frame[34..50], s);
+    s = sum(&frame[52..], s);
+    assert_eq!(finish(s).to_be_bytes(), [full[50], full[51]]);
+
+    let mut v6 = ipv6(ip_proto::TCP, &seg);
+    assert_eq!(checksum::tcp_large_send(&mut v6, Link::Ip), Some(40));
+    let mut not_tcp = ipv4(ip_proto::UDP, 0, &udp(53, 53, b"x"));
+    let before = not_tcp.clone();
+    assert_eq!(checksum::tcp_large_send(&mut not_tcp, Link::Ip), None);
+    assert_eq!(not_tcp, before);
+}
+
+#[test]
 fn recalculate_only_what_is_asked() {
     let tcp_pkt = ipv4(ip_proto::TCP, 0, &tcp(1234, 80, Tcp::ACK, b"GET /"));
     let mut pkt = tcp_pkt.clone();

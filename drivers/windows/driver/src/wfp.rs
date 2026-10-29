@@ -21,7 +21,6 @@ use avulse_proto::Link;
 
 use crate::handle::Open;
 use crate::lock::SpinLock;
-use crate::rx::{self, Entry};
 use crate::sys::{self, w};
 use crate::{eval, inject};
 
@@ -411,7 +410,7 @@ unsafe fn value_u32(values: *const sys::FWPS_INCOMING_VALUES0, index: usize) -> 
 }
 
 /// Now, in nanoseconds of `QueryPerformanceCounter`.
-fn now_ns() -> i64 {
+pub fn now_ns() -> i64 {
     // SAFETY: plain call.
     let ticks = unsafe { sys::KeQueryPerformanceCounter(null_mut()) };
     // SAFETY: a LARGE_INTEGER.
@@ -441,7 +440,7 @@ unsafe fn classify(
     let Some(open) = HANDLES.lock().get(&id).cloned() else {
         return;
     };
-    if open.rx.lock().shut || open.flags.contains(Flags::SEND_ONLY) {
+    if open.idle() {
         return;
     }
     let nbl = layer_data.cast::<sys::NET_BUFFER_LIST>();
@@ -459,6 +458,11 @@ unsafe fn classify(
     let loopback = flags & sys::FWP_CONDITION_FLAG_IS_LOOPBACK != 0;
     // Loopback packets are seen once, outbound, as in WinDivert.
     if loopback && !hook.outbound && hook.avulse == Layer::Network {
+        return;
+    }
+    // SAFETY: as above.
+    let if_idx = unsafe { value_u32(values, hook.if_idx) };
+    if !open.captures_on(if_idx) {
         return;
     }
     // SAFETY: as above.
@@ -487,11 +491,9 @@ unsafe fn classify(
     addr.loopback = loopback;
     addr.ipv6 = hook.ipv6;
     addr.impostor = impostor;
+    addr.if_idx = if_idx;
     // SAFETY: WFP passes valid values.
-    unsafe {
-        addr.if_idx = value_u32(values, hook.if_idx);
-        addr.sub_if_idx = value_u32(values, hook.sub_if_idx);
-    }
+    addr.sub_if_idx = unsafe { value_u32(values, hook.sub_if_idx) };
     let sniff = open.flags.contains(Flags::SNIFF);
     let drop = open.flags.contains(Flags::DROP);
     let mut m: Meta<'_> = addr.meta();
@@ -509,17 +511,7 @@ unsafe fn classify(
         open.mutable.lock().stats.dropped += 1;
     } else if let Some(data) = copy {
         addr.sniffed = sniff;
-        let (max_len, max_bytes) = {
-            let m = open.mutable.lock();
-            (m.params[0] as usize, m.params[2] as usize)
-        };
-        let queued = rx::push(&open.rx, Entry { addr, data }, max_len, max_bytes);
-        let mut m = open.mutable.lock();
-        match (queued, sniff) {
-            (false, _) => m.stats.queue_drops += 1,
-            (true, true) => m.stats.sniffed += 1,
-            (true, false) => m.stats.diverted += 1,
-        }
+        open.deliver(addr, data);
     }
     if sniff {
         return;

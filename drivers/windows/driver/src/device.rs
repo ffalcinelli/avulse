@@ -15,7 +15,7 @@ use avulse_proto::Link;
 
 use crate::handle::{self, File};
 use crate::sys::{self, unicode, w};
-use crate::{eval, inject, rx};
+use crate::{eval, inject, lwf, rx};
 
 static DEVICE: AtomicPtr<sys::DEVICE_OBJECT> = AtomicPtr::new(null_mut());
 
@@ -275,7 +275,10 @@ fn control(file: &File, code: u32, io: &Buffered) -> Result<usize, sys::NTSTATUS
         ioctl::SEND => {
             let h = handle::get(file)?;
             if h.flags.contains(avulse_abi::Flags::RECV_ONLY)
-                || !matches!(h.layer, Layer::Network | Layer::NetworkForward)
+                || !matches!(
+                    h.layer,
+                    Layer::Network | Layer::NetworkForward | Layer::Ethernet
+                )
             {
                 return Err(sys::STATUS_INVALID_DEVICE_REQUEST);
             }
@@ -286,9 +289,10 @@ fn control(file: &File, code: u32, io: &Buffered) -> Result<usize, sys::NTSTATUS
             let mut sent = 0u32;
             for r in Record::decode_all(io.input()) {
                 let status = match r {
-                    Ok(r) if r.data.len() <= eval::MAX_PACKET => {
-                        inject::send(r.data, &r.addr, h.layer, h.priority)
-                    }
+                    Ok(r) if r.data.len() <= eval::MAX_PACKET => match h.layer {
+                        Layer::Ethernet => lwf::send(r.data, &r.addr, h.priority),
+                        layer => inject::send(r.data, &r.addr, layer, h.priority),
+                    },
                     _ => sys::STATUS_INVALID_PARAMETER,
                 };
                 if status != sys::STATUS_SUCCESS {

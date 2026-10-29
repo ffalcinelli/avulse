@@ -30,8 +30,8 @@ pub const MAX_PACKET: usize = 40 + 0xffff;
 pub struct Scratch {
     /// Written afresh before each evaluation, for that evaluation's lifetime.
     regs: MaybeUninit<Registers<'static>>,
-    /// For packets whose data is not contiguous.
-    pub copy: [u8; MAX_PACKET],
+    /// For packets whose data is not contiguous, and frames with a VLAN tag put back.
+    pub copy: [u8; MAX_PACKET + 4],
 }
 
 /// Every processor's scratch, each behind its own lock, indexed by `KeGetCurrentProcessorNumberEx`.
@@ -202,6 +202,79 @@ pub unsafe fn evaluate_nb(
         let bytes = unsafe { core::slice::from_raw_parts(p.cast::<u8>(), len) };
         let matched = run(program, bytes, link, meta, &raw mut scratch.regs)?;
         Some((matched, (matched && keep).then(|| bytes.to_vec())))
+    })
+    .flatten()
+}
+
+/// A packet's bytes and the processor's register file, for [`with_frame`]: the handles of a hook
+/// evaluate the same bytes in turn.
+pub struct Frame<'a> {
+    pub bytes: &'a [u8],
+    regs: *mut MaybeUninit<Registers<'static>>,
+}
+
+impl Frame<'_> {
+    /// Whether `program` matches the bytes, with `meta`; `None` if no stack could be had.
+    pub fn matches(
+        &self,
+        program: &VerifiedProgram<'_>,
+        link: Link,
+        meta: &Meta<'_>,
+    ) -> Option<bool> {
+        run(program, self.bytes, link, meta, self.regs)
+    }
+}
+
+/// Runs `f` on the data of `nb`, read in place when it is contiguous and through the processor's
+/// copy buffer otherwise; with the VLAN tag control information `tag` put back after the MAC
+/// addresses (TPID 0x8100), always in the copy buffer. `None` if the data could not be read.
+///
+/// # Safety
+///
+/// `nb` is a valid NET_BUFFER, at IRQL <= DISPATCH_LEVEL.
+pub unsafe fn with_frame<R>(
+    nb: *mut sys::NET_BUFFER,
+    tag: Option<u16>,
+    f: impl FnOnce(&Frame<'_>) -> R,
+) -> Option<R> {
+    // SAFETY: `nb` is valid.
+    let len = unsafe { sys::nb_data_length(nb) } as usize;
+    if !(14..=MAX_PACKET).contains(&len) {
+        return None;
+    }
+    with_scratch(|scratch| {
+        let copy = scratch.copy.as_mut_ptr();
+        let at = if tag.is_some() { 4 } else { 0 };
+        // SAFETY: `copy` has room for `len + 4` bytes; NDIS returns the data in place if it is
+        // contiguous, else copies it to `copy + at`.
+        let p = unsafe { sys::NdisGetDataBuffer(nb, len as u32, copy.add(at).cast(), 1, 0) };
+        if p.is_null() {
+            return None;
+        }
+        let bytes = match tag {
+            // SAFETY: NDIS returned `len` readable bytes, which this closure does not otherwise
+            // touch while the slice lives.
+            None => unsafe { core::slice::from_raw_parts(p.cast::<u8>(), len) },
+            Some(tci) => {
+                // SAFETY: the frame is at `copy + 4` (copied there if NDIS returned it in
+                // place); the MAC addresses move back 4 bytes, and the tag goes after them.
+                unsafe {
+                    let dst = copy.add(4);
+                    if p.cast::<u8>() != dst {
+                        core::ptr::copy_nonoverlapping(p.cast::<u8>(), dst, len);
+                    }
+                    core::ptr::copy(dst, copy, 12);
+                    let [hi, lo] = tci.to_be_bytes();
+                    core::ptr::copy_nonoverlapping([0x81, 0x00, hi, lo].as_ptr(), copy.add(12), 4);
+                    core::slice::from_raw_parts(copy, len + 4)
+                }
+            }
+        };
+        let frame = Frame {
+            bytes,
+            regs: &raw mut scratch.regs,
+        };
+        Some(f(&frame))
     })
     .flatten()
 }

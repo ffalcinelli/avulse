@@ -6,16 +6,16 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use avulse_abi::ioctl::{self, OpenRequest};
-use avulse_abi::{Flags, Param, Stats, Syntax};
+use avulse_abi::{Address, Flags, Param, Stats, Syntax};
 use avulse_filter::Layer;
 use avulse_filter::bytecode::{self, VerifiedProgram};
 
 use core::sync::atomic::AtomicU64;
 
 use crate::lock::SpinLock;
-use crate::rx::Rx;
+use crate::rx::{self, Entry, Rx};
 use crate::sys;
-use crate::wfp;
+use crate::{lwf, wfp};
 
 /// What a file object holds (`FsContext`).
 pub struct File {
@@ -42,8 +42,7 @@ pub enum State {
     Closed,
 }
 
-/// An open handle. The flags, filter text and interfaces serve the packet hooks and REFLECT, from
-/// Step 25.
+/// An open handle. The filter text and syntax serve REFLECT (Step 28).
 #[allow(dead_code)]
 pub struct Open {
     pub layer: Layer,
@@ -119,6 +118,34 @@ impl Open {
     pub fn program(&self) -> &VerifiedProgram<'_> {
         &self.program
     }
+
+    /// Whether the handle captures on the interface `if_idx`: all of them when it was given
+    /// none.
+    pub fn captures_on(&self, if_idx: u32) -> bool {
+        self.interfaces.is_empty() || self.interfaces.contains(&if_idx)
+    }
+
+    /// Whether the packet hooks pass the handle by: shut down for receiving, or SEND_ONLY.
+    pub fn idle(&self) -> bool {
+        self.flags.contains(Flags::SEND_ONLY) || self.rx.lock().shut
+    }
+
+    /// Queues a packet the handle matched (a copy if `addr.sniffed`), within its queue
+    /// parameters, and counts it.
+    pub fn deliver(&self, addr: Address, data: Vec<u8>) {
+        let sniff = addr.sniffed;
+        let (max_len, max_bytes) = {
+            let m = self.mutable.lock();
+            (m.params[0] as usize, m.params[2] as usize)
+        };
+        let queued = rx::push(&self.rx, Entry { addr, data }, max_len, max_bytes);
+        let mut m = self.mutable.lock();
+        match (queued, sniff) {
+            (false, _) => m.stats.queue_drops += 1,
+            (true, true) => m.stats.sniffed += 1,
+            (true, false) => m.stats.diverted += 1,
+        }
+    }
 }
 
 impl Drop for Open {
@@ -139,18 +166,24 @@ pub fn open(file: &File, input: &[u8]) -> Result<(), sys::NTSTATUS> {
     }
     // Verify outside the lock: it is linear in the program's size.
     let open = Arc::new(Open::new(&req, file.rx.clone())?);
-    // A SEND_ONLY handle captures nothing: it needs no WFP filter.
-    if matches!(open.layer, Layer::Network | Layer::NetworkForward)
-        && !open.flags.contains(Flags::SEND_ONLY)
-    {
-        // SAFETY: at PASSIVE_LEVEL, in the dispatch routine.
-        unsafe { wfp::attach(&open)? };
+    // A SEND_ONLY handle captures nothing: it needs no WFP filter, and no place among the
+    // lightweight filter's handles.
+    let capture = !open.flags.contains(Flags::SEND_ONLY);
+    match open.layer {
+        Layer::Network | Layer::NetworkForward if capture => {
+            // SAFETY: at PASSIVE_LEVEL, in the dispatch routine.
+            unsafe { wfp::attach(&open)? };
+        }
+        Layer::Ethernet if !lwf::available() => return Err(sys::STATUS_NOT_SUPPORTED),
+        Layer::Ethernet if capture => lwf::attach(&open),
+        _ => {}
     }
     let mut state = file.state.lock();
     if !matches!(*state, State::New) {
         drop(state);
         // SAFETY: as above.
         unsafe { wfp::detach(&open) };
+        lwf::detach(&open);
         return Err(sys::STATUS_INVALID_DEVICE_STATE);
     }
     *state = State::Open(open);
@@ -167,6 +200,7 @@ pub unsafe fn close(file: &File) {
     if let State::Open(open) = &old {
         // SAFETY: the caller's contract.
         unsafe { wfp::detach(open) };
+        lwf::detach(open);
     }
     drop(old);
 }

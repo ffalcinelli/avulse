@@ -212,3 +212,27 @@ fn records_and_small_requests() {
     assert_eq!((OPEN >> 14) & 3, 3);
     assert_eq!(RECV & 3, 2);
 }
+
+#[test]
+fn ethernet_contexts() {
+    use crate::ioctl::EthernetContext;
+    let c = EthernetContext {
+        if_idx: 7,
+        flags: EthernetContext::VLAN_OFFLOADED | EthernetContext::LSO_V2,
+        lso_mss: 1460,
+    };
+    let bytes = c.encode();
+    assert_eq!(
+        bytes.as_bytes()[..12],
+        [0xe7, 5, 0, 0, 7, 0, 0, 0, 0xb4, 5, 0, 0]
+    );
+    assert_eq!(EthernetContext::decode(&bytes), Some(c));
+    assert!(c.lso());
+    assert_eq!(EthernetContext::decode(&Context::EMPTY), None);
+    let mut other = *bytes.as_bytes();
+    other[1] = 8;
+    assert_eq!(EthernetContext::decode(&Context::from_bytes(other)), None);
+    let mut other = *bytes.as_bytes();
+    other[40] = 1;
+    assert_eq!(EthernetContext::decode(&Context::from_bytes(other)), None);
+}
