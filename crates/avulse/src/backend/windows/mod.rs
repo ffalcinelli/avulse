@@ -81,6 +81,21 @@ impl Backend for Windows {
                 modify: true,
             };
         }
+        // Flows and handles are reported; binds, connects, listens and accepts can be refused.
+        c.layers[Layer::Flow as usize] = LayerSupport {
+            open: true,
+            ..LayerSupport::default()
+        };
+        c.layers[Layer::Socket as usize] = LayerSupport {
+            open: true,
+            divert: true,
+            drop: true,
+            ..LayerSupport::default()
+        };
+        c.layers[Layer::Reflect as usize] = LayerSupport {
+            open: true,
+            ..LayerSupport::default()
+        };
         c
     }
 
@@ -275,9 +290,7 @@ impl Handle {
         let program = match spec.filter.program() {
             Ok(p) => p.to_bytes(),
             Err(EncodeError::UserSpaceOnly) => {
-                return Err(Error::Unsupported(
-                    "filters with `matches` on Windows (they come with injection)",
-                ));
+                return Err(Error::Unsupported("filters with `matches` on Windows"));
             }
             Err(_) => {
                 return Err(Error::Unsupported(
@@ -445,12 +458,17 @@ impl Handle {
             let r =
                 r.map_err(|_| Error::Io(io::Error::other("a malformed record from the driver")))?;
             // Which checksums are right, as on Linux: those that are not get computed when the
-            // packet is sent back.
+            // packet is sent back. Events have no packet.
             let mut addr = r.addr;
-            let valid = checksum::verify(r.data, self.link());
-            addr.ip_checksum = valid.ipv4;
-            addr.tcp_checksum = valid.tcp;
-            addr.udp_checksum = valid.udp;
+            if matches!(
+                self.layer,
+                Layer::Network | Layer::NetworkForward | Layer::Ethernet
+            ) {
+                let valid = checksum::verify(r.data, self.link());
+                addr.ip_checksum = valid.ipv4;
+                addr.tcp_checksum = valid.tcp;
+                addr.udp_checksum = valid.udp;
+            }
             queue.push_back((r.data.to_vec(), addr));
         }
         Ok(())

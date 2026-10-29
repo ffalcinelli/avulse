@@ -1,5 +1,6 @@
 //! The WFP side: callouts at the IP packet and forward layers, IPv4 and IPv6, which run each open
-//! handle's program on the packets of its layer.
+//! handle's program on the packets of its layer, and those of the ALE layers (`ale`), for the
+//! FLOW and SOCKET layers.
 //!
 //! The callouts are registered when the driver loads, and added to the base filtering engine, with
 //! a sublayer, in a dynamic session that the driver closes at unload (which removes everything it
@@ -22,7 +23,7 @@ use avulse_proto::Link;
 use crate::handle::Open;
 use crate::lock::SpinLock;
 use crate::sys::{self, w};
-use crate::{eval, inject};
+use crate::{ale, eval, inject};
 
 const fn guid(a: u32, b: u16, c: u16, d: [u8; 8]) -> sys::GUID {
     sys::GUID {
@@ -161,8 +162,45 @@ const HOOKS: [Hook; 6] = [
     },
 ];
 
+/// The packet layers' classify functions, in the order of [`HOOKS`].
+const PACKET_CLASSIFY: [sys::FWPS_CALLOUT_CLASSIFY_FN3; 6] = [
+    Some(classify_0),
+    Some(classify_1),
+    Some(classify_2),
+    Some(classify_3),
+    Some(classify_4),
+    Some(classify_5),
+];
+
+/// One callout of the driver: its WFP layer, the avulse layer it serves and its functions.
+#[derive(Clone, Copy)]
+pub struct Callout {
+    pub layer: sys::GUID,
+    pub avulse: Layer,
+    pub classify: sys::FWPS_CALLOUT_CLASSIFY_FN3,
+    pub flow_delete: sys::FWPS_CALLOUT_FLOW_DELETE_NOTIFY_FN0,
+    /// The layer cannot block: its filters inspect.
+    pub inspect: bool,
+}
+
+/// Every callout: the packet layers', then the ALE layers'.
+const CALLOUTS: usize = HOOKS.len() + ale::HOOKS.len();
+
+fn callout(i: usize) -> Callout {
+    match HOOKS.get(i) {
+        Some(h) => Callout {
+            layer: h.layer,
+            avulse: h.avulse,
+            classify: PACKET_CLASSIFY[i],
+            flow_delete: None,
+            inspect: false,
+        },
+        None => ale::callout(i - HOOKS.len()),
+    }
+}
+
 static ENGINE: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
-static CALLOUT_IDS: [AtomicU32; 6] = [const { AtomicU32::new(0) }; 6];
+static CALLOUT_IDS: [AtomicU32; CALLOUTS] = [const { AtomicU32::new(0) }; CALLOUTS];
 
 /// The open handles the hooks serve, by id (the WFP filters' context).
 static HANDLES: SpinLock<BTreeMap<u64, Arc<Open>>> = SpinLock::new(BTreeMap::new());
@@ -191,25 +229,18 @@ pub unsafe fn register(device: *mut sys::DEVICE_OBJECT) -> sys::NTSTATUS {
     // SAFETY: plain call.
     unsafe { sys::KeQueryPerformanceCounter((&raw mut freq).cast()) };
     FREQUENCY.store(freq as u64, Ordering::Relaxed);
-    let classify: [sys::FWPS_CALLOUT_CLASSIFY_FN3; 6] = [
-        Some(classify_0),
-        Some(classify_1),
-        Some(classify_2),
-        Some(classify_3),
-        Some(classify_4),
-        Some(classify_5),
-    ];
-    for (i, f) in classify.into_iter().enumerate() {
+    for (i, slot) in CALLOUT_IDS.iter().enumerate() {
+        let c = callout(i);
         let callout = sys::FWPS_CALLOUT3 {
             calloutKey: callout_key(i as u8),
             flags: 0,
-            classifyFn: f,
+            classifyFn: c.classify,
             notifyFn: Some(notify),
-            flowDeleteFn: None,
+            flowDeleteFn: c.flow_delete,
         };
         let mut id = 0;
         check!(sys::FwpsCalloutRegister3(device.cast(), &callout, &mut id));
-        CALLOUT_IDS[i].store(id, Ordering::Release);
+        slot.store(id, Ordering::Release);
     }
     let session = sys::FWPM_SESSION0 {
         flags: sys::FWPM_SESSION_FLAG_DYNAMIC,
@@ -245,7 +276,8 @@ unsafe fn add_objects(engine: sys::HANDLE) -> sys::NTSTATUS {
         ..Default::default()
     };
     check!(sys::FwpmSubLayerAdd0(engine, &sublayer, null_mut()));
-    for (i, h) in HOOKS.iter().enumerate() {
+    for i in 0..CALLOUTS {
+        let h = callout(i);
         let callout = sys::FWPM_CALLOUT0 {
             calloutKey: callout_key(i as u8),
             displayData: sys::FWPM_DISPLAY_DATA0 {
@@ -266,8 +298,8 @@ unsafe fn add_objects(engine: sys::HANDLE) -> sys::NTSTATUS {
     sys::STATUS_SUCCESS
 }
 
-/// Closes the engine (removing every object of the session, the handles' filters included) and
-/// unregisters the callouts.
+/// Closes the engine (removing every object of the session, the handles' filters included),
+/// removes the flows' contexts and unregisters the callouts.
 ///
 /// # Safety
 ///
@@ -283,6 +315,10 @@ pub unsafe fn unregister() {
         // SAFETY: the engine is open.
         let _ = unsafe { sys::FwpmEngineClose0(engine) };
     }
+    // A callout with flow contexts cannot be unregistered.
+    // SAFETY: at PASSIVE_LEVEL.
+    unsafe { ale::forget_flows() };
+    ale::free();
     for id in &CALLOUT_IDS {
         let id = id.swap(0, Ordering::AcqRel);
         if id != 0 {
@@ -292,8 +328,8 @@ pub unsafe fn unregister() {
     }
 }
 
-/// Adds the WFP filters of a handle at the NETWORK layers, and makes it findable by the hooks.
-/// Other layers have no WFP filter yet. Returns the handle's id.
+/// Adds the WFP filters of a handle (NETWORK, NETWORK_FORWARD, FLOW or SOCKET), and makes it
+/// findable by the hooks.
 ///
 /// # Safety
 ///
@@ -308,7 +344,8 @@ pub unsafe fn attach(open: &Arc<Open>) -> Result<(), sys::NTSTATUS> {
     HANDLES.lock().insert(id, open.clone());
     // Higher priorities run first: weights 1 to 60,001.
     let mut weight = (i32::from(open.priority) + 30_001) as u64;
-    for (i, h) in HOOKS.iter().enumerate() {
+    for i in 0..CALLOUTS {
+        let h = callout(i);
         if h.avulse != open.layer {
             continue;
         }
@@ -325,7 +362,11 @@ pub unsafe fn attach(open: &Arc<Open>) -> Result<(), sys::NTSTATUS> {
         filter.__bindgen_anon_1.rawContext = id;
         filter.weight.type_ = sys::FWP_DATA_TYPE_::FWP_UINT64;
         filter.weight.__bindgen_anon_1.uint64 = &mut weight;
-        filter.action.type_ = sys::FWP_ACTION_CALLOUT_UNKNOWN;
+        filter.action.type_ = if h.inspect {
+            sys::FWP_ACTION_CALLOUT_INSPECTION
+        } else {
+            sys::FWP_ACTION_CALLOUT_UNKNOWN
+        };
         filter.action.__bindgen_anon_1.calloutKey = callout_key(i as u8);
         let mut filter_id = 0;
         // SAFETY: the engine is open; `filter` and `weight` are valid for the call.
@@ -347,16 +388,39 @@ pub unsafe fn attach(open: &Arc<Open>) -> Result<(), sys::NTSTATUS> {
 ///
 /// At PASSIVE_LEVEL.
 pub unsafe fn detach(open: &Open) {
-    HANDLES.lock().remove(&open.id.load(Ordering::Acquire));
+    let last_flow = {
+        let mut handles = HANDLES.lock();
+        handles.remove(&open.id.load(Ordering::Acquire));
+        open.layer == Layer::Flow && !handles.values().any(|h| h.layer == Layer::Flow)
+    };
     let ids: Vec<u64> = core::mem::take(&mut *open.filters.lock());
     let engine = ENGINE.load(Ordering::Acquire);
-    if engine.is_null() {
-        return;
+    if !engine.is_null() {
+        for id in ids {
+            // SAFETY: the engine is open, and `id` is a filter it added.
+            let _ = unsafe { sys::FwpmFilterDeleteById0(engine, id) };
+        }
     }
-    for id in ids {
-        // SAFETY: the engine is open, and `id` is a filter it added.
-        let _ = unsafe { sys::FwpmFilterDeleteById0(engine, id) };
+    if last_flow {
+        // No FLOW handle is left to report the end of the flows seen.
+        // SAFETY: at PASSIVE_LEVEL.
+        unsafe { ale::forget_flows() };
     }
+}
+
+/// The open handle of id `id` (a WFP filter's context), if it is still open.
+pub fn handle(id: u64) -> Option<Arc<Open>> {
+    HANDLES.lock().get(&id).cloned()
+}
+
+/// The open handles at `layer`.
+pub fn handles_at(layer: Layer) -> Vec<Arc<Open>> {
+    HANDLES
+        .lock()
+        .values()
+        .filter(|h| h.layer == layer)
+        .cloned()
+        .collect()
 }
 
 unsafe extern "C" fn notify(
@@ -398,7 +462,7 @@ classify_fns! {
 /// # Safety
 ///
 /// `values` is what WFP passed.
-unsafe fn value_u32(values: *const sys::FWPS_INCOMING_VALUES0, index: usize) -> u32 {
+pub unsafe fn value_u32(values: *const sys::FWPS_INCOMING_VALUES0, index: usize) -> u32 {
     // SAFETY: as above; the index is checked against the count.
     unsafe {
         let v = &*values;
@@ -437,7 +501,7 @@ unsafe fn classify(
     }
     // SAFETY: WFP passes a valid filter.
     let id = unsafe { (*filter).context };
-    let Some(open) = HANDLES.lock().get(&id).cloned() else {
+    let Some(open) = handle(id) else {
         return;
     };
     if open.idle() {

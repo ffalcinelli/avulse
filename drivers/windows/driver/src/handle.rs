@@ -15,7 +15,7 @@ use core::sync::atomic::AtomicU64;
 use crate::lock::SpinLock;
 use crate::rx::{self, Entry, Rx};
 use crate::sys;
-use crate::{lwf, wfp};
+use crate::{lwf, reflect, wfp};
 
 /// What a file object holds (`FsContext`).
 pub struct File {
@@ -42,8 +42,7 @@ pub enum State {
     Closed,
 }
 
-/// An open handle. The filter text and syntax serve REFLECT (Step 28).
-#[allow(dead_code)]
+/// An open handle.
 pub struct Open {
     pub layer: Layer,
     pub priority: i16,
@@ -53,6 +52,9 @@ pub struct Open {
     pub filter: String,
     /// The interfaces to capture on; empty for all of them.
     pub interfaces: Vec<u32>,
+    /// The process that opened it, and when, for REFLECT.
+    pub process_id: u32,
+    pub opened: i64,
     /// The program, borrowing `code`, which it is freed with.
     program: VerifiedProgram<'static>,
     code: *mut [u8],
@@ -102,6 +104,9 @@ impl Open {
             syntax: req.syntax,
             filter: req.filter.into(),
             interfaces: req.interfaces.clone(),
+            // SAFETY: a plain query, in the context of the process that opens the handle.
+            process_id: unsafe { sys::PsGetCurrentProcessId() } as usize as u32,
+            opened: wfp::now_ns(),
             program,
             code,
             mutable: SpinLock::new(Mutable {
@@ -170,7 +175,7 @@ pub fn open(file: &File, input: &[u8]) -> Result<(), sys::NTSTATUS> {
     // lightweight filter's handles.
     let capture = !open.flags.contains(Flags::SEND_ONLY);
     match open.layer {
-        Layer::Network | Layer::NetworkForward if capture => {
+        Layer::Network | Layer::NetworkForward | Layer::Flow | Layer::Socket if capture => {
             // SAFETY: at PASSIVE_LEVEL, in the dispatch routine.
             unsafe { wfp::attach(&open)? };
         }
@@ -186,7 +191,9 @@ pub fn open(file: &File, input: &[u8]) -> Result<(), sys::NTSTATUS> {
         lwf::detach(&open);
         return Err(sys::STATUS_INVALID_DEVICE_STATE);
     }
-    *state = State::Open(open);
+    *state = State::Open(open.clone());
+    drop(state);
+    reflect::opened(&open);
     Ok(())
 }
 
@@ -198,6 +205,7 @@ pub fn open(file: &File, input: &[u8]) -> Result<(), sys::NTSTATUS> {
 pub unsafe fn close(file: &File) {
     let old = core::mem::replace(&mut *file.state.lock(), State::Closed);
     if let State::Open(open) = &old {
+        reflect::closed(open);
         // SAFETY: the caller's contract.
         unsafe { wfp::detach(open) };
         lwf::detach(open);

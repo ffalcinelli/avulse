@@ -16,13 +16,15 @@
 
 #![cfg(target_os = "windows")]
 
-use std::io::{Read, Write};
-use std::net::{Shutdown as NetShutdown, TcpStream, UdpSocket};
-use std::process::Command;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Shutdown as NetShutdown, TcpListener, TcpStream, UdpSocket};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use avulse::{Error, Flags, Handle, Layer, MAX_PACKET_LEN, OpenOptions, Param, Shutdown};
+use avulse::{
+    Address, Error, Event, Flags, Handle, Layer, MAX_PACKET_LEN, OpenOptions, Param, Shutdown,
+};
 
 fn enabled() -> bool {
     if std::env::var_os("AVULSE_DRIVER").is_some() {
@@ -665,4 +667,346 @@ fn lso_reinject() {
         largest.into_inner()
     );
     assert_eq!(reply.trim(), LEN.to_string());
+}
+
+// The FLOW, SOCKET and REFLECT layers (Step 28).
+
+/// What `h` receives until it is quiet for `quiet`.
+fn drain_for(h: &Handle, quiet: Duration) -> Vec<(Vec<u8>, Address)> {
+    let mut buf = vec![0; MAX_PACKET_LEN];
+    let mut out = Vec::new();
+    loop {
+        match h.recv_timeout(&mut buf, quiet) {
+            Ok((n, a)) => out.push((buf[..n].to_vec(), a)),
+            Err(Error::Timeout) => return out,
+            Err(e) => panic!("recv: {e}"),
+        }
+    }
+}
+
+fn drain(h: &Handle) -> Vec<(Vec<u8>, Address)> {
+    drain_for(h, Duration::from_millis(500))
+}
+
+fn open_flow(filter: &str) -> Handle {
+    Handle::open(filter, Layer::Flow, 0, Flags::SNIFF | Flags::RECV_ONLY)
+        .unwrap_or_else(|e| panic!("opening `{filter}` at FLOW: {e}"))
+}
+
+fn open_socket(filter: &str, flags: Flags) -> Handle {
+    Handle::open(filter, Layer::Socket, 0, flags | Flags::RECV_ONLY)
+        .unwrap_or_else(|e| panic!("opening `{filter}` at SOCKET: {e}"))
+}
+
+fn kinds(got: &[(Vec<u8>, Address)]) -> Vec<(Event, bool)> {
+    let mut k: Vec<_> = got.iter().map(|(_, a)| (a.event, a.outbound)).collect();
+    k.sort_by_key(|&(e, o)| (e as u8, o));
+    k
+}
+
+/// Loopback TCP flows over IPv4 and IPv6: both ends, each established and deleted once, with
+/// their endpoints and this process.
+#[test]
+fn flow_loopback() {
+    use Event::{FlowDeleted, FlowEstablished};
+    if !enabled() {
+        return;
+    }
+    for host in ["127.0.0.1", "::1"] {
+        let listener = TcpListener::bind((host, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let h = open_flow(&format!("local.port == {port} or remote.port == {port}"));
+        let s = TcpStream::connect((host, port)).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        drop((s, accepted, listener));
+        let got = drain_for(&h, Duration::from_secs(2));
+        assert_eq!(
+            kinds(&got),
+            [
+                (FlowEstablished, false),
+                (FlowEstablished, true),
+                (FlowDeleted, false),
+                (FlowDeleted, true)
+            ],
+            "{host}: {got:#?}"
+        );
+        for (p, a) in &got {
+            assert!(p.is_empty() && a.sniffed && a.loopback && a.layer == Layer::Flow);
+            assert_eq!(a.ipv6, host == "::1");
+            assert_eq!(
+                (a.flow.protocol, a.flow.process_id),
+                (6, std::process::id())
+            );
+            assert!(a.flow.endpoint_id != 0, "{a:?}");
+        }
+        let out = got.iter().find(|(_, a)| a.outbound).unwrap();
+        assert_eq!(out.1.flow.remote_port, port);
+        let mut endpoints: Vec<_> = got.iter().map(|(_, a)| a.flow.endpoint_id).collect();
+        endpoints.sort();
+        endpoints.dedup();
+        assert_eq!(endpoints.len(), 2, "{got:#?}");
+    }
+}
+
+/// A UDP flow is established once over several datagrams, and deleted when its socket closes.
+#[test]
+fn flow_udp() {
+    use Event::{FlowDeleted, FlowEstablished};
+    if !enabled() {
+        return;
+    }
+    let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = rx.local_addr().unwrap().port();
+    let h = open_flow(&format!("protocol == 17 and remote.port == {port}"));
+    let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+    for _ in 0..3 {
+        tx.send_to(b"ping", ("127.0.0.1", port)).unwrap();
+        rx.recv_from(&mut [0; 16]).unwrap();
+    }
+    let got = drain(&h);
+    assert_eq!(kinds(&got), [(FlowEstablished, true)], "{got:#?}");
+    drop(tx);
+    let ended = drain_for(&h, Duration::from_secs(2));
+    assert_eq!(kinds(&ended), [(FlowDeleted, true)], "{ended:#?}");
+    assert_eq!(got[0].1.flow, ended[0].1.flow);
+}
+
+fn refused(r: std::io::Result<impl Sized>) -> bool {
+    matches!(r, Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
+/// A SNIFF handle sees a bind, a listen, a connect, an accept and the closes of the two
+/// connected sockets.
+#[test]
+fn socket_events() {
+    use Event::*;
+    if !enabled() {
+        return;
+    }
+    let port = 9104;
+    let h = open_socket(
+        &format!("local.port == {port} or remote.port == {port}"),
+        Flags::SNIFF,
+    );
+    let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+    let client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let (accepted, peer) = listener.accept().unwrap();
+    drop((client, accepted, listener));
+    let got = drain_for(&h, Duration::from_secs(1));
+    let events: Vec<_> = got.iter().map(|(_, a)| a.event).collect();
+    for e in [SocketBind, SocketListen, SocketConnect, SocketAccept] {
+        assert_eq!(
+            events.iter().filter(|&&x| x == e).count(),
+            1,
+            "{e:?}: {got:#?}"
+        );
+    }
+    // The client and the accepted socket: Windows reports no closure for a listening socket
+    // (Linux does, so it has three).
+    let closes: Vec<_> = got
+        .iter()
+        .filter(|(_, a)| a.event == SocketClose)
+        .map(|(_, a)| (a.flow.local_port, a.flow.remote_port))
+        .collect();
+    assert_eq!(closes.len(), 2, "{got:#?}");
+    assert!(
+        closes.iter().all(|&(l, r)| l == port || r == port),
+        "{closes:?}"
+    );
+    for (p, a) in &got {
+        assert!(p.is_empty() && a.sniffed && a.loopback && a.layer == Layer::Socket);
+        assert_eq!(
+            (a.flow.protocol, a.flow.process_id),
+            (6, std::process::id())
+        );
+    }
+    let connect = got.iter().find(|(_, a)| a.event == SocketConnect).unwrap();
+    assert!(connect.1.outbound);
+    assert_eq!(connect.1.flow.remote_port, port);
+    let accept = got.iter().find(|(_, a)| a.event == SocketAccept).unwrap();
+    assert!(!accept.1.outbound);
+    assert_eq!(
+        (accept.1.flow.local_port, accept.1.flow.remote_port),
+        (port, peer.port())
+    );
+}
+
+/// Without SNIFF, the handle refuses the connects, binds, listens and accepts its filter
+/// matches, over IPv4 and IPv6, reports them, and lets the others through; with DROP, it reports
+/// nothing.
+#[test]
+fn socket_refuses_calls() {
+    use Event::*;
+    if !enabled() {
+        return;
+    }
+    let h = open_socket(
+        "(event == connect and remote.port == 9100) or (event == bind and local.port == 9101) \
+         or (event == listen and local.port == 9107) or (event == accept and local.port == 9108)",
+        Flags::NONE,
+    );
+    let listener = TcpListener::bind("127.0.0.1:9102").unwrap();
+    let listener6 = TcpListener::bind("[::1]:9102").unwrap();
+    for host in ["127.0.0.1", "::1"] {
+        assert!(refused(TcpStream::connect((host, 9100))), "{host}");
+        assert!(refused(UdpSocket::bind((host, 9101))), "{host}");
+        assert!(TcpStream::connect((host, 9102)).is_ok(), "{host}");
+        assert!(UdpSocket::bind((host, 9105)).is_ok(), "{host}");
+        assert!(TcpListener::bind((host, 9107)).is_err(), "{host}");
+        let accepting = TcpListener::bind((host, 9108)).unwrap();
+        let to = accepting.local_addr().unwrap();
+        assert!(
+            TcpStream::connect_timeout(&to, Duration::from_secs(1)).is_err(),
+            "{host}"
+        );
+    }
+    drop((listener, listener6));
+    let got = drain(&h);
+    let events: Vec<_> = got.iter().map(|(_, a)| a.event).collect();
+    for e in [SocketConnect, SocketBind, SocketListen] {
+        assert_eq!(
+            events.iter().filter(|&&x| x == e).count(),
+            2,
+            "{e:?}: {got:#?}"
+        );
+    }
+    assert!(
+        events.iter().filter(|&&x| x == SocketAccept).count() >= 2,
+        "{got:#?}"
+    );
+    assert!(got.iter().all(|(_, a)| !a.sniffed), "{got:#?}");
+    h.close().unwrap();
+    assert!(!refused(TcpStream::connect(("127.0.0.1", 9100))));
+
+    let d = open_socket("event == connect and remote.port == 9100", Flags::DROP);
+    assert!(refused(TcpStream::connect(("127.0.0.1", 9100))));
+    assert!(drain(&d).is_empty());
+}
+
+/// The driver refuses calls by process name (the image's file name, as Windows names it, cut to
+/// 32 bytes), and FLOW reports it.
+#[test]
+fn process_names() {
+    if !enabled() {
+        return;
+    }
+    let listener = TcpListener::bind("127.0.0.1:9106").unwrap();
+    let flow = open_flow("remote.port == 9106");
+    drop(TcpStream::connect(("127.0.0.1", 9106)).unwrap());
+    let got = drain(&flow);
+    let name = got[0].1.flow.process_name().expect("a name").to_owned();
+    let exe = std::env::current_exe().unwrap();
+    let exe = exe.file_name().unwrap().to_str().unwrap();
+    // The address keeps the first 32 bytes of the name: this one is cut.
+    let kept = &exe[..exe.len().min(avulse::PROCESS_NAME_LEN)];
+    assert!(name.eq_ignore_ascii_case(kept), "{name} for {exe}");
+    let other = open_socket(
+        "event == connect and remote.port == 9106 and process.name == \"other.exe\"",
+        Flags::NONE,
+    );
+    assert!(TcpStream::connect(("127.0.0.1", 9106)).is_ok());
+    drop(other);
+    let deny = open_socket(
+        &format!("event == connect and remote.port == 9106 and process.name == \"{name}\""),
+        Flags::NONE,
+    );
+    assert!(refused(TcpStream::connect(("127.0.0.1", 9106))));
+    let got = drain(&deny);
+    assert_eq!(got.len(), 1, "{got:#?}");
+    assert_eq!(got[0].1.flow.process_name(), Some(name.as_str()));
+    drop(listener);
+}
+
+/// Starts this test binary as a child that opens a FLOW handle (`owner`), and returns once the
+/// handle is open.
+fn spawn_owner() -> Child {
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "owner", "--nocapture", "--test-threads=1"])
+        .env("AVULSE_OWNER", "flow")
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = BufReader::new(child.stdout.take().unwrap());
+    for line in out.lines() {
+        if line.unwrap().ends_with("handle open") {
+            return child;
+        }
+    }
+    let status = child.wait().unwrap();
+    panic!("the owner process ended: {status}");
+}
+
+/// The child process of [`reflect_layer`]: opens a handle and waits to be killed.
+#[test]
+fn owner() {
+    if std::env::var_os("AVULSE_OWNER").is_none() {
+        return;
+    }
+    let _h = open_flow("true");
+    println!("handle open");
+    loop {
+        std::thread::sleep(Duration::from_secs(60));
+    }
+}
+
+/// REFLECT reports the handles there are (itself included), then those that open, and close
+/// when their process dies; its filter sees the reflected handle's layer.
+#[test]
+fn reflect_layer() {
+    use Event::{ReflectClose, ReflectOpen};
+    if !enabled() {
+        return;
+    }
+    let pid = std::process::id();
+    let all = Handle::open("true", Layer::Reflect, 0, Flags::SNIFF | Flags::RECV_ONLY).unwrap();
+    let flows = Handle::open(
+        "layer == flow",
+        Layer::Reflect,
+        0,
+        Flags::SNIFF | Flags::RECV_ONLY,
+    )
+    .unwrap();
+    let first = drain(&all);
+    let me = first
+        .iter()
+        .find(|(_, a)| a.reflect.process_id == pid && a.reflect.layer == Layer::Reflect)
+        .unwrap_or_else(|| panic!("itself: {first:#?}"));
+    assert_eq!(me.1.event, ReflectOpen);
+    assert!(me.1.sniffed);
+    assert_eq!(me.1.reflect.flags, Flags::SNIFF | Flags::RECV_ONLY);
+    assert!(
+        drain(&flows)
+            .iter()
+            .all(|(_, a)| a.reflect.layer == Layer::Flow)
+    );
+
+    let mut child = spawn_owner();
+    let opened = drain(&all);
+    let theirs: Vec<_> = opened
+        .iter()
+        .filter(|(_, a)| a.reflect.process_id == child.id())
+        .collect();
+    assert_eq!(theirs.len(), 1, "{opened:#?}");
+    let (data, a) = theirs[0];
+    assert_eq!(a.event, ReflectOpen);
+    assert_eq!(a.reflect.layer, Layer::Flow);
+    assert_eq!(a.reflect.flags, Flags::SNIFF | Flags::RECV_ONLY);
+    assert_eq!(data.as_slice(), b"true");
+    assert_eq!(a.reflect.syntax, avulse::Syntax::Native);
+    assert!(a.reflect.timestamp <= a.timestamp);
+    assert!(
+        drain(&flows)
+            .iter()
+            .any(|(_, a)| a.reflect.process_id == child.id() && a.event == ReflectOpen)
+    );
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let closed = drain(&all);
+    let theirs: Vec<_> = closed
+        .iter()
+        .filter(|(_, a)| a.reflect.process_id == child.id())
+        .map(|(_, a)| a.event)
+        .collect();
+    assert_eq!(theirs, [ReflectClose], "{closed:#?}");
 }

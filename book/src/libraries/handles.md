@@ -131,6 +131,13 @@ outbound, as in WinDivert. `capabilities()` says what works.
   with its `context` gets its tag taken out again. Large TCP sends (LSO), which the card
   segments, are captured whole and sent back as large sends; other frames must fit the
   adapter's MTU.
+- **The `Flow`, `Socket` and `Reflect` layers** come from WFP's application layers and the
+  driver's own handle table, and the filter runs in the driver.
+  - A `Socket` handle without `SNIFF` refuses binds, connects, listens and accepts. The
+    application's call fails with `WSAEACCES`, which is `PermissionDenied`.
+  - A listening socket's close is not reported: Windows reports the closure of connected
+    sockets only.
+  - A `Flow` handle reports the end of the flows it saw established, at most 16,384 at a time.
 - **Impostors** are tracked per layer. A packet that a `Network` handle sends is not an
   impostor at the `Ethernet` layer, and the other way round. On Linux, both layers share the TC
   hooks and their marks.

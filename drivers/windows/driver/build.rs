@@ -32,7 +32,8 @@ fn main() -> Result<(), Box<dyn Error>> {
              MmMapLockedPagesSpecifyCache|IoAllocateMdl|IoFreeMdl|MmBuildMdlForNonPagedPool|\
              KeExpandKernelStackAndCalloutEx|KeQueryMaximumProcessorCountEx|\
              KeGetCurrentProcessorNumberEx|\
-             KeAcquireSpinLockRaiseToDpc|KeReleaseSpinLock|KeQueryPerformanceCounter|DbgPrint",
+             KeAcquireSpinLockRaiseToDpc|KeReleaseSpinLock|KeQueryPerformanceCounter|DbgPrint|\
+             PsGetCurrentProcessId",
         )
         // These unions hold `NET_BUFFER_DATA;` and `NET_BUFFER_LIST_DATA;`, anonymous members of
         // a named type (a Microsoft extension), which bindgen drops, so it gets their size

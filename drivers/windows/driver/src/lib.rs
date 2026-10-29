@@ -3,8 +3,9 @@
 //! It creates the control device `\\.\Avulse`, through which the user-mode backend opens handles
 //! (`avulse_abi::ioctl`). Each handle carries a filter compiled to avulse bytecode, which the
 //! driver verifies when the handle opens and runs with the `no_std` interpreter on the packets of
-//! its hooks: WFP callouts for the NETWORK layers (`wfp`), and an NDIS lightweight filter for
-//! ETHERNET (`lwf`), which needs the driver installed with its INF. `EVAL` runs a handle's filter
+//! its hooks: WFP callouts for the NETWORK layers (`wfp`) and the FLOW and SOCKET layers (`ale`),
+//! and an NDIS lightweight filter for ETHERNET (`lwf`), which needs the driver installed with its
+//! INF. REFLECT reports the driver's own handles (`reflect`). `EVAL` runs a handle's filter
 //! on a packet user mode passes, for the tests.
 
 #![no_std]
@@ -16,12 +17,14 @@ extern crate wdk_panic;
 #[cfg(not(test))]
 use wdk_alloc::WdkAllocator;
 
+mod ale;
 mod device;
 mod eval;
 mod handle;
 mod inject;
 mod lock;
 mod lwf;
+mod reflect;
 mod rx;
 mod sys;
 mod wfp;
@@ -85,6 +88,7 @@ unsafe extern "C" fn unload(_driver: *mut sys::DRIVER_OBJECT) {
     unsafe {
         lwf::unregister();
         wfp::unregister();
+        reflect::free();
         inject::free();
         device::delete();
     }

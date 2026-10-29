@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-29, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5: Steps 22 to 27 done, next Step 28)
+## Status (2026-10-29, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5: Steps 22 to 28 done, next Step 29)
 
 | Area | State |
 | --- | --- |
@@ -20,7 +20,7 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
 | `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Steps 15 to 17: the FLOW, SOCKET and REFLECT layers (`events.rs`, `reflect.rs`), SOCKET refusing binds and connects in the kernel; `Address` version 2 (216 bytes) with the process name. Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
 | `crates/capi` (`avulse-capi`) | Step 18: the C ABI, `libavulse.so`/`.a`, header `include/avulse.h` (hand-written, layout pinned by asserts), 20 functions, tested from C (`tests/c.rs`, `tests/c/abi.c`). |
-| `drivers/windows` | Step 23: `avulse.sys` (WDM, Rust, outside the workspace): the control device, handles opened with verified bytecode, parameters, statistics, shutdown, and `EVAL`, a test IOCTL that runs a handle's filter in the kernel. `test/` passes 243 checks in the `windows` VM under Driver Verifier, WinDivert's filter vectors included. Steps 25 and 26: WFP callouts divert, sniff, drop and inject at the NETWORK layers. Step 27: the NDIS lightweight filter (`lwf.rs`) gives the ETHERNET layer, with VLAN tags and large sends restored. `capture_windows.rs` (20 tests) passes with the driver as a plain service and installed through `netcfg`. |
+| `drivers/windows` | Step 23: `avulse.sys` (WDM, Rust, outside the workspace): the control device, handles opened with verified bytecode, parameters, statistics, shutdown, and `EVAL`, a test IOCTL that runs a handle's filter in the kernel. `test/` passes 243 checks in the `windows` VM under Driver Verifier, WinDivert's filter vectors included. Steps 25 and 26: WFP callouts divert, sniff, drop and inject at the NETWORK layers. Step 27: the NDIS lightweight filter (`lwf.rs`) gives the ETHERNET layer, with VLAN tags and large sends restored. Step 28: FLOW, SOCKET and REFLECT (`ale.rs`, `reflect.rs`). `capture_windows.rs` (27 tests) passes with the driver as a plain service and installed through `netcfg`. |
 | `crates/abi` (`avulse-abi`) | Step 23: the types shared with the driver and the C ABI (`Address`, `Flags`, `Param`, `Shutdown`, `Stats`, `Syntax`), and `ioctl`, the driver protocol. `no_std`. |
 | `crates/windivert-compat` | Steps 19 to 21: `libavulse_windivert.so`, libebpfdivert's C API over avulse (21 `ebpfdivert_*` exports, negative errno values, WinDivert's 80-byte address with avulse's reinjection context in its union). WinDivert's helpers (hash, checksums, `eval_filter` with `random*`) agree with WinDivert's own code on generated vectors (`scripts/gen_compat_vectors.py`). REFLECT's data is WinDivert's serialized filter object (`Filter::windivert_object`, matching WinDivert's compiler on 230 filters). 15 unit tests, the exported-symbol test, and `tests/capture.rs` (6, `AVULSE_BPF=1`) on 6.8 and 5.15. pydivert's suite (155) and jdivert's (334, JNA and Panama) pass against it unchanged. `publish = false`. |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
@@ -2053,7 +2053,70 @@ The INF and its install (`netcfg`) are part of the backend's setup.
 
 **Tests.** ARP and VLAN frames, divert and reinject, inject a frame both ways.
 
-### Step 28: FLOW, SOCKET and REFLECT
+### Step 28: FLOW, SOCKET and REFLECT (done)
+
+**Outcome.** Every layer opens on Windows. In the `windows` VM, under Driver Verifier, the
+driver test (243) and `capture_windows.rs` (27 tests) pass, with the driver both as a plain
+service and installed with `netcfg`. Three runs in a row, no crash dump.
+
+- **`drivers/windows/driver/src/ale.rs`.**
+  - Twelve callouts at the ALE layers, IPv4 and IPv6 (GUIDs checked against `fwpmk.h`). The
+    field indexes come from the bindings' `FWPS_FIELDS_ALE_*_V4_` enums; the IPv6 layers
+    number theirs the same way.
+  - Event to layer: FLOW ESTABLISHED at `ALE_FLOW_ESTABLISHED`; BIND at
+    `ALE_RESOURCE_ASSIGNMENT`; CONNECT at `ALE_AUTH_CONNECT`; LISTEN at `ALE_AUTH_LISTEN`;
+    ACCEPT at `ALE_AUTH_RECV_ACCEPT`; CLOSE at `ALE_ENDPOINT_CLOSURE`.
+  - FLOW handles and CLOSE get inspection filters. Reauthorizations
+    (`FWP_CONDITION_FLAG_IS_REAUTHORIZE`) are skipped.
+  - The address carries the endpoints (IPv4-mapped), ports, protocol (TCP at LISTEN), PID,
+    image name (the last component of `processPath`), endpoint and parent endpoint handles,
+    and `loopback` (the flag, or either address).
+  - `outbound` is the flow's direction at FLOW, and CONNECT only at SOCKET, as on Linux.
+  - The handle's bytecode runs in the kernel on an empty packet, with `random*` hashing the
+    endpoint as Linux does. Fail open: an event that cannot be evaluated is not reported.
+  - A SOCKET handle without SNIFF blocks what it matches (`FWP_ACTION_BLOCK`; the application
+    gets `WSAEACCES`, i.e. `PermissionDenied`) and reports it unsniffed. With DROP, it
+    reports nothing. Windows refuses listens and accepts too: every filter opens without
+    SNIFF, unlike Linux.
+- **FLOW DELETED.** Each flow a FLOW callout classifies gets a context
+  (`FwpsFlowAssociateContext0`, the flow handle, kept in `FLOWS` with the ESTABLISHED
+  address; at most 16,384). The callout's `flowDeleteFn` then reports DELETED to every FLOW
+  handle whose filter matches it.
+  - The contexts are removed when the last FLOW handle closes, and at unload, before the
+    callouts are unregistered.
+  - TCP flows on loopback were reported deleted within 2 s of the close: no TIME_WAIT delay.
+- **REFLECT** (`reflect.rs`): a table of every open handle, oldest first, with the opener's
+  PID (`PsGetCurrentProcessId` at OPEN) and the open time.
+  - A REFLECT handle hears of every handle open (OPEN, itself included), then of each that
+    opens or closes. A process's death closes its handles, so its CLOSE is immediate (no
+    polling, unlike Linux's registry).
+  - The events go out under the table's lock, in the handles' order.
+- **`wfp.rs`.** One table of callouts (`callout(i)`: the packet layers, then `ale::HOOKS`),
+  and `handle`/`handles_at` lookups. Filters of FLOW and SOCKET handles are added like the
+  packet layers', with the same weights.
+- **User mode.** `capabilities()` reports FLOW (open), SOCKET (open, divert, drop) and REFLECT
+  (open). Events skip the checksum flags.
+- **Differences from Linux.**
+  - `process.name` is the image's file name (`curl.exe`), cut to the address's 32 bytes, where
+    Linux has the task's `comm`.
+  - A listening socket's close is not reported: `ALE_ENDPOINT_CLOSURE` covers connected
+    sockets, so a loopback connection gives 2 CLOSE events (client and accepted socket) where
+    Linux gives 3. `ALE_RESOURCE_RELEASE` would add it, at the cost of a duplicate for the
+    client.
+  - FLOW handles get DELETED only for flows established while one was open.
+- **Tests** (`capture_windows.rs`):
+  - `flow_loopback`: both ends over IPv4 and IPv6, established and deleted, two endpoints;
+  - `flow_udp`: established once over three datagrams, deleted when the socket closes;
+  - `socket_events`: one bind, listen, connect and accept, two closes, with directions and
+    ports;
+  - `socket_refuses_calls`: connect, bind, listen and accept refused over both families,
+    others through, reported unsniffed; DROP refuses silently;
+  - `process_names`: the FLOW event's name is the test binary's, cut to 32 bytes, and a
+    connect is refused by name;
+  - `reflect_layer`: itself at first, a child process's FLOW handle opening (with its flags,
+    filter and syntax), and CLOSE when the child is killed.
+
+The original plan of the step follows.
 
 **Where.**
 - FLOW: `ALE_FLOW_ESTABLISHED_V4`/`V6` and the flow-delete callback (`FwpsFlowAssociateContext0`).
@@ -2152,7 +2215,7 @@ pre-release tag) passes, then the v0.0.1 tag publishes. The guide and README say
 - [x] Step 25: NETWORK and NETWORK_FORWARD on Windows (divert, sniff, drop; WFP callouts)
 - [x] Step 26: injection on Windows (send, reinject, impostors)
 - [x] Step 27: ETHERNET on Windows (NDIS LWF; VLAN and LSO restored on reinjection)
-- [ ] Step 28: FLOW, SOCKET and REFLECT on Windows
+- [x] Step 28: FLOW, SOCKET and REFLECT on Windows (ALE callouts, flow contexts, the handle table)
 - [ ] Step 29: `WinDivert.dll` and the binding suites on Windows (Phase 5 exit)
 - [ ] Step 30: hardening and distribution (Driver Verifier, HVCI, CI build, signing)
 - [ ] Phase 6: macOS system extension
