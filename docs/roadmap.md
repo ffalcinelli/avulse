@@ -297,7 +297,10 @@ Exit: the pydivert and jdivert Windows suites pass against it, and the driver is
 Progress (steps in `docs/implementation-plan.md`, Steps 31 to 36): Step 31 gives macOS sniffing and sending at
 NETWORK and ETHERNET without the extension, through `/dev/bpf` (a device per direction), raw sockets and a `utun`,
 tested on GitHub's macOS runners. Step 32 found that the extension cannot run ad-hoc signed on a runner, so it is
-blocked on a Developer ID or a Mac.
+blocked on a Developer ID or a Mac. Steps 33 and 34 write the extension anyway: its logic in Rust
+(`crates/macos-ext`: handles by priority, divert as delay, a packet sent back unchanged going on down the chain, a
+modified one dropped and injected by the client), a Swift shim around it, and the backend's XPC tier, tested on the
+runners against the extension's test mode, without the provider.
 
 Exit: a macOS test suite passes on real hardware, and the capability matrix is published.
 

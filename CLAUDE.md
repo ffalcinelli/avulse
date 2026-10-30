@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Avulse is a cross-platform (Linux, Windows, macOS) packet-diverting library. It aims to be a superset of WinDivert: it adds an ETHERNET layer, uses a Wireshark-compatible filter language, and will ship a WinDivert-compatible shim so that pydivert/jdivert can move onto it. It is the fifth repo in `~/Workspace/divert/` (see `../CLAUDE.md` for its siblings: windivert, ebpfdivert, pydivert, jdivert). It is dual-licensed LGPL-3.0-or-later / GPL-2.0-or-later, and BPF programs must be GPL-compatible.
 
-**Status: pre-alpha.** Only `avulse-proto`, `avulse-filter` (including its bytecode and WinDivert front-end), the `avulse filter …` CLI and `avulse-wasm` (the website's filter playground) are implemented, plus the `avulse` crate's handle API with its Linux backend for the packet layers (Phase 2 done: receive and send at NETWORK, NETWORK_FORWARD and ETHERNET, tun and IP tunnels included; Phase 3 Steps 14 to 17: the FLOW, SOCKET (refusing binds and connects in the kernel) and REFLECT layers; no other platform), `avulse-ebpf` (the Linux kernel side: TC programs, codegen, loader; Spike A in `docs/spikes/ebpf-codegen.md`) `spikes/windows-driver` as the Spike B prototype of the Windows driver (`docs/spikes/windows-driver.md`), and `spikes/macos`, Spike C's probes on GitHub's macOS runners (`docs/spikes/macos.md`). Phase 6 (macOS) has started: `crates/avulse/src/backend/macos` sniffs and sends at NETWORK and ETHERNET through `/dev/bpf`, without the system extension (Step 31). `crates/capi` (Step 18) is the C ABI, `libavulse.so`/`.a` with the hand-written header `include/avulse.h`. `crates/windivert-compat` (Phase 4, Steps 19 to 21) is `libavulse_windivert.so`, which exports libebpfdivert's C API over avulse so that pydivert and jdivert run on it unchanged. `bindings/python` is an empty placeholder that reserves the name. Versions stay 0.0.x while the project is experimental, and nothing is released before the Windows and macOS backends exist (owner decisions; the first release is v0.0.1). `docs/roadmap.md` is the design document (phases, the layer/backend feature matrix, filter-language decisions, and what to reuse from ebpfdivert). Read it before starting work on a new phase.
+**Status: pre-alpha.** Only `avulse-proto`, `avulse-filter` (including its bytecode and WinDivert front-end), the `avulse filter …` CLI and `avulse-wasm` (the website's filter playground) are implemented, plus the `avulse` crate's handle API with its Linux backend for the packet layers (Phase 2 done: receive and send at NETWORK, NETWORK_FORWARD and ETHERNET, tun and IP tunnels included; Phase 3 Steps 14 to 17: the FLOW, SOCKET (refusing binds and connects in the kernel) and REFLECT layers; no other platform), `avulse-ebpf` (the Linux kernel side: TC programs, codegen, loader; Spike A in `docs/spikes/ebpf-codegen.md`) `spikes/windows-driver` as the Spike B prototype of the Windows driver (`docs/spikes/windows-driver.md`), and `spikes/macos`, Spike C's probes on GitHub's macOS runners (`docs/spikes/macos.md`). Phase 6 (macOS) has started: `crates/avulse/src/backend/macos` sniffs and sends at NETWORK and ETHERNET through `/dev/bpf`, without the system extension (Step 31); the system extension is written (Steps 33 and 34: `crates/macos-ext` and `drivers/macos`), but its packet provider has not run anywhere (Step 32 is blocked on a Developer ID or a Mac). `crates/capi` (Step 18) is the C ABI, `libavulse.so`/`.a` with the hand-written header `include/avulse.h`. `crates/windivert-compat` (Phase 4, Steps 19 to 21) is `libavulse_windivert.so`, which exports libebpfdivert's C API over avulse so that pydivert and jdivert run on it unchanged. `bindings/python` is an empty placeholder that reserves the name. Versions stay 0.0.x while the project is experimental, and nothing is released before the Windows and macOS backends exist (owner decisions; the first release is v0.0.1). `docs/roadmap.md` is the design document (phases, the layer/backend feature matrix, filter-language decisions, and what to reuse from ebpfdivert). Read it before starting work on a new phase.
 
 **Start each session with `docs/implementation-plan.md`.** It holds the current status, the accounts and workstation quirks (pushing over SSH, no `rustup`, cargo-fuzz through `RUSTC_BOOTSTRAP=1`), the open Wireshark-semantics questions, and the ordered next steps with acceptance criteria. Tick steps there as they land, and commit it together with the code.
 
@@ -83,8 +83,32 @@ The macOS backend (`backend/macos/`, Step 31) has no system extension yet. It ca
 
   A handle skips the packets it sent itself (hashes kept 2 s).
 - `backend/queue.rs` (the receive queue and `Entry`) is shared with Linux.
+- The extension tier (Steps 33 and 34):
+  - `xpc.rs` is libxpc through FFI: synchronous requests, and a hand-built global block for the event handler, which libxpc requires.
+  - `extension.rs`'s `ExtHandle` runs a thread per handle that loops on `Recv` into the bpf tier's `Rx`. Sends go to the extension, and `Tx` injects what it answers `Inject`.
+  - `capabilities()`/`open` prefer the extension where it serves the layer. `AVULSE_NO_EXTENSION` forces bpf, and `AVULSE_MACH_SERVICE` names another service.
+  - `tests.rs`'s `extension_tests` (`AVULSE_EXTENSION_TEST`) run against the extension's test mode.
 - `tests/capture_macos.rs` (`AVULSE_MACOS=1`, root, a `feth0`/`feth1` pair) runs in `privileged.yml`'s `macos` job on `macos-26` and `macos-26-intel`.
 - Type-check it on the host with `RUSTC_BOOTSTRAP=1 cargo clippy -Zbuild-std=std,panic_abort --target aarch64-apple-darwin -p avulse --all-targets --target-dir target/mac` (and `x86_64-apple-darwin`).
+
+### `drivers/macos` and `avulse-macos-ext`: the macOS system extension (Steps 33 and 34)
+
+- **The logic** is `crates/macos-ext` (a workspace member, staticlib and rlib, `publish = false`, tested on any host). `Extension` holds:
+  - the handles, keyed `(Reverse(priority), id)`, owned by the XPC connection that opened them, root only;
+  - the packets the provider holds, by token;
+  - the notes of packets clients inject.
+- **The packet path.** `packet` runs the reference evaluator (user space: no bytecode) per handle: sniff (copy), drop, or divert (`Verdict::Delay` and a token, which the queued copy's `avulse_abi::macos::MacContext::token` names). A full queue lets the packet go on.
+- **Sends** (`Send`):
+  - unchanged → `resume` the chain after the holder, maybe divert again under the same token, else release (allow);
+  - modified → release (drop), note the hash and priority, and answer `Inject`: the client injects it, and handles at that priority and above skip it, lower ones see `impostor`.
+- **Releases** (the provider's allow or drop of a held packet) go through the `release` callback, outside the lock. Never sent back: dropped after `HOLD_MAX`. Closed handle or dead client: resumed past it.
+- **The protocol** is `avulse_abi::macos` (ops, `Status`, `SendResult`, capability bits, `TestPacket`, `MacContext`); the C interface `avulse_ext_*`, with the header `drivers/macos/Shared/avulse_ext.h`.
+- **`drivers/macos`** (outside the workspace; Swift, built only on macOS):
+  - `Extension/` holds `FilterProvider`, `Held` (delayed `NEPacket`s; early releases wait), `Service` (the libxpc listener; requests on a concurrent queue) and `main` (`--test`: XPC without the provider; `--service NAME`).
+  - `App/main.swift` is `Avulse install|uninstall|status`.
+  - `scripts/build.sh` builds `target/macos/Avulse.app` universal and signs it with `AVULSE_SIGN_IDENTITY` or ad hoc. It also builds `avulse-ext-test`, signed without entitlements, which AMFI lets launchd run.
+  - `scripts/test.sh` runs that binary as a launchd daemon in test mode, then `extension_*` against it (the `macos` job of `privileged.yml`).
+  - Swift does not import `XPC_CONNECTION_MAKE_LISTENER` (use 1). There is no Swift compiler on this workstation, so the runners are the compile check.
 
 ### `avulse-capi`: the C ABI (Step 18)
 

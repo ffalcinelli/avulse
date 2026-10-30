@@ -151,12 +151,27 @@ outbound, as in WinDivert. `capabilities()` says what works.
 
 ## On macOS
 
-macOS is in progress (Phase 6). The system extension that will divert, drop and modify packets,
-and report flows and sockets, does not exist yet. Until it does, the backend captures through
-`/dev/bpf` and runs the filter in user space. That needs root. So, at the `Network` and
-`Ethernet` layers, handles **sniff** (open them with `Flags::SNIFF`) and **send**. Opening a
-diverting or dropping handle, or one at the other layers, fails with `Error::Unsupported`, and
-`capabilities()` says so.
+macOS is in progress (Phase 6). Handles need root, and work in one of two ways:
+
+- **With the avulse system extension.** `Avulse.app` installs it (`Avulse install`, from
+  `/Applications`, then the user approves it). Its packet filter serves the `Network` layer, and
+  the `Ethernet` layer if the system hands it frames. There, handles divert, drop, sniff and
+  send.
+  - A diverted packet is held by the system until its handle sends it back. Sent back
+    unchanged, it goes on to lower-priority handles, then out. Sent back modified, the original
+    is dropped and the new packet is injected as described below. Never sent back, it is
+    dropped after 10 seconds.
+  - Handles that the injected packet's sender outranks see it with `impostor` set.
+
+  The extension needs a Developer ID signature to run, so this part is untested on real
+  traffic so far.
+- **Without it.** The backend captures through `/dev/bpf` and runs the filter in user space.
+  So, at the `Network` and `Ethernet` layers, handles **sniff** (open them with `Flags::SNIFF`)
+  and **send**. Opening a diverting or dropping handle, or one at the other layers, fails with
+  `Error::Unsupported`. The rest of this section is about this mode.
+
+`capabilities()` says which mode serves each layer. `AVULSE_NO_EXTENSION=1` keeps a process on
+bpf.
 
 - **Interfaces.** By default, a handle captures every interface that is up and running and has
   an address that is not link-local, plus `lo0`. `OpenOptions::interfaces` names others. The

@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-30, Phases 2 to 5 done: Steps 1 to 30 and Spikes A and B; Phase 6 started: Step 31 done, Step 32 (Spike C's end) blocked on a Developer ID or a Mac)
+## Status (2026-10-30, Phases 2 to 5 done: Steps 1 to 30 and Spikes A and B; Phase 6: Steps 31, 33 and 34 done; Step 32, running the provider, blocked on a Developer ID or a Mac)
 
 | Area | State |
 | --- | --- |
@@ -21,7 +21,9 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Steps 15 to 17: the FLOW, SOCKET and REFLECT layers (`events.rs`, `reflect.rs`), SOCKET refusing binds and connects in the kernel; `Address` version 2 (216 bytes) with the process name. Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Steps 24 to 28: the Windows backend (`src/backend/windows/`). Step 31: the macOS backend without the system extension (`src/backend/macos/`): SNIFF handles at NETWORK and ETHERNET through `/dev/bpf`, sending through raw sockets, bpf and a utun; `tests/capture_macos.rs` on a `feth` pair in the `privileged` workflow. Other platforms: `Error::Unsupported`. |
 | `crates/capi` (`avulse-capi`) | Step 18: the C ABI, `libavulse.so`/`.a`, header `include/avulse.h` (hand-written, layout pinned by asserts), 20 functions, tested from C (`tests/c.rs`, `tests/c/abi.c`). |
 | `drivers/windows` | Step 23: `avulse.sys` (WDM, Rust, outside the workspace): the control device, handles opened with verified bytecode, parameters, statistics, shutdown, and `EVAL`, a test IOCTL that runs a handle's filter in the kernel. `test/` passes 243 checks in the `windows` VM under Driver Verifier, WinDivert's filter vectors included. Steps 25 and 26: WFP callouts divert, sniff, drop and inject at the NETWORK layers. Step 27: the NDIS lightweight filter (`lwf.rs`) gives the ETHERNET layer, with VLAN tags and large sends restored. Step 28: FLOW, SOCKET and REFLECT (`ale.rs`, `reflect.rs`). `capture_windows.rs` (27 tests) passes with the driver as a plain service and installed through `netcfg`. Step 30: a panic bugchecks, packet and event paths allocate fallibly and fail open, every suite runs under Driver Verifier with code integrity checks among its extra flags, the images meet HVCI's layout rules, and the driver builds for ARM64 and in CI (`windows-driver`). |
-| `crates/abi` (`avulse-abi`) | Step 23: the types shared with the driver and the C ABI (`Address`, `Flags`, `Param`, `Shutdown`, `Stats`, `Syntax`), and `ioctl`, the driver protocol. `no_std`. |
+| `crates/abi` (`avulse-abi`) | Step 23: the types shared with the driver and the C ABI (`Address`, `Flags`, `Param`, `Shutdown`, `Stats`, `Syntax`), and `ioctl`, the driver protocol. Step 33: `macos`, the system extension's XPC protocol and `MacContext`. `no_std`. |
+| `crates/macos-ext` (`avulse-macos-ext`) | Steps 33 and 34: the macOS system extension's logic (handles, the packet path with divert, drop, sniff and the chain of held packets, the protocol's requests), a staticlib for the Swift shim of `drivers/macos`, 13 host tests. `publish = false`. |
+| `drivers/macos` | Steps 33 and 34: the Swift shim (`NEFilterPacketProvider`, the XPC listener, `--test` mode), `Avulse.app`, `scripts/build.sh` and `scripts/test.sh`. Built universal and tested in test mode on the runners; the provider has not run (Step 32). |
 | `crates/windivert-compat` | Step 29: on Windows, `avulse_windivert.dll`, a drop-in for `WinDivert.dll` (WinDivert 2.2's exports, overlapped receives through the driver's `WD_RECV`); pydivert's (148) and jdivert's (334, JDK 25 and 8) Windows suites pass against it unchanged, under Driver Verifier. Steps 19 to 21: `libavulse_windivert.so`, libebpfdivert's C API over avulse (21 `ebpfdivert_*` exports, negative errno values, WinDivert's 80-byte address with avulse's reinjection context in its union). WinDivert's helpers (hash, checksums, `eval_filter` with `random*`) agree with WinDivert's own code on generated vectors (`scripts/gen_compat_vectors.py`). REFLECT's data is WinDivert's serialized filter object (`Filter::windivert_object`, matching WinDivert's compiler on 230 filters). 15 unit tests, the exported-symbol test, and `tests/capture.rs` (6, `AVULSE_BPF=1`) on 6.8 and 5.15. pydivert's suite (155) and jdivert's (334, JNA and Panama) pass against it unchanged. `publish = false`. |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
 | CI (`.github/workflows/ci.yml`, `privileged.yml`) | `privileged.yml` runs the root suites: Linux's on Ubuntu, and macOS's (`capture_macos`) on `macos-26` and `macos-26-intel`. `ci.yml`: fmt, clippy, tests on ubuntu/windows (x64 and `windows-11-arm`)/macos, the Windows driver's build for x64 and ARM64 (`windows-driver`, WDK from NuGet), tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
@@ -2332,10 +2334,14 @@ Read `docs/spikes/macos.md` first.
 - **The extension is the daemon.**
   - One system extension holds both providers and serves an `NEMachServiceName` XPC service.
     There is no separate launchd daemon.
-  - Its logic is a Rust staticlib, with Swift as a thin shim, as in the spike.
+  - Its logic is a Rust staticlib, with Swift as a thin shim, as in the spike. The staticlib
+    is `crates/macos-ext`, in the workspace: unlike the Windows driver it needs no SDK, so the
+    host's tests and CI cover it (changed in Step 33). The Swift shim and the bundles are in
+    `drivers/macos/`.
   - The XPC messages carry `avulse_abi::ioctl`'s open request and records, as the Windows
-    driver's IOCTLs do.
-  - It lives in `drivers/macos/`, outside the workspace, like `drivers/windows`.
+    driver's IOCTLs do (`avulse_abi::macos`).
+  - The extension is user space, so it compiles the filter's text and runs the reference
+    evaluator, not the bytecode (Step 33: Spike C measured the evaluator faster).
 - **Modify** is delay, then allow when the bytes sent back are unchanged; otherwise drop the
   original and reinject the new bytes.
 - **NETWORK_FORWARD** stays a documented gap: pf has no divert.
@@ -2453,27 +2459,94 @@ pktap or the extended header for the direction; IPv6 sends), the suite on a `fet
 
 The provider logs the first two of these already.
 
-### Step 33: The extension's skeleton (outline)
+### Step 33: The extension and its protocol (done, but for a run of the provider)
 
-- `drivers/macos/`: the Swift shim and the host app, around a Rust staticlib.
-- The staticlib holds:
-  - the XPC listener (`NEMachServiceName`);
-  - the handle table;
-  - client-death cleanup, when an XPC connection is invalidated;
-  - the verified bytecode run per packet (`matches_in`, a register file per queue).
-- `backend/macos/xpc.rs` is the client: libxpc through FFI. Records go into a shared-memory
-  ring if XPC messages are too slow (measure first).
-- Install and activate the extension from the library, as the Windows backend installs its
-  driver.
+**Outcome.** The extension's code is written, and everything but the packet provider runs on
+the runners. The provider is blocked as Step 32 says.
 
-### Step 34: NETWORK and ETHERNET through the provider (outline)
+- **The protocol** (`avulse_abi::macos`).
+  - Each XPC message is a dictionary with one data value, `"d"`. A request is the operation,
+    the handle and a payload; a response is a `Status` (negative errno values, macOS
+    numbering) and a payload.
+  - The operations: `Open` (an `ioctl::OpenRequest`), `Recv` (a timeout and a size; records
+    back), `Send` (records; a `SendResult` byte each), `Shutdown`, `SetParam`, `Stats`,
+    `Close`, `Capabilities` (a support byte per layer), and `TestPacket`, served in test mode
+    only.
+  - `MacContext` moved here from the backend. It adds the token of the packet the extension
+    holds, at bytes 40 to 47, within the 56 the WinDivert shim keeps.
+- **The logic** (`crates/macos-ext`, `avulse-macos-ext`, staticlib and rlib, `publish =
+  false`). `Extension` holds:
+  - the handles, keyed `(Reverse(priority), id)`, owned by the client connection that opened
+    them. Only root clients are served (the shim passes the peer's euid);
+  - the held packets, by token;
+  - the notes of injected packets.
 
-- Divert (delay and copy to the client), drop, and modify (allow when unchanged, else drop and
-  reinject through `send.rs`'s paths).
-- A priority chain inside the extension.
-- Loop prevention: the extension knows what its clients reinject, so a packet a handle sent is
-  skipped by that handle and the ones before it.
-- `capabilities()` from the extension's state.
+  The C interface is `avulse_ext_init(release, test_mode)`, `avulse_ext_packet`,
+  `avulse_ext_request`, `avulse_ext_free` and `avulse_ext_disconnect`; the header is
+  `drivers/macos/Shared/avulse_ext.h`. The release callback is called outside the lock. 13
+  host tests run against a fake provider and fake clients.
+- **The Swift shim** (`drivers/macos/`):
+  - `Extension/`: `FilterProvider` (the `NEFilterPacketProvider`), `Held` (the delayed
+    `NEPacket`s by token; a release that comes before the packet is stored waits there),
+    `Service` (the libxpc listener; requests run on a concurrent queue, because `Recv` waits),
+    and `main` (`--test` serves XPC without `startSystemExtensionMode`; `--service NAME`).
+  - `App/`: `Avulse install | uninstall | status`, which activates the extension and enables
+    the filter.
+  - `scripts/build.sh` builds both universal, with the Rust library for both architectures,
+    and signs them with `AVULSE_SIGN_IDENTITY` or ad hoc. It also leaves `avulse-ext-test`,
+    the extension's executable signed ad hoc without entitlements, which AMFI lets launchd
+    run.
+- **The client** (`backend/macos/xpc.rs`, `extension.rs`).
+  - libxpc through FFI, synchronous requests, and a hand-built global block for the event
+    handler that libxpc requires.
+  - `ExtHandle`: a thread per handle loops on `Recv` (250 ms) into the bpf tier's `Rx`, so
+    the handle is pollable as before; `Send` goes to the extension, and `Tx` sends what it
+    says to inject.
+  - `capabilities()` takes the extension's support where it serves a layer, the bpf tier's
+    elsewhere; `open` follows it. `AVULSE_NO_EXTENSION` forces the bpf tier, and
+    `AVULSE_MACH_SERVICE` names another service (the tests' daemon).
+- **On the runners** (`privileged.yml`, `macos` job). `build.sh`, then `scripts/test.sh`:
+  `avulse-ext-test --test` as a launchd daemon with its Mach service, and the backend's
+  `extension_*` tests against it, as root. They cover open, divert, sending back unchanged and
+  modified, sniff, drop and priorities, shutdown, close, and a client that goes away. All 6
+  pass on `macos-26` and `macos-26-intel` (run 41038725927), and the app builds universal on
+  both.
+- **Found on the way.** Swift does not import `XPC_CONNECTION_MAKE_LISTENER`; the shim passes
+  its value, 1.
+
+### Step 34: Divert, drop and modify through the provider (done, but for a run of the provider)
+
+**Outcome.** The packet path of Step 33's logic is Step 34's design.
+
+- **Order.** Handles are visited by priority (higher first), then age.
+- **What each handle does with a packet** its filter matches (the reference evaluator, on the IP
+  packet at NETWORK or the frame at ETHERNET, with `iface`, `priority` and `hash` in the
+  metadata):
+  - SNIFF: a copy, and the packet goes on to the next handle;
+  - DROP: the provider drops it;
+  - otherwise it is diverted: the provider holds it (`Verdict::Delay`, a token), and the
+    handle's queue gets a copy whose `MacContext::token` names it.
+
+  A full queue lets the packet go on (`ring_full`), as a full ring buffer does on Linux.
+- **What becomes of a held packet:**
+  - sent back unchanged (same bytes, same direction): it goes on to the handles after its
+    holder, which may divert it again under the same token, then out (`allowPacket:`);
+  - sent back modified, or never received within `QUEUE_TIME`: dropped. A modified packet is
+    then the client's to inject;
+  - received but never sent back: dropped after `HOLD_MAX` (10 s), as WinDivert drops a
+    packet that is never reinjected;
+  - its handle closes, or its client goes away: it goes on past the handle (fail-open).
+- **Loops and impostors.** Before the client injects a packet, the extension notes its hash and
+  the sender's priority. When the packet comes through, handles at that priority and above skip
+  it, and lower ones see `impostor`. A note serves once and lasts 2 s.
+- **Layers.** NETWORK always. ETHERNET only if the provider gives frames: `link_of` tells an IP
+  packet from a frame by its version and length, and the first packet decides what
+  `Capabilities` reports, which Spike C could not measure. NETWORK_FORWARD stays a gap.
+- **Left:**
+  - running the provider for real: Step 32's blocker;
+  - injecting IPv6 that has no Ethernet header to go behind (`send.rs`, as in Step 31);
+  - per-packet cost: the chain clones the order and builds an address per handle visited;
+  - REFLECT.
 
 ### Step 35: FLOW, SOCKET and REFLECT (outline)
 
@@ -2568,7 +2641,10 @@ pre-release tag) passes, then the v0.0.1 tag publishes. The guide and README say
 - [ ] Step 32: Spike C's end: the extension measured (on runners, approval, authorization and
   registration work; launchd cannot run the ad-hoc signed provider. Blocked on a Developer ID or a
   Mac with AMFI off)
-- [ ] Steps 33 to 36: the macOS system extension (skeleton, packet layers, event layers,
-  capability matrix and CI)
+- [x] Step 33: the macOS extension's protocol, logic (`crates/macos-ext`), Swift shim and client
+  tier; its XPC service tested on the runners in test mode
+- [x] Step 34: divert, drop and modify through the provider (written and host-tested; the provider
+  itself waits for Step 32)
+- [ ] Steps 35 and 36: FLOW, SOCKET and REFLECT; the capability matrix and CI
 - [ ] Release v0.0.1 (crates.io, tarballs; after Phases 5 and 6)
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement
