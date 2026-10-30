@@ -17,6 +17,7 @@
 //! | `Close` | nothing | nothing |
 //! | `Capabilities` | nothing | [`encode_capabilities`]: a byte per layer |
 //! | `TestPacket` | [`encode_test_packet`] | the verdict, `u32`, and the token, `u64` |
+//! | `TestFlow` | [`TestFlow::encode`] | the verdict, `u32`, four zero bytes, the flow's id, `u64`, and whether its end is wanted, `u8`, then seven zero bytes |
 //!
 //! A response starts with a [`Status`]. The extension serves root clients only, and each client
 //! connection owns the handles it opened: they close when it goes away.
@@ -63,6 +64,9 @@ pub enum Op {
     /// Runs a packet through the packet path as the provider would: only when the extension
     /// runs in its test mode, without the provider.
     TestPacket = 9,
+    /// Runs a flow's start or end through the flow path as the data provider would: only in
+    /// test mode.
+    TestFlow = 10,
 }
 
 impl TryFrom<u32> for Op {
@@ -79,6 +83,7 @@ impl TryFrom<u32> for Op {
             7 => Op::Close,
             8 => Op::Capabilities,
             9 => Op::TestPacket,
+            10 => Op::TestFlow,
             _ => return Err(Malformed::Value),
         })
     }
@@ -376,6 +381,87 @@ impl MacContext {
             token: u64::from_ne_bytes(token),
             l2_len: b[1],
             l2,
+        })
+    }
+}
+
+/// A flow for `TestFlow`, as the data provider reports it: its start (a connect or an accept,
+/// with its endpoints and process) or its end.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TestFlow {
+    /// Whether this is the flow's end, which [`id`](Self::id) names; else its start.
+    pub end: bool,
+    /// The flow's id, from its start's response (for an end).
+    pub id: u64,
+    /// Whether the local side opened it (a connect), rather than accepted it.
+    pub outbound: bool,
+    /// The IP protocol.
+    pub protocol: u8,
+    /// The process that owns the socket.
+    pub pid: u32,
+    /// The local address, IPv4-mapped for IPv4, and port.
+    pub local_addr: [u8; 16],
+    /// The local port.
+    pub local_port: u16,
+    /// The remote address, IPv4-mapped for IPv4.
+    pub remote_addr: [u8; 16],
+    /// The remote port.
+    pub remote_port: u16,
+}
+
+impl TestFlow {
+    /// The encoded length.
+    pub const LEN: usize = 56;
+
+    /// The payload: the kind (`u8`: 1 start, 2 end), outbound (`u8`), the protocol (`u8`), a
+    /// zero byte, the pid (`u32`), the id (`u64`), the local and remote ports (`u16` each), four
+    /// zero bytes, then the local and remote addresses.
+    pub fn encode(&self) -> [u8; Self::LEN] {
+        let mut b = [0; Self::LEN];
+        b[0] = if self.end { 2 } else { 1 };
+        b[1] = u8::from(self.outbound);
+        b[2] = self.protocol;
+        b[4..8].copy_from_slice(&self.pid.to_le_bytes());
+        b[8..16].copy_from_slice(&self.id.to_le_bytes());
+        b[16..18].copy_from_slice(&self.local_port.to_le_bytes());
+        b[18..20].copy_from_slice(&self.remote_port.to_le_bytes());
+        b[24..40].copy_from_slice(&self.local_addr);
+        b[40..56].copy_from_slice(&self.remote_addr);
+        b
+    }
+
+    /// The flow in a `TestFlow` payload.
+    pub fn decode(b: &[u8]) -> Result<TestFlow, Malformed> {
+        let mut r = Reader { b };
+        let end = match r.u8()? {
+            1 => false,
+            2 => true,
+            _ => return Err(Malformed::Value),
+        };
+        let outbound = r.u8()?;
+        let protocol = r.u8()?;
+        r.take(1)?;
+        let pid = r.u32()?;
+        let id = r.u64()?;
+        let (local_port, remote_port) = (r.u16()?, r.u16()?);
+        r.take(4)?;
+        let mut local_addr = [0; 16];
+        local_addr.copy_from_slice(r.take(16)?);
+        let mut remote_addr = [0; 16];
+        remote_addr.copy_from_slice(r.take(16)?);
+        if outbound > 1 || !r.b.is_empty() {
+            return Err(Malformed::Value);
+        }
+        Ok(TestFlow {
+            end,
+            id,
+            outbound: outbound == 1,
+            protocol,
+            pid,
+            local_addr,
+            local_port,
+            remote_addr,
+            remote_port,
         })
     }
 }

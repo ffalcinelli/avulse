@@ -37,6 +37,7 @@ fn call(ext: &Extension, conn: u64, op: Op, handle: u64, payload: &[u8]) -> (Sta
     let b = ext.request(
         conn,
         ROOT,
+        100 + conn as u32,
         &Request {
             op,
             handle,
@@ -171,7 +172,9 @@ fn requests_are_checked() {
     let (ext, _) = extension(false);
     // Malformed, and not root.
     assert_eq!(
-        decode_response(&ext.request(1, ROOT, &[1, 2])).unwrap().0,
+        decode_response(&ext.request(1, ROOT, 1, &[1, 2]))
+            .unwrap()
+            .0,
         Status::Invalid
     );
     let req = Request {
@@ -181,7 +184,7 @@ fn requests_are_checked() {
     }
     .encode();
     assert_eq!(
-        decode_response(&ext.request(1, 501, &req)).unwrap().0,
+        decode_response(&ext.request(1, 501, 1, &req)).unwrap().0,
         Status::Denied
     );
     // Layers, flags and filters.
@@ -489,4 +492,187 @@ fn test_packets_in_test_mode() {
     let (addr, _) = recv_one(&ext, 1, h);
     assert!(addr.loopback && !addr.outbound);
     assert_eq!(token(&addr), u64::from_le_bytes(p[4..].try_into().unwrap()));
+}
+
+fn start(ext: &Extension, outbound: bool, remote_port: u16) -> (Verdict, u64, bool) {
+    ext.flow_start(&crate::FlowStart {
+        outbound,
+        protocol: 6,
+        pid: 42,
+        process_name: Some("curl".into()),
+        local: "10.0.0.1".parse().unwrap(),
+        local_port: 50000,
+        remote: "93.184.216.34".parse().unwrap(),
+        remote_port,
+    })
+}
+
+#[test]
+fn flows_need_the_data_provider() {
+    let (ext, _) = extension(false);
+    let flow = Flags::SNIFF | Flags::RECV_ONLY;
+    assert_eq!(
+        try_open(&ext, 1, "true", Layer::Flow, 0, flow),
+        Err(Status::Unsupported)
+    );
+    let (_, p) = call(&ext, 1, Op::Capabilities, 0, &[]);
+    let caps = macos::decode_capabilities(&p).unwrap();
+    assert_eq!(caps[Layer::Flow as usize], 0);
+    assert_eq!(caps[Layer::Reflect as usize], support::OPEN);
+    ext.set_flows(true);
+    let (_, p) = call(&ext, 1, Op::Capabilities, 0, &[]);
+    let caps = macos::decode_capabilities(&p).unwrap();
+    assert_eq!(caps[Layer::Flow as usize], support::OPEN);
+    assert_eq!(
+        caps[Layer::Socket as usize],
+        support::OPEN | support::DIVERT | support::DROP
+    );
+    assert!(try_open(&ext, 1, "true", Layer::Flow, 0, flow).is_ok());
+    // Without FLOW or SOCKET handles, flows are let by and not watched.
+    let (ext, _) = extension(false);
+    ext.set_flows(true);
+    assert_eq!(start(&ext, true, 443), (Verdict::Allow, 0, false));
+}
+
+#[test]
+fn sockets_refuse_and_flows_report() {
+    let (ext, _) = extension(false);
+    ext.set_flows(true);
+    let recv_only = Flags::RECV_ONLY;
+    let sniffer = try_open(
+        &ext,
+        1,
+        "event == connect",
+        Layer::Socket,
+        10,
+        Flags::SNIFF | recv_only,
+    )
+    .unwrap();
+    let blocker = try_open(&ext, 1, "remote.port == 443", Layer::Socket, 0, recv_only).unwrap();
+    let flows = try_open(&ext, 2, "true", Layer::Flow, 0, Flags::SNIFF | recv_only).unwrap();
+
+    // Refused: both SOCKET handles see the connect, the FLOW handle nothing.
+    let (v, _, watch) = start(&ext, true, 443);
+    assert_eq!((v, watch), (Verdict::Drop, false));
+    let (addr, data) = recv_one(&ext, 1, sniffer);
+    assert!(data.is_empty() && addr.sniffed && addr.outbound);
+    assert_eq!(addr.event, avulse_filter::Event::SocketConnect);
+    assert_eq!(addr.flow.remote_port, 443);
+    assert_eq!(addr.flow.remote_addr().to_string(), "93.184.216.34");
+    let (addr, _) = recv_one(&ext, 1, blocker);
+    assert!(!addr.sniffed);
+    assert_eq!(stats(&ext, 1, blocker).dropped, 1);
+    assert_eq!(recv(&ext, 2, flows, 0), Err(Status::Timeout));
+
+    // Allowed: established, then deleted, with the process.
+    let (v, id, watch) = start(&ext, true, 80);
+    assert_eq!((v, watch), (Verdict::Allow, true));
+    let (addr, _) = recv_one(&ext, 2, flows);
+    assert_eq!(addr.event, avulse_filter::Event::FlowEstablished);
+    assert_eq!(addr.flow.endpoint_id, id);
+    assert_eq!(
+        (addr.flow.process_id, addr.flow.process_name()),
+        (42, Some("curl"))
+    );
+    assert_eq!(addr.layer, Layer::Flow);
+    ext.flow_end(id);
+    let (addr, _) = recv_one(&ext, 2, flows);
+    assert_eq!(addr.event, avulse_filter::Event::FlowDeleted);
+    // The connect sniffer saw the second connect, not the close; an accept it does not want.
+    assert_eq!(recv(&ext, 1, sniffer, 0).unwrap().len(), 1);
+    start(&ext, false, 80);
+    assert_eq!(recv(&ext, 1, sniffer, 0), Err(Status::Timeout));
+    // Ending twice, or an unknown flow, does nothing.
+    ext.flow_end(id);
+    assert_eq!(recv(&ext, 2, flows, 0).unwrap().len(), 1);
+}
+
+#[test]
+fn event_layers_get_no_packets() {
+    let (ext, _) = extension(false);
+    ext.set_flows(true);
+    try_open(&ext, 1, "true", Layer::Socket, 0, Flags::RECV_ONLY).unwrap();
+    assert_eq!(ext.packet(&seen(&udp(1, b""))), (Verdict::Allow, 0));
+}
+
+#[test]
+fn reflect_reports_the_handles() {
+    let (ext, _) = extension(false);
+    let net = open(&ext, 1, "tcp.port == 80", 5, Flags::SNIFF);
+    let reflect = try_open(
+        &ext,
+        2,
+        "true",
+        Layer::Reflect,
+        0,
+        Flags::SNIFF | Flags::RECV_ONLY,
+    )
+    .unwrap();
+    // On opening, every handle, itself included.
+    let got = recv(&ext, 2, reflect, 0).unwrap();
+    assert_eq!(got.len(), 2);
+    let (addr, data) = &got[0];
+    assert_eq!(addr.event, avulse_filter::Event::ReflectOpen);
+    assert_eq!(data, b"tcp.port == 80");
+    assert_eq!(
+        (
+            addr.reflect.layer,
+            addr.reflect.priority,
+            addr.reflect.process_id
+        ),
+        (Layer::Network, 5, 101)
+    );
+    assert_eq!(got[1].0.reflect.layer, Layer::Reflect);
+    // Then each handle that opens or closes.
+    let other = open(&ext, 3, "udp", 0, Flags::SNIFF);
+    call(&ext, 1, Op::Close, net, &[]);
+    let got = recv(&ext, 2, reflect, 0).unwrap();
+    let events: Vec<_> = got
+        .iter()
+        .map(|(a, _)| (a.event, a.reflect.process_id))
+        .collect();
+    assert_eq!(
+        events,
+        [
+            (avulse_filter::Event::ReflectOpen, 103),
+            (avulse_filter::Event::ReflectClose, 101)
+        ]
+    );
+    let _ = other;
+}
+
+#[test]
+fn test_flows_in_test_mode() {
+    let (ext, _) = extension(true);
+    let h = try_open(
+        &ext,
+        1,
+        "true",
+        Layer::Flow,
+        0,
+        Flags::SNIFF | Flags::RECV_ONLY,
+    )
+    .unwrap();
+    let f = macos::TestFlow {
+        outbound: true,
+        protocol: 17,
+        pid: 7,
+        local_port: 1,
+        remote_port: 2,
+        ..macos::TestFlow::default()
+    };
+    let (s, p) = call(&ext, 1, Op::TestFlow, 0, &f.encode());
+    assert_eq!(s, Status::Ok);
+    let id = u64::from_le_bytes(p[8..16].try_into().unwrap());
+    assert_eq!(p[16], 1);
+    let end = macos::TestFlow { end: true, id, ..f };
+    call(&ext, 1, Op::TestFlow, 0, &end.encode());
+    let got = recv(&ext, 1, h, 0).unwrap();
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[1].0.event, avulse_filter::Event::FlowDeleted);
+    let (ext, _) = extension(false);
+    assert_eq!(
+        call(&ext, 1, Op::TestFlow, 0, &f.encode()).0,
+        Status::Unsupported
+    );
 }

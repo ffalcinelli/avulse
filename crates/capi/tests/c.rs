@@ -1,5 +1,5 @@
 //! libavulse from C: compiles `tests/c/abi.c` against `include/avulse.h` and the shared
-//! library, and runs it. Without privileges it checks the header's layout, the filter helpers
+//! library (`libavulse.so`, or `libavulse.dylib` on macOS), and runs it. Without privileges it checks the header's layout, the filter helpers
 //! and the errors. The program is left next to the library as `avulse-c-test`, to run as root
 //! in a VM with `AVULSE_BPF=1`, which also receives and sends packets through a handle.
 
@@ -14,7 +14,7 @@ fn target_dir() -> PathBuf {
 
 #[test]
 fn c_program() {
-    if !cfg!(target_os = "linux") {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
         return;
     }
     // Tests do not build the shared library (nothing links it): build it, in this profile.
@@ -47,7 +47,11 @@ fn c_program() {
         .arg("-L")
         .arg(&dir)
         .arg("-lavulse")
-        .arg("-Wl,-rpath,$ORIGIN")
+        .arg(if cfg!(target_os = "macos") {
+            "-Wl,-rpath,@loader_path"
+        } else {
+            "-Wl,-rpath,$ORIGIN"
+        })
         .status()
         .unwrap_or_else(|e| panic!("running {cc}: {e}"));
     assert!(status.success(), "{cc} failed");

@@ -30,6 +30,7 @@
 
 - [Rust crates](libraries/rust.md)
 - [Handles and addresses](libraries/handles.md)
+- [Platforms](libraries/platforms.md)
 - [C](libraries/c.md)
 - [WinDivert compatibility](libraries/windivert-compat.md)
 - [Python](libraries/python.md)

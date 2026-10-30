@@ -431,6 +431,79 @@ mod extension_tests {
         assert_eq!(test_packet(&conn, &udp(47503, b"")), 0);
     }
 
+    /// Hands a flow's start or end to the extension's flow path; returns the verdict, the flow's
+    /// id and whether its end is wanted.
+    fn test_flow(conn: &Connection, f: &avulse_abi::macos::TestFlow) -> (u32, u64, bool) {
+        let (s, p) = conn
+            .call(&Request {
+                op: Op::TestFlow,
+                handle: 0,
+                payload: &f.encode(),
+            })
+            .unwrap();
+        assert_eq!(s, Status::Ok);
+        (
+            u32::from_le_bytes(p[..4].try_into().unwrap()),
+            u64::from_le_bytes(p[8..16].try_into().unwrap()),
+            p[16] == 1,
+        )
+    }
+
+    #[test]
+    fn extension_flows_sockets_and_reflect() {
+        if !enabled() {
+            return;
+        }
+        let conn = Connection::open().unwrap();
+        let reflect =
+            Handle::open("true", Layer::Reflect, 0, Flags::SNIFF | Flags::RECV_ONLY).unwrap();
+        let refuser =
+            Handle::open("remote.port == 47443", Layer::Socket, 0, Flags::RECV_ONLY).unwrap();
+        let flows = Handle::open(
+            "remote.port in {47443, 47080}",
+            Layer::Flow,
+            0,
+            Flags::SNIFF | Flags::RECV_ONLY,
+        )
+        .unwrap();
+        let mut f = avulse_abi::macos::TestFlow {
+            outbound: true,
+            protocol: 6,
+            pid: 4242,
+            remote_port: 47443,
+            ..Default::default()
+        };
+        // Refused: the SOCKET handle gets the connect, the FLOW handle nothing.
+        assert_eq!(test_flow(&conn, &f).0, 1);
+        let (_, addr) = recv(&refuser);
+        assert_eq!(addr.event, crate::Event::SocketConnect);
+        assert_eq!((addr.flow.process_id, addr.flow.remote_port), (4242, 47443));
+        // Allowed: established, then deleted.
+        f.remote_port = 47080;
+        let (v, id, watch) = test_flow(&conn, &f);
+        assert_eq!((v, watch), (0, true));
+        let (_, addr) = recv(&flows);
+        assert_eq!(addr.event, crate::Event::FlowEstablished);
+        f.end = true;
+        f.id = id;
+        test_flow(&conn, &f);
+        let (_, addr) = recv(&flows);
+        assert_eq!(addr.event, crate::Event::FlowDeleted);
+        assert_eq!(addr.flow.endpoint_id, id);
+        // REFLECT saw this process open the others.
+        let mut opened = Vec::new();
+        let mut buf = vec![0; MAX_PACKET_LEN];
+        while let Ok((n, addr)) = reflect.recv_timeout(&mut buf, Duration::from_millis(300)) {
+            if addr.reflect.process_id == std::process::id() {
+                opened.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+            }
+        }
+        assert!(
+            opened.contains(&"remote.port == 47443".to_string()),
+            "{opened:?}"
+        );
+    }
+
     #[test]
     fn extension_a_client_that_goes_away_loses_its_handles() {
         if !enabled() {

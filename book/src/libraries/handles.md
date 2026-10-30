@@ -110,7 +110,8 @@ queue. On Linux the kernel keeps most of them, per handle.
 
 The platforms differ; macOS, for example, cannot modify a packet in place. `avulse::capabilities()`
 says, per layer, whether handles can be opened, divert, drop, inject and modify. `Handle::open`
-refuses what the backend says it cannot do, with `Error::Unsupported`.
+refuses what the backend says it cannot do, with `Error::Unsupported`. [Platforms](platforms.md)
+has the matrix.
 
 ## On Windows
 
@@ -162,6 +163,10 @@ macOS is in progress (Phase 6). Handles need root, and work in one of two ways:
     is dropped and the new packet is injected as described below. Never sent back, it is
     dropped after 10 seconds.
   - Handles that the injected packet's sender outranks see it with `impostor` set.
+  - Its flow filter gives the `Flow` layer (flows established and deleted, with their process),
+    the `Socket` layer (connects, accepts and closes; a handle without `SNIFF` refuses the
+    connects and accepts its filter matches; binds and listens are not seen), and `Reflect`
+    (the handles the extension serves).
 
   The extension needs a Developer ID signature to run, so this part is untested on real
   traffic so far.

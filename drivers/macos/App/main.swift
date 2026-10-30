@@ -26,8 +26,10 @@ func setFilter(enabled: Bool, then: @escaping () -> Void) {
         if enabled {
             let c = NEFilterProviderConfiguration()
             c.filterPackets = true
-            c.filterSockets = false
             c.filterPacketProviderBundleIdentifier = extensionId
+            // Flows and sockets (the FLOW and SOCKET layers), from the same extension.
+            c.filterSockets = true
+            c.filterDataProviderBundleIdentifier = extensionId
             m.providerConfiguration = c
             m.localizedDescription = "Avulse"
         }

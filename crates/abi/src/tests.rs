@@ -304,6 +304,27 @@ fn macos_protocol() {
     let mut bad = b.clone();
     bad[4] = 4;
     assert_eq!(decode_test_packet(&bad), Err(Malformed::Value));
+
+    let f = TestFlow {
+        end: false,
+        id: 0,
+        outbound: true,
+        protocol: 6,
+        pid: 42,
+        local_addr: [1; 16],
+        local_port: 50000,
+        remote_addr: [2; 16],
+        remote_port: 443,
+    };
+    assert_eq!(TestFlow::decode(&f.encode()), Ok(f));
+    let mut bad = f.encode();
+    bad[0] = 3;
+    assert_eq!(TestFlow::decode(&bad), Err(Malformed::Value));
+    assert_eq!(
+        TestFlow::decode(&f.encode()[..55]),
+        Err(Malformed::Truncated)
+    );
+    assert_eq!(Op::try_from(10), Ok(Op::TestFlow));
 }
 
 #[test]

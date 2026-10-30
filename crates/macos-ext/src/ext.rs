@@ -3,15 +3,16 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use avulse_abi::ioctl::{self, OpenRequest, Record};
 use avulse_abi::macos::{
-    self, MacContext, Op, Request, SendResult, Status, decode_recv, decode_test_packet,
+    self, MacContext, Op, Request, SendResult, Status, TestFlow, decode_recv, decode_test_packet,
     encode_response, support,
 };
-use avulse_abi::{Address, Flags, Param, Shutdown, Stats, Syntax};
+use avulse_abi::{Address, Flags, Flow, Param, Shutdown, Stats, Syntax};
 use avulse_filter::{Event, Filter, Layer};
 use avulse_proto::{Link, Packet, checksum};
 
@@ -24,6 +25,8 @@ const NOTE_TTL: Duration = Duration::from_secs(2);
 const NOTES_MAX: usize = 1024;
 /// How many packets are held at most, all handles together.
 const HELD_MAX: usize = 65_536;
+/// How many flows are watched for their end at most.
+const FLOWS_MAX: usize = 65_536;
 
 /// What the provider does with a packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +56,27 @@ pub struct Seen<'a> {
     pub data: &'a [u8],
 }
 
+/// A flow the data provider sees start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlowStart {
+    /// Whether the local side opened it (a connect), rather than accepted it.
+    pub outbound: bool,
+    /// The IP protocol.
+    pub protocol: u8,
+    /// The process that owns the socket, and its name when known.
+    pub pid: u32,
+    /// The process's name, when known.
+    pub process_name: Option<String>,
+    /// The local address and port.
+    pub local: IpAddr,
+    /// The local port.
+    pub local_port: u16,
+    /// The remote address.
+    pub remote: IpAddr,
+    /// The remote port.
+    pub remote_port: u16,
+}
+
 /// What becomes of a held packet: the provider's `allowPacket:` (`true`) or its release, which
 /// drops it (`false`).
 pub type Release = Box<dyn Fn(u64, bool) + Send + Sync>;
@@ -78,6 +102,11 @@ struct State {
     notes: Vec<Note>,
     /// Whether the provider's packets start with a link-layer header, from the first one seen.
     frames: Option<bool>,
+    /// Whether the data provider runs: the FLOW and SOCKET layers need it.
+    flows_on: bool,
+    /// The flows whose end is wanted, by id.
+    flows: HashMap<u64, Flow>,
+    next_flow: u64,
     last_sweep: Option<Instant>,
 }
 
@@ -91,6 +120,11 @@ struct Key {
 struct Handle {
     key: Key,
     conn: u64,
+    /// What REFLECT reports: the process that opened it, when, and the filter as written.
+    pid: u32,
+    opened: i64,
+    source: String,
+    syntax: Syntax,
     layer: Layer,
     flags: Flags,
     filter: Filter,
@@ -174,7 +208,9 @@ fn split(data: &[u8], link: Link) -> (&[u8], Option<&[u8]>) {
 fn view(data: &[u8], link: Link, layer: Layer) -> Option<&[u8]> {
     match layer {
         Layer::Ethernet => (link == Link::Ethernet).then_some(data),
-        _ => split(data, link).1,
+        Layer::Network => split(data, link).1,
+        // The event layers get no packets.
+        _ => None,
     }
 }
 
@@ -218,6 +254,8 @@ impl Extension {
             state: Mutex::new(State {
                 next_id: 1,
                 next_token: 1,
+                next_flow: 1,
+                flows_on: test_mode,
                 ..State::default()
             }),
             wake: Condvar::new(),
@@ -264,9 +302,9 @@ impl Extension {
         r
     }
 
-    /// Serves a request from client connection `conn`, whose effective user is `euid`, and
-    /// returns the response's bytes.
-    pub fn request(&self, conn: u64, euid: u32, bytes: &[u8]) -> Vec<u8> {
+    /// Serves a request from client connection `conn`, whose effective user is `euid` and
+    /// process `pid`, and returns the response's bytes.
+    pub fn request(&self, conn: u64, euid: u32, pid: u32, bytes: &[u8]) -> Vec<u8> {
         let Ok(req) = Request::decode(bytes) else {
             return response(Status::Invalid);
         };
@@ -274,19 +312,29 @@ impl Extension {
             return response(Status::Denied);
         }
         let mut releases = Vec::new();
-        let r = self.serve(conn, &req, &mut releases);
+        let r = self.serve(conn, pid, &req, &mut releases);
         self.fire(releases);
         r
     }
 
-    fn serve(&self, conn: u64, req: &Request<'_>, releases: &mut Vec<(u64, bool)>) -> Vec<u8> {
+    fn serve(
+        &self,
+        conn: u64,
+        pid: u32,
+        req: &Request<'_>,
+        releases: &mut Vec<(u64, bool)>,
+    ) -> Vec<u8> {
         if req.op == Op::Recv {
             return self.recv(conn, req, releases);
         }
         let mut st = lock(&self.state);
         st.sweep(releases);
         match req.op {
-            Op::Open => st.open(conn, req.payload),
+            Op::Open => {
+                let r = st.open(conn, pid, req.payload);
+                self.wake.notify_all();
+                r
+            }
             Op::Capabilities => {
                 let mut layers = [0u8; 6];
                 let all = support::OPEN
@@ -298,6 +346,13 @@ impl Extension {
                 if st.frames == Some(true) {
                     layers[Layer::Ethernet as usize] = all;
                 }
+                if st.flows_on {
+                    layers[Layer::Flow as usize] = support::OPEN;
+                    // Connects and accepts can be refused.
+                    layers[Layer::Socket as usize] =
+                        support::OPEN | support::DIVERT | support::DROP;
+                }
+                layers[Layer::Reflect as usize] = support::OPEN;
                 encode_response(Status::Ok, &macos::encode_capabilities(layers))
             }
             Op::TestPacket => {
@@ -318,6 +373,36 @@ impl Extension {
                 });
                 let mut b = (v as u32).to_le_bytes().to_vec();
                 b.extend_from_slice(&token.to_le_bytes());
+                encode_response(Status::Ok, &b)
+            }
+            Op::TestFlow => {
+                if !self.test_mode {
+                    return response(Status::Unsupported);
+                }
+                let Ok(t) = TestFlow::decode(req.payload) else {
+                    return response(Status::Invalid);
+                };
+                drop(st);
+                let (v, id, watch) = if t.end {
+                    self.flow_end(t.id);
+                    (Verdict::Allow, t.id, false)
+                } else {
+                    self.flow_start(&FlowStart {
+                        outbound: t.outbound,
+                        protocol: t.protocol,
+                        pid: t.pid,
+                        process_name: None,
+                        local: Ipv6Addr::from(t.local_addr).to_canonical(),
+                        local_port: t.local_port,
+                        remote: Ipv6Addr::from(t.remote_addr).to_canonical(),
+                        remote_port: t.remote_port,
+                    })
+                };
+                let mut b = (v as u32).to_le_bytes().to_vec();
+                b.extend_from_slice(&[0; 4]);
+                b.extend_from_slice(&id.to_le_bytes());
+                b.push(u8::from(watch));
+                b.extend_from_slice(&[0; 7]);
                 encode_response(Status::Ok, &b)
             }
             _ => {
@@ -441,6 +526,77 @@ impl Extension {
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
+    }
+
+    /// Tells the extension whether the data provider runs, which the FLOW and SOCKET layers
+    /// need.
+    pub fn set_flows(&self, on: bool) {
+        lock(&self.state).flows_on = on;
+    }
+
+    /// A new flow, as the data provider sees it: the SOCKET handles get its connect (outbound)
+    /// or accept (inbound), and may refuse it ([`Verdict::Drop`]); the FLOW handles get its
+    /// establishment. Returns the verdict, the flow's id, and whether its end is wanted
+    /// ([`flow_end`](Self::flow_end)).
+    pub fn flow_start(&self, f: &FlowStart) -> (Verdict, u64, bool) {
+        let mut st = lock(&self.state);
+        let wanted = st
+            .handles
+            .values()
+            .any(|h| matches!(h.layer, Layer::Flow | Layer::Socket));
+        if !wanted {
+            return (Verdict::Allow, 0, false);
+        }
+        let id = st.next_flow;
+        st.next_flow += 1;
+        let mut flow = Address::new(Layer::Flow).flow;
+        flow.endpoint_id = id;
+        flow.process_id = f.pid;
+        flow.protocol = f.protocol;
+        flow.set_local_addr(f.local);
+        flow.local_port = f.local_port;
+        flow.set_remote_addr(f.remote);
+        flow.remote_port = f.remote_port;
+        if let Some(name) = &f.process_name {
+            flow.set_process_name(name);
+        }
+        let event = if f.outbound {
+            Event::SocketConnect
+        } else {
+            Event::SocketAccept
+        };
+        let refused = st.flow_event(&flow, Layer::Socket, event, f.outbound, true);
+        if !refused {
+            st.flow_event(
+                &flow,
+                Layer::Flow,
+                Event::FlowEstablished,
+                f.outbound,
+                false,
+            );
+        }
+        let watch = !refused && st.flows.len() < FLOWS_MAX;
+        if watch {
+            st.flows.insert(id, flow);
+        }
+        self.wake.notify_all();
+        let v = if refused {
+            Verdict::Drop
+        } else {
+            Verdict::Allow
+        };
+        (v, id, watch)
+    }
+
+    /// The end of flow `id`: the SOCKET handles get its close, the FLOW handles its deletion.
+    pub fn flow_end(&self, id: u64) {
+        let mut st = lock(&self.state);
+        let Some(flow) = st.flows.remove(&id) else {
+            return;
+        };
+        st.flow_event(&flow, Layer::Socket, Event::SocketClose, false, false);
+        st.flow_event(&flow, Layer::Flow, Event::FlowDeleted, false, false);
+        self.wake.notify_all();
     }
 
     /// Closes every handle client connection `conn` opened: it went away.
@@ -642,7 +798,7 @@ impl State {
         }
     }
 
-    fn open(&mut self, conn: u64, payload: &[u8]) -> Vec<u8> {
+    fn open(&mut self, conn: u64, pid: u32, payload: &[u8]) -> Vec<u8> {
         if self.held.len() >= HELD_MAX {
             return response(Status::NoMemory);
         }
@@ -652,6 +808,8 @@ impl State {
         match req.layer {
             Layer::Network => {}
             Layer::Ethernet if self.frames != Some(false) => {}
+            Layer::Flow | Layer::Socket if self.flows_on => {}
+            Layer::Reflect => {}
             _ => return response(Status::Unsupported),
         }
         if !(-30_000..=30_000).contains(&req.priority)
@@ -682,6 +840,10 @@ impl State {
             Handle {
                 key,
                 conn,
+                pid,
+                opened: now_ns(),
+                source: req.filter.to_string(),
+                syntax: req.syntax,
                 layer: req.layer,
                 flags: req.flags,
                 filter,
@@ -696,6 +858,23 @@ impl State {
         );
         let at = self.order.partition_point(|k| *k < key);
         self.order.insert(at, key);
+        // REFLECT: the other REFLECT handles hear of this one; a new REFLECT handle hears of
+        // every handle, itself included.
+        let now = now_ns();
+        let new = [self.handles[&id].reflect(Event::ReflectOpen, now)];
+        self.tell_reflect(&new, Some(id));
+        if req.layer == Layer::Reflect {
+            let all: Vec<(Address, Vec<u8>)> = self
+                .handles
+                .values()
+                .map(|h| h.reflect(Event::ReflectOpen, now))
+                .collect();
+            if let Some(r) = self.handles.get_mut(&id) {
+                for (addr, data) in all {
+                    r.report(addr, data);
+                }
+            }
+        }
         encode_response(Status::Ok, &id.to_le_bytes())
     }
 
@@ -705,6 +884,7 @@ impl State {
             return;
         };
         self.order.retain(|k| *k != h.key);
+        self.tell_reflect(&[h.reflect(Event::ReflectClose, now_ns())], None);
         let tokens: Vec<u64> = self
             .held
             .iter()
@@ -714,6 +894,64 @@ impl State {
         for t in tokens {
             self.resume(t, releases);
         }
+    }
+
+    /// Reports `events` to the REFLECT handles (but `except`) whose filters match them.
+    fn tell_reflect(&mut self, events: &[(Address, Vec<u8>)], except: Option<u64>) {
+        for (id, h) in self.handles.iter_mut() {
+            if h.layer != Layer::Reflect || Some(*id) == except {
+                continue;
+            }
+            for (addr, data) in events {
+                h.report(*addr, data.clone());
+            }
+        }
+    }
+
+    /// Reports a flow's event to the handles at `layer`, in priority order. When `refusable`,
+    /// the first handle without SNIFF whose filter matches refuses it: it gets the event, the
+    /// handles after it do not, and this returns true.
+    fn flow_event(
+        &mut self,
+        flow: &Flow,
+        layer: Layer,
+        event: Event,
+        outbound: bool,
+        refusable: bool,
+    ) -> bool {
+        let now = now_ns();
+        for key in self.order.clone() {
+            let Some(h) = self.handles.get_mut(&key.id) else {
+                continue;
+            };
+            if h.layer != layer || h.shut_recv {
+                continue;
+            }
+            let sniff = h.flags.contains(Flags::SNIFF) || !refusable;
+            let mut addr = Address::new(layer);
+            addr.timestamp = now;
+            addr.event = event;
+            addr.outbound = outbound;
+            addr.sniffed = sniff;
+            addr.flow = *flow;
+            let mut meta = addr.meta();
+            meta.priority = key.priority.0;
+            if !h.filter.matches(&Packet::parse(&[], Link::Ip), &meta) {
+                continue;
+            }
+            if !h.fits(0) {
+                h.stats.ring_full += 1;
+                continue;
+            }
+            h.push(addr, Vec::new());
+            if sniff {
+                h.stats.sniffed += 1;
+                continue;
+            }
+            h.stats.dropped += 1;
+            return true;
+        }
+        false
     }
 
     /// `Send`: each record is either the original its handle holds, unchanged, which goes on,
@@ -765,6 +1003,40 @@ impl State {
 }
 
 impl Handle {
+    /// The REFLECT event about this handle, and its data: the filter as written.
+    fn reflect(&self, event: Event, now: i64) -> (Address, Vec<u8>) {
+        let mut addr = Address::new(Layer::Reflect);
+        addr.timestamp = now;
+        addr.event = event;
+        addr.sniffed = true;
+        let r = &mut addr.reflect;
+        r.timestamp = self.opened;
+        r.flags = self.flags;
+        r.process_id = self.pid;
+        r.priority = self.key.priority.0;
+        r.layer = self.layer;
+        r.syntax = self.syntax;
+        (addr, self.source.as_bytes().to_vec())
+    }
+
+    /// Queues an event of a REFLECT handle, if its filter matches and it has room.
+    fn report(&mut self, addr: Address, data: Vec<u8>) {
+        if self.shut_recv {
+            return;
+        }
+        let mut meta = addr.meta();
+        meta.priority = self.key.priority.0;
+        if !self.filter.matches(&Packet::parse(&[], Link::Ip), &meta) {
+            return;
+        }
+        if !self.fits(data.len()) {
+            self.stats.ring_full += 1;
+            return;
+        }
+        self.stats.sniffed += 1;
+        self.push(addr, data);
+    }
+
     /// Whether a packet of `len` bytes fits the queue (`QUEUE_LENGTH`, `QUEUE_SIZE`).
     fn fits(&self, len: usize) -> bool {
         (self.queue.len() as u64) < self.params[Param::QueueLength.index()]

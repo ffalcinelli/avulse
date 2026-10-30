@@ -29,6 +29,7 @@ final class Service {
         nextConnection += 1
         lock.unlock()
         let euid = xpc_connection_get_euid(peer)
+        let pid = UInt32(truncatingIfNeeded: xpc_connection_get_pid(peer))
         xpc_connection_set_event_handler(peer) { message in
             if xpc_get_type(message) == XPC_TYPE_ERROR {
                 avulse_ext_disconnect(id)
@@ -41,7 +42,8 @@ final class Service {
                 var outLength = 0
                 guard
                     let out = avulse_ext_request(
-                        id, euid, data?.assumingMemoryBound(to: UInt8.self), length, &outLength)
+                        id, euid, pid, data?.assumingMemoryBound(to: UInt8.self), length,
+                        &outLength)
                 else { return }
                 if let reply = xpc_dictionary_create_reply(message) {
                     xpc_dictionary_set_data(reply, "d", out, outLength)
