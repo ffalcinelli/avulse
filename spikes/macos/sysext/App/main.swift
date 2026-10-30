@@ -89,10 +89,27 @@ func authorize(_ m: NEFilterManager) {
         targets.append(("its configurationManager", cm))
     }
     if let cls = NSClassFromString("NEConfigurationManager") as? NSObject.Type {
-        let shared = NSSelectorFromString("sharedManager")
-        if cls.responds(to: shared), let cm = cls.perform(shared)?.takeUnretainedValue() as? NSObject {
-            targets.append(("NEConfigurationManager.sharedManager", cm))
+        // Run 41028368933: sharedManager takes it, but saving is still refused. A filter is
+        // system-wide, so try the manager for all users too.
+        for name in ["sharedManager", "sharedManagerForAllUsers"] {
+            let shared = NSSelectorFromString(name)
+            if cls.responds(to: shared), let cm = cls.perform(shared)?.takeUnretainedValue() as? NSObject {
+                targets.append(("NEConfigurationManager.\(name)", cm))
+            }
         }
+    }
+    // And whatever configuration manager the filter manager keeps in its instance variables.
+    var n: UInt32 = 0
+    if let ivars = class_copyIvarList(NEFilterManager.self, &n) {
+        for i in 0..<Int(n) {
+            let name = ivar_getName(ivars[i]).map { String(cString: $0) } ?? "?"
+            let type = ivar_getTypeEncoding(ivars[i]).map { String(cString: $0) } ?? "?"
+            print("RESULT ivar NEFilterManager.\(name) \(type)")
+            if type.contains("NEConfigurationManager"), let v = object_getIvar(m, ivars[i]) as? NSObject {
+                targets.append(("ivar \(name)", v))
+            }
+        }
+        free(ivars)
     }
     for (label, t) in targets where t.responds(to: sel) {
         typealias SetAuth = @convention(c) (AnyObject, Selector, AuthorizationRef) -> Void
