@@ -186,12 +186,12 @@ The pipeline is IR → bytecode (forward jumps only, so the verifier proves term
 | NETWORK | TC clsact cls_bpf (not TCX), `TC_ACT_STOLEN` | WFP `INBOUND/OUTBOUND_IPPACKET` callouts | `NEFilterPacketProvider` (allow, drop, delay then allow); modify = drop + reinject |
 | NETWORK_FORWARD | TC with `ingress_ifindex` / `bpf_fib_lookup` (as ebpfdivert) | WFP `IPFORWARD` | limited: pf has no divert (`route-to`/`dup-to` only) + bpf device; documented gap |
 | **ETHERNET** | TC sees L2; restore the offloaded VLAN tag (`skb->vlan_tci`) in captured frames | **NDIS Lightweight Filter** send/receive NBL hooks | `NEFilterPacketProvider` / `/dev/bpf` for L2 inject |
-| FLOW | sockops + cgroup_skb (port `ebpfdivert_events.bpf.c`) | WFP `ALE_FLOW_ESTABLISHED` + flow-delete | `NEFilterDataProvider` flows |
-| SOCKET (block bind/connect) | cgroup connect/bind hooks, `EPERM` | WFP `ALE_{BIND,CONNECT,LISTEN,ACCEPT}` | data provider (connect); bind/listen sniff-only |
-| REFLECT | pinned registry diff (as ebpfdivert) | driver handle table | daemon registry |
+| FLOW | sockops + cgroup_skb (port `ebpfdivert_events.bpf.c`) | WFP `ALE_FLOW_ESTABLISHED` + flow-delete | `NEFilterDataProvider` new flows, ends through `NEFilterReport` (`flowClosed`) |
+| SOCKET (block bind/connect) | cgroup connect/bind hooks, `EPERM` | WFP `ALE_{BIND,CONNECT,LISTEN,ACCEPT}` | data provider: connect and accept (refusable), close; bind and listen not visible |
+| REFLECT | pinned registry diff (as ebpfdivert) | driver handle table | the extension's handle table |
 | Reinjection | AF_PACKET + vnet GSO, raw IP, `lo` redirect | `FwpsInject*` / `NdisF{Send,Indicate}NetBufferLists` | IPv4: raw IP socket (host-order `ip_len`/`ip_off`), both ways; outbound frames and IPv6: `/dev/bpf` write (L2); inbound IPv6: a `utun` (bpf cannot inject inbound, no `IPV6_HDRINCL`) |
-| Priority, loop prevention | TC prio + `skb->mark` tagging | WFP sublayer weights + inject-context tagging | daemon-ordered handler chain |
-| Crash safety | heartbeat, fail-open | handle cleanup on process exit | daemon watches XPC client death |
+| Priority, loop prevention | TC prio + `skb->mark` tagging | WFP sublayer weights + inject-context tagging | the extension's priority chain; notes of what clients inject |
+| Crash safety | heartbeat, fail-open | handle cleanup on process exit | the extension closes a dead XPC client's handles; held packets go on |
 
 ## Roadmap
 
@@ -300,7 +300,11 @@ tested on GitHub's macOS runners. Step 32 found that the extension cannot run ad
 blocked on a Developer ID or a Mac. Steps 33 and 34 write the extension anyway: its logic in Rust
 (`crates/macos-ext`: handles by priority, divert as delay, a packet sent back unchanged going on down the chain, a
 modified one dropped and injected by the client), a Swift shim around it, and the backend's XPC tier, tested on the
-runners against the extension's test mode, without the provider.
+runners against the extension's test mode, without the provider. Step 35 adds FLOW and SOCKET (an
+`NEFilterDataProvider`: connects and accepts, refusable, and closes; binds and listens are not visible on macOS)
+and REFLECT (the extension's handles), and Step 36 the capability matrix in the guide (`libraries/platforms.md`)
+and the C library on macOS. What is left of Phase 6 is running the extension's providers on a Mac, which waits
+for a Developer ID.
 
 Exit: a macOS test suite passes on real hardware, and the capability matrix is published.
 

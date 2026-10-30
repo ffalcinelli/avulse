@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-30, Phases 2 to 5 done: Steps 1 to 30 and Spikes A and B; Phase 6: Steps 31, 33 and 34 done; Step 32, running the provider, blocked on a Developer ID or a Mac)
+## Status (2026-10-30, Phases 2 to 5 done: Steps 1 to 30 and Spikes A and B; Phase 6: Steps 31 and 33 to 36 done; Step 32, running the extension's providers, blocked on a Developer ID or a Mac)
 
 | Area | State |
 | --- | --- |
@@ -2548,18 +2548,66 @@ the runners. The provider is blocked as Step 32 says.
   - per-packet cost: the chain clones the order and builds an address per handle visited;
   - REFLECT.
 
-### Step 35: FLOW, SOCKET and REFLECT (outline)
+### Step 35: FLOW, SOCKET and REFLECT (done, but for a run of the data provider)
 
-- `NEFilterDataProvider` flows for FLOW.
-- SOCKET connects, which the provider can refuse. Binds and listens are reported only (sniff).
-- REFLECT from the extension's handle table.
+**Outcome.** The extension serves the event layers. Like the packet filter, the data provider
+has not run: Step 32's blocker applies to it too.
 
-### Step 36: The capability matrix, CI and the C library (outline)
+- **The data provider** (`drivers/macos/Extension/DataProvider.swift`), an
+  `NEFilterDataProvider` in the same extension.
+  - `handleNewFlow` passes each socket flow to `avulse_ext_flow_new`:
+    - the direction;
+    - the protocol;
+    - the endpoints, `NWHostEndpoint` strings that Rust parses (a `%scope` is cut);
+    - the audit token. Rust reads the PID at index 5 and gets the process name with
+      `proc_name`.
+  - A refusal is `.drop()`.
+  - A flow whose end is wanted gets `shouldReport`, and the `.flowClosed` report calls
+    `avulse_ext_flow_end`. So no data is peeked at, and flows nobody watches cost nothing more.
+  - `startFilter`/`stopFilter` call `avulse_ext_flows`, which turns the layers on in
+    `Capabilities`.
+- **The logic** (`Extension::flow_start`, `flow_end`). Events go to handles in priority order,
+  and are evaluated as on Linux, on an empty packet with the address's metadata. With no FLOW
+  or SOCKET handle, flows are not watched.
+  - SOCKET: a connect (outbound) or an accept (inbound). The first matching handle without
+    SNIFF refuses it: it gets the event, the handles after it do not, and FLOW sees nothing. A
+    close is reported only.
+  - FLOW: established, then deleted.
+  - Binds and listens never reach a data provider, so macOS does not report them (the guide
+    says so). Unlike Linux, there is no refusal at open of filters that can match them: they
+    can neither be refused nor seen.
+  - At most 65,536 flows are watched.
+- **REFLECT.** A handle keeps its client's PID (`xpc_connection_get_pid`, a new argument of
+  `avulse_ext_request`), its open time, its filter as written and its syntax.
+  - A new REFLECT handle gets `ReflectOpen` for every handle, itself included.
+  - The others get each open and close.
+  - The data is the filter's text.
+  - It covers the extension's handles; bpf-tier handles have no registry on macOS.
+- **Found:** `view` gave the NETWORK view to every layer but ETHERNET, so the event layers would
+  have received packets. It now gives them none, and a test checks it.
+- **Tests.**
+  - 5 more host tests in `crates/macos-ext`, 18 in all.
+  - `avulse_abi::macos::TestFlow` feeds the flow path in test mode.
+  - `extension_flows_sockets_and_reflect`, on the runners, checks a refused connect, a flow
+    established and deleted, and REFLECT seeing this process's handles. It passes on
+    `macos-26` and `macos-26-intel` with the other six (run 41042471588), and the extension,
+    data provider included, builds on both.
 
-- The guide's capability matrix for all three platforms.
-- A CI job that builds the extension.
-- `libavulse.dylib` and the C test on macOS.
-- Notarization moves to "Release v0.0.1".
+### Step 36: The capability matrix, CI and the C library (done)
+
+- **The guide.** `book/src/libraries/platforms.md` is the capability matrix: the packet layers,
+  the event layers and the cross-cutting rows (rights, requirements, where filters run,
+  priorities, loopback, process death), for Linux, Windows and both macOS modes, with each
+  platform's test status. `handles.md` links it, and its macOS section covers the event
+  layers.
+- **CI.**
+  - `privileged.yml`'s `macos` job builds the extension (`drivers/macos/scripts/build.sh`) and
+    runs the extension tests against its test mode, on `macos-26` and `macos-26-intel`. It
+    uploads `Avulse.app`.
+  - `ci.yml` tests `crates/macos-ext` on every platform with the rest of the workspace.
+- **The C library.** `crates/capi/tests/c.rs` runs on macOS too, against `libavulse.dylib`
+  (rpath `@loader_path`), so CI's macOS job covers it.
+- **Notarization** is part of "Release v0.0.1", below.
 
 ## Release v0.0.1 (after Phases 5 and 6)
 
@@ -2573,7 +2621,12 @@ system extension) when Phases 5 and 6 are expanded.
     CLI), with the owner's Azure Trusted Signing or Key Vault keys;
   - the EV certificate, Partner Center and attestation signing of the driver package (CI
     uploads it as `avulse-driver-{amd64,arm64}`);
-  - the Apple Developer ID and notarization for macOS.
+  - the Apple Developer ID, with the Network Extension entitlement for both
+    `packet-filter-provider-systemextension` and `content-filter-provider-systemextension`, its
+    provisioning profiles, and the team-prefixed application group the extension's Mach
+    service needs (`avulse_abi::macos::MACH_SERVICE` changes with it); then
+    `AVULSE_SIGN_IDENTITY=… drivers/macos/scripts/build.sh`, `notarytool submit` and
+    `stapler staple` for `Avulse.app`.
 - A crates.io job (`rust-lang/crates-io-auth-action`, environment `crates-io`, `id-token:
   write`). Publish in dependency order: `avulse-proto`, `avulse-filter`, `avulse-abi`, `avulse-ebpf`,
   `avulse`, then `avulse-cli`. (`avulse-abi` is new in Phase 5: claim the name and give it a
@@ -2584,7 +2637,10 @@ system extension) when Phases 5 and 6 are expanded.
   them when clang is missing or `AVULSE_PREBUILT_BPF` is set, so users need no clang. CI checks
   that the shipped objects match a fresh build.
 - Tarballs `avulse-v0.0.1-linux-{amd64,arm64}.tar.gz`, with `libavulse.so`, `avulse.h` and the
-  `avulse` CLI. They are signed with cosign (keyless) and come with an SBOM.
+  `avulse` CLI. They are signed with cosign (keyless) and come with an SBOM. On macOS,
+  `avulse-v0.0.1-macos-universal.tar.gz` with `libavulse.dylib`, `avulse.h`, the CLI and the
+  notarized `Avulse.app`; before it ships, the extension's providers must have run on a Mac
+  (Step 32).
   - Build them in `quay.io/pypa/manylinux_2_28_{x86_64,aarch64}` (moved here from Step 18), with
     Rust and clang installed in the container. aya is pure Rust, so glibc 2.28 is the only
     requirement.
@@ -2645,6 +2701,8 @@ pre-release tag) passes, then the v0.0.1 tag publishes. The guide and README say
   tier; its XPC service tested on the runners in test mode
 - [x] Step 34: divert, drop and modify through the provider (written and host-tested; the provider
   itself waits for Step 32)
-- [ ] Steps 35 and 36: FLOW, SOCKET and REFLECT; the capability matrix and CI
+- [x] Step 35: FLOW, SOCKET and REFLECT through the extension (written and tested; the data
+  provider itself waits for Step 32)
+- [x] Step 36: the capability matrix, CI, and the C library on macOS
 - [ ] Release v0.0.1 (crates.io, tarballs; after Phases 5 and 6)
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement
