@@ -5,6 +5,9 @@
 #   1. the system extension: mark it enabled in sysextd's database (SIP is off), restart sysextd;
 #   2. failing that, open its pane in System Settings and dump the UI, for a scripted click;
 #   3. the "filter network content" prompt: click any "Allow" button through System Events.
+# Enabling the filter needs nehelper's authorization: an ad-hoc signed app is not "entitled", so
+# nehelper asks for an authorization right, which the database is set to grant; failing that, the
+# app runs again as root.
 # Everything that happens goes to the report as JSON lines, with screenshots in target/shots.
 set -uo pipefail
 report=$1
@@ -56,6 +59,15 @@ emit tcc null "$(sudo sqlite3 '/Library/Application Support/com.apple.TCC/TCC.db
     "select client, service, auth_value from access where service in ('kTCCServiceAccessibility', 'kTCCServiceAppleEvents', 'kTCCServiceScreenCapture', 'kTCCServicePostEvent')" 2>&1)"
 # It may wait for someone to confirm in the GUI: give up after 30 s.
 emit developer_mode null "$(with_timeout 30 sudo systemextensionsctl developer on 2>&1; echo "exit $?"; with_timeout 10 systemextensionsctl developer 2>&1)"
+
+rights=$(sudo sqlite3 /var/db/auth.db "select name from rules where name like '%etwork%'" 2>&1)
+emit auth_rights null "$rights"
+for r in $rights; do
+    case $r in
+        *networkextension* | *NetworkExtension* | system.preferences.network | system.services.systemconfiguration.network)
+            emit "auth_allow $r" null "$(sudo security authorizationdb write "$r" allow 2>&1)" ;;
+    esac
+done
 
 for variant in AvulseSpike AvulseSpikePlain; do
     sudo rm -rf "/Applications/$variant.app"
@@ -124,6 +136,17 @@ EOF
     grep -q 'SELFTEST ok' "$log" && ok=true
     emit "$variant.run" "$ok" "exit $status
 $(cat "$log")"
+    if [ "$variant" = AvulseSpike ] && grep -q 'filter-save failed' "$log"; then
+        sudo "/Applications/$variant.app/Contents/MacOS/AvulseSpike" >"$log.root" 2>&1 &
+        app=$!
+        wait_for 'RESULT filter' 60 "$log.root"
+        sleep 3
+        shot 6-as-root
+        click_allow >/dev/null
+        for ((i = 0; i < 300; i++)); do sudo kill -0 "$app" 2>/dev/null || break; sleep 1; done
+        sudo kill "$app" 2>/dev/null
+        emit "$variant.run_as_root" null "$(cat "$log.root")"
+    fi
     emit "$variant.state" null "$(with_timeout 20 systemextensionsctl list 2>&1)"
     logs=$(with_timeout 60 log show --start "$start" --style compact --info \
         --predicate 'process == "sysextd" OR process == "amfid" OR process == "nesessionmanager" OR process == "nehelper" OR subsystem == "com.github.ffalcinelli.avulse.spike" OR eventMessage CONTAINS "AvulseSpike" OR eventMessage CONTAINS "avulse"' \

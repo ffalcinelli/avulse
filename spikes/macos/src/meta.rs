@@ -47,8 +47,9 @@ pub fn run(r: &mut Report) {
         );
     };
     direction(r, host_mac);
+    direction_lo0(r);
+    // Run 41025892732: BIOCSEXTHDR fails with EINVAL on macOS 15 and 26.
     ext_header(r, host_mac, HOST);
-    ext_header(r, host_mac, "lo0");
     utun_capture(r);
     ipv6_inbound(r);
 }
@@ -119,6 +120,32 @@ fn direction(r: &mut Report, host_mac: [u8; 6]) {
             s,
         ),
         Err(e) => r.fail("direction_ioctl", e.to_string()),
+    }
+}
+
+/// Which directions see a datagram over `lo0`, and how many times.
+fn direction_lo0(r: &mut Report) {
+    let res = (|| -> io::Result<String> {
+        let mut out = String::new();
+        for want in [1u32, 2, 3] {
+            let b = Bpf::open("lo0", 1 << 20, true)?;
+            let set = b.set(BIOCSDIRECTION, want);
+            b.flush();
+            let rx = UdpSocket::bind("127.0.0.1:47104")?;
+            let s = UdpSocket::bind("127.0.0.1:0")?;
+            s.send_to(b"lo", "127.0.0.1:47104")?;
+            drop(rx);
+            let seen = drain(&b, SEC / 2)?
+                .iter()
+                .filter(|rec| udp_port(rec, b.dlt) == Some(47104))
+                .count();
+            out.push_str(&format!("set {want}: {set:?}; seen {seen} time(s)\n"));
+        }
+        Ok(out)
+    })();
+    match res {
+        Ok(s) => r.info("direction_lo0", s),
+        Err(e) => r.fail("direction_lo0", e.to_string()),
     }
 }
 
@@ -296,7 +323,18 @@ fn ipv6_inbound(r: &mut Report) {
     }
     let res = (|| -> io::Result<String> {
         let (fd, ifname) = open_utun()?;
-        let up = Command::new("ifconfig").args([&ifname, "up"]).output()?;
+        // A utun with no IPv6 address drops IPv6 input (run 41025892732).
+        let up = Command::new("ifconfig")
+            .args([
+                &ifname,
+                "inet6",
+                "fd78::1",
+                "fd78::2",
+                "prefixlen",
+                "128",
+                "up",
+            ])
+            .output()?;
         let mut frame = (libc::AF_INET6 as u32).to_be_bytes().to_vec();
         frame.extend_from_slice(&pkt);
         // SAFETY: `frame` is live for the call.
