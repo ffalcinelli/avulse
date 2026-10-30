@@ -44,13 +44,34 @@ func timeRequests(_ label: String) {
     print("RESULT curl \(label): \(times.joined(separator: " "))")
 }
 
+/// The selectors of the class `name` (instance and class methods) that mention authorization or
+/// a configuration manager: where an authorization could be handed to nehelper.
+func selectors(_ name: String) -> [String] {
+    guard let cls: AnyClass = NSClassFromString(name) else { return ["no class \(name)"] }
+    var out: [String] = []
+    for c in [cls, object_getClass(cls)].compactMap({ $0 }) {
+        var n: UInt32 = 0
+        guard let list = class_copyMethodList(c, &n) else { continue }
+        for i in 0..<Int(n) {
+            let s = NSStringFromSelector(method_getName(list[i]))
+            let l = s.lowercased()
+            if l.contains("author") || l.contains("configurationmanager") || l.contains("shared") {
+                out.append(s)
+            }
+        }
+        free(list)
+    }
+    return out
+}
+
 /// nehelper does not consider an ad-hoc signed app entitled, and then wants an authorization
 /// for `system.services.networkextension.filtering` (activate.sh sets that right to "allow").
-/// NEVPNManager takes one through `setAuthorization:`; this tries the same on the filter manager.
+/// NEVPNManager takes one through `setAuthorization:`; NEFilterManager does not (run
+/// 41027504030), so this tries the configuration manager behind it.
 func authorize(_ m: NEFilterManager) {
-    let sel = NSSelectorFromString("setAuthorization:")
-    print("RESULT responds-to-setAuthorization \(m.responds(to: sel))")
-    guard m.responds(to: sel) else { return }
+    for c in ["NEFilterManager", "NEVPNManager", "NEConfigurationManager"] {
+        print("RESULT selectors \(c): \(selectors(c).joined(separator: " "))")
+    }
     var auth: AuthorizationRef?
     let status = "system.services.networkextension.filtering".withCString { name -> OSStatus in
         var item = AuthorizationItem(name: name, valueLength: 0, value: nil, flags: 0)
@@ -61,10 +82,24 @@ func authorize(_ m: NEFilterManager) {
     }
     print("RESULT authorization-create \(status)")
     guard status == errAuthorizationSuccess, let auth = auth else { return }
-    typealias SetAuth = @convention(c) (AnyObject, Selector, AuthorizationRef) -> Void
-    let imp = unsafeBitCast(m.method(for: sel), to: SetAuth.self)
-    imp(m, sel, auth)
-    print("RESULT authorization-set")
+    let sel = NSSelectorFromString("setAuthorization:")
+    var targets: [(String, NSObject)] = [("filter manager", m)]
+    let getter = NSSelectorFromString("configurationManager")
+    if m.responds(to: getter), let cm = m.perform(getter)?.takeUnretainedValue() as? NSObject {
+        targets.append(("its configurationManager", cm))
+    }
+    if let cls = NSClassFromString("NEConfigurationManager") as? NSObject.Type {
+        let shared = NSSelectorFromString("sharedManager")
+        if cls.responds(to: shared), let cm = cls.perform(shared)?.takeUnretainedValue() as? NSObject {
+            targets.append(("NEConfigurationManager.sharedManager", cm))
+        }
+    }
+    for (label, t) in targets where t.responds(to: sel) {
+        typealias SetAuth = @convention(c) (AnyObject, Selector, AuthorizationRef) -> Void
+        let imp = unsafeBitCast(t.method(for: sel), to: SetAuth.self)
+        imp(t, sel, auth)
+        print("RESULT authorization-set on \(label)")
+    }
 }
 
 func enableFilter() {
