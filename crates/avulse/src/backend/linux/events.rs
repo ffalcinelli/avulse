@@ -14,6 +14,7 @@ use std::io;
 use std::net::Ipv6Addr;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use avulse_ebpf::abi::{self, Config, EV_OUTBOUND, EV_RELEASED, EventRecord};
@@ -48,6 +49,7 @@ pub(super) struct EventHandle {
     /// The programs and their links, detached when dropped.
     events: Option<Events>,
     registered: Option<u64>,
+    matched: AtomicU64,
 }
 
 /// The ring buffer, and the UDP flows of the sockets.
@@ -142,6 +144,7 @@ impl EventHandle {
             beat,
             events: Some(events),
             registered: None,
+            matched: AtomicU64::new(0),
         };
         // Registered for `cleanup` and REFLECT; the links go with the process, so there is
         // nothing to detach.
@@ -184,6 +187,8 @@ impl EventHandle {
                 entries.extend(self.entry(&e));
             }
         }
+        self.matched
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
         if self.drop {
             entries.clear();
         }
@@ -302,7 +307,11 @@ impl Opened for EventHandle {
             Some(e) => e.stats().map_err(io_error)?,
             None => [0; abi::stat::COUNT],
         };
-        Ok(self.rx.stats(kernel))
+        let mut s = self.rx.stats(kernel);
+        if self.sniff {
+            s.sniffed = self.matched.load(Ordering::Relaxed);
+        }
+        Ok(s)
     }
 
     fn as_fd(&self) -> BorrowedFd<'_> {

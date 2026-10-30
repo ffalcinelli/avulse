@@ -92,7 +92,7 @@ unsafe fn output(irp: *mut sys::IRP, len: usize) -> Option<&'static mut [u8]> {
 pub unsafe fn mapped(mdl: *mut sys::MDL, len: usize) -> Option<&'static mut [u8]> {
     // SAFETY: the caller's contract.
     unsafe {
-        if mdl.is_null() || len == 0 {
+        if mdl.is_null() || len == 0 || ((*mdl).ByteCount as usize) < len {
             return None;
         }
         // MDL_MAPPED_TO_SYSTEM_VA | MDL_SOURCE_IS_NONPAGED_POOL.
@@ -153,21 +153,20 @@ unsafe fn fill(rx: &mut Rx, irp: *mut sys::IRP) -> Option<(sys::NTSTATUS, usize)
     let Some(out) = (unsafe { output(irp, len) }) else {
         return Some((sys::STATUS_INSUFFICIENT_RESOURCES, 0));
     };
-    let mut buf = Vec::new();
+    let mut n = 0;
     while let Some(e) = rx.packets.front() {
-        if buf.len() + Record::encoded_len(e.data.len()) > len {
-            break;
-        }
-        Record {
+        let r = Record {
             addr: e.addr,
             data: &e.data,
-        }
-        .encode_into(&mut buf);
+        };
+        let Some(k) = r.encode(&mut out[n..]) else {
+            break;
+        };
+        n += k;
         let e = rx.packets.pop_front()?;
         rx.bytes -= e.data.len();
     }
-    out[..buf.len()].copy_from_slice(&buf);
-    Some((sys::STATUS_SUCCESS, buf.len()))
+    Some((sys::STATUS_SUCCESS, n))
 }
 
 /// Answers a `WD_RECV` IRP as WinDivert's driver does: packets back to back in the output
@@ -338,40 +337,39 @@ fn take_pending(rx: &mut Rx) -> Option<*mut sys::IRP> {
 /// Completes the waiting requests that can complete now: with records while some are queued,
 /// then, if the handle is shut down, with `STATUS_PIPE_EMPTY`. At IRQL <= DISPATCH_LEVEL.
 pub fn wake(cell: &SpinLock<Rx>) {
-    let mut done = Vec::new();
-    {
-        let mut rx = cell.lock();
-        while !rx.packets.is_empty() || rx.shut {
+    loop {
+        let (irp, status, n) = {
+            let mut rx = cell.lock();
+            if rx.packets.is_empty() && !rx.shut {
+                break;
+            }
             let Some(irp) = take_pending(&mut rx) else {
                 break;
             };
             // SAFETY: a waiting RECV IRP, now ours.
             match unsafe { fill(&mut rx, irp) } {
-                Some((status, n)) => done.push((irp, status, n)),
-                None => done.push((irp, sys::STATUS_PIPE_EMPTY, 0)),
+                Some((status, n)) => (irp, status, n),
+                None => (irp, sys::STATUS_PIPE_EMPTY, 0),
             }
-        }
-    }
-    for (irp, status, n) in done {
-        // SAFETY: the IRPs are ours.
+        };
+        // SAFETY: the IRP is ours.
         unsafe { sys::complete(irp, status, n) };
     }
 }
 
 /// Cancels every waiting request: the file is being cleaned up.
 pub fn cancel_all(cell: &SpinLock<Rx>) {
-    let mut done = Vec::new();
     {
         let mut rx = cell.lock();
-        while let Some(irp) = take_pending(&mut rx) {
-            done.push(irp);
-        }
         rx.packets.clear();
         rx.bytes = 0;
         rx.shut = true;
     }
-    for irp in done {
-        // SAFETY: the IRPs are ours.
+    loop {
+        let Some(irp) = take_pending(&mut cell.lock()) else {
+            break;
+        };
+        // SAFETY: the IRP is ours.
         unsafe { sys::complete(irp, sys::STATUS_CANCELLED, 0) };
     }
 }
@@ -390,21 +388,18 @@ unsafe extern "C" fn cancel(_device: *mut sys::DEVICE_OBJECT, irp: *mut sys::IRP
     }
 }
 
-/// Queues `e` within the queue parameters, and completes a waiting request. Returns false if the
+/// Queues `e` within the queue parameters, without waking waiting requests. Returns false if the
 /// queue is full or shut down (the entry is dropped).
-pub fn push(cell: &SpinLock<Rx>, e: Entry, max_len: usize, max_bytes: usize) -> bool {
+pub fn enqueue(cell: &SpinLock<Rx>, e: Entry, max_len: usize, max_bytes: usize) -> bool {
+    let mut rx = cell.lock();
+    if rx.shut
+        || rx.packets.len() >= max_len
+        || rx.bytes + e.data.len() > max_bytes
+        || rx.packets.try_reserve(1).is_err()
     {
-        let mut rx = cell.lock();
-        if rx.shut
-            || rx.packets.len() >= max_len
-            || rx.bytes + e.data.len() > max_bytes
-            || rx.packets.try_reserve(1).is_err()
-        {
-            return false;
-        }
-        rx.bytes += e.data.len();
-        rx.packets.push_back(e);
+        return false;
     }
-    wake(cell);
+    rx.bytes += e.data.len();
+    rx.packets.push_back(e);
     true
 }

@@ -29,12 +29,8 @@ const RECV_WAIT_MS: u32 = 250;
 /// How many bytes of records one `Recv` brings at most.
 const RECV_BYTES: u32 = 1 << 20;
 
-/// What the extension supports, or `None` if it is not there (or `AVULSE_NO_EXTENSION` is set).
-pub fn capabilities() -> Option<Capabilities> {
-    if std::env::var_os("AVULSE_NO_EXTENSION").is_some() {
-        return None;
-    }
-    let conn = Connection::open().ok()?;
+/// What the extension supports on an open connection.
+fn capabilities_on(conn: &Connection) -> Option<Capabilities> {
     let (status, payload) = conn
         .call(&Request {
             op: Op::Capabilities,
@@ -56,6 +52,15 @@ pub fn capabilities() -> Option<Capabilities> {
         };
     }
     Some(c)
+}
+
+/// What the extension supports, or `None` if it is not there (or `AVULSE_NO_EXTENSION` is set).
+pub fn capabilities() -> Option<Capabilities> {
+    if std::env::var_os("AVULSE_NO_EXTENSION").is_some() {
+        return None;
+    }
+    let conn = Connection::open().ok()?;
+    capabilities_on(&conn)
 }
 
 /// The error for a status the extension answered.
@@ -129,8 +134,20 @@ pub struct ExtHandle {
 }
 
 impl ExtHandle {
-    pub fn open(spec: &Spec<'_>) -> Result<ExtHandle> {
-        let conn = Connection::open()?;
+    /// Opens a handle on the extension when it is running and serves `spec.layer`, reusing the
+    /// same XPC connection for the capability check and `Open`.
+    pub fn open_if_supported(spec: &Spec<'_>) -> Option<Result<ExtHandle>> {
+        if std::env::var_os("AVULSE_NO_EXTENSION").is_some() {
+            return None;
+        }
+        let conn = Connection::open().ok()?;
+        if !capabilities_on(&conn)?.layer(spec.layer).open {
+            return None;
+        }
+        Some(Self::open_with(conn, spec))
+    }
+
+    fn open_with(conn: Connection, spec: &Spec<'_>) -> Result<ExtHandle> {
         let interfaces = spec
             .interfaces
             .iter()
@@ -159,10 +176,12 @@ impl ExtHandle {
             ),
             (s, _) => return Err(status_error(s)),
         };
+        // The extension's queue enforces `Param::Queue*` and releases expired held packets; the
+        // local `Rx` only stages what `Op::Recv` already delivered.
         let shared = Arc::new(Shared {
             conn,
             id,
-            rx: Rx::new(spec.params)?,
+            rx: Rx::new([u64::MAX; 3])?,
             closing: AtomicBool::new(false),
         });
         for p in Param::ALL {
@@ -240,7 +259,6 @@ impl super::Opened for ExtHandle {
     fn set_param(&self, param: Param, value: u64) -> Result<()> {
         self.shared
             .call(Op::SetParam, &ioctl::encode_set_param(param, value))?;
-        lock(&self.shared.rx.queue).queue.set(param, value);
         Ok(())
     }
 

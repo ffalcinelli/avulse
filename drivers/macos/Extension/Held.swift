@@ -40,6 +40,13 @@ final class Held {
         lock.unlock()
     }
 
+    func reset() {
+        lock.lock()
+        packets.removeAll()
+        early.removeAll()
+        lock.unlock()
+    }
+
     private func finish(_ packet: NEPacket, _ allow: Bool) {
         if allow {
             provider?.allow(packet)

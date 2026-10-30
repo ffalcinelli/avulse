@@ -23,7 +23,7 @@ mod tests;
 use std::collections::HashMap;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -136,6 +136,10 @@ struct Handle {
     registered: Option<u64>,
     /// The TC priority, while it is in [`LOCAL_TC_PRIORITIES`]; its packets carry it in their mark.
     tc_priority: Option<u16>,
+    /// Packets the kernel's superset matcher emitted that `filter` rejected in user space.
+    unmatched: AtomicU64,
+    /// Packets `filter` matched in user space and `drop` discarded.
+    user_dropped: AtomicU64,
 }
 
 /// The receive side: `R` is the ring buffer, with what draining it needs.
@@ -181,6 +185,8 @@ impl Handle {
             classifier: None,
             registered: None,
             tc_priority: None,
+            unmatched: AtomicU64::new(0),
+            user_dropped: AtomicU64::new(0),
         };
         // A SEND_ONLY handle attaches to lo's ingress only, which redirects the inbound packets it
         // injects; it receives nothing.
@@ -568,6 +574,7 @@ impl Handle {
             drop(item);
             if let Some(filter) = &self.filter {
                 if !self.matches(filter, &e, &mut ring.names) {
+                    self.unmatched.fetch_add(1, Ordering::Relaxed);
                     // Not for this handle: a copy is ignored, a diverted packet goes back. A
                     // failure loses the packet, as a full queue does.
                     if !e.addr.sniffed {
@@ -578,6 +585,7 @@ impl Handle {
                     continue;
                 }
                 if self.drop {
+                    self.user_dropped.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
             }
@@ -646,7 +654,13 @@ impl Opened for Handle {
             Some(c) => c.stats().map_err(io_error)?,
             None => [0; abi::stat::COUNT],
         };
-        Ok(self.rx.stats(kernel))
+        let mut s = self.rx.stats(kernel);
+        let unmatched = self.unmatched.load(Ordering::Relaxed);
+        let dropped = self.user_dropped.load(Ordering::Relaxed);
+        s.sniffed = s.sniffed.saturating_sub(unmatched);
+        s.diverted = s.diverted.saturating_sub(unmatched + dropped);
+        s.dropped += dropped;
+        Ok(s)
     }
 
     fn as_fd(&self) -> BorrowedFd<'_> {

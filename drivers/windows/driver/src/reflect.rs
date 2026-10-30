@@ -12,7 +12,7 @@ use avulse_proto::Link;
 
 use crate::handle::Open;
 use crate::lock::SpinLock;
-use crate::rx::Entry;
+use crate::rx::{self, Entry};
 use crate::{eval, sys, wfp};
 
 /// The open handles, in the order they opened.
@@ -43,42 +43,67 @@ fn report(to: &Open, about: &Open, event: Event) {
         to.mutable.lock().stats.load_errors += 1;
         return;
     };
-    to.queue(Entry {
+    to.enqueue(Entry {
         addr,
         data,
         windivert: about.windivert_object.clone(),
     });
 }
 
+/// Wakes every REFLECT handle's waiting `RECV` requests, outside [`HANDLES`]'s lock.
+fn wake_reflect() {
+    let mut i = 0;
+    loop {
+        let rx = {
+            let handles = HANDLES.lock();
+            let Some(h) = handles.get(i) else {
+                break;
+            };
+            i += 1;
+            if h.layer != Layer::Reflect {
+                continue;
+            }
+            h.rx.clone()
+        };
+        rx::wake(&rx);
+    }
+}
+
 /// A handle opened: reported to every REFLECT handle; a REFLECT handle also hears of every
 /// handle already open. The events go out under the lock, so that their order is the handles'.
 pub fn opened(open: &Arc<Open>) {
-    let mut handles = HANDLES.lock();
-    handles.push(open.clone());
-    if open.layer == Layer::Reflect {
-        for h in handles.iter() {
-            report(open, h, Event::ReflectOpen);
+    {
+        let mut handles = HANDLES.lock();
+        handles.push(open.clone());
+        if open.layer == Layer::Reflect {
+            for h in handles.iter() {
+                report(open, h, Event::ReflectOpen);
+            }
+        }
+        for r in handles.iter() {
+            if r.layer == Layer::Reflect && !Arc::ptr_eq(r, open) {
+                report(r, open, Event::ReflectOpen);
+            }
         }
     }
-    for r in handles.iter() {
-        if r.layer == Layer::Reflect && !Arc::ptr_eq(r, open) {
-            report(r, open, Event::ReflectOpen);
-        }
-    }
+    wake_reflect();
 }
 
 /// A handle closed: reported to the REFLECT handles left.
 pub fn closed(open: &Arc<Open>) {
-    let mut handles = HANDLES.lock();
-    let Some(i) = handles.iter().position(|h| Arc::ptr_eq(h, open)) else {
-        return;
-    };
-    handles.remove(i);
-    for r in handles.iter() {
-        if r.layer == Layer::Reflect {
-            report(r, open, Event::ReflectClose);
+    {
+        let mut handles = HANDLES.lock();
+        let Some(i) = handles.iter().position(|h| Arc::ptr_eq(h, open)) else {
+            return;
+        };
+        handles.remove(i);
+        for r in handles.iter() {
+            if r.layer == Layer::Reflect {
+                report(r, open, Event::ReflectClose);
+            }
         }
     }
+    wake_reflect();
 }
 
 /// Frees the table's allocation, at unload (no handle is open).

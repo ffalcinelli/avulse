@@ -151,18 +151,27 @@ impl Open {
 
     /// [`deliver`](Self::deliver), for an entry of its own.
     pub fn queue(&self, e: Entry) {
+        if self.enqueue(e) {
+            rx::wake(&self.rx);
+        }
+    }
+
+    /// Queues `e` within the handle's queue parameters and counts it, without waking waiting
+    /// requests. Returns whether `e` was queued.
+    pub fn enqueue(&self, e: Entry) -> bool {
         let sniff = e.addr.sniffed;
         let (max_len, max_bytes) = {
             let m = self.mutable.lock();
             (m.params[0] as usize, m.params[2] as usize)
         };
-        let queued = rx::push(&self.rx, e, max_len, max_bytes);
+        let queued = rx::enqueue(&self.rx, e, max_len, max_bytes);
         let mut m = self.mutable.lock();
         match (queued, sniff) {
             (false, _) => m.stats.queue_drops += 1,
             (true, true) => m.stats.sniffed += 1,
             (true, false) => m.stats.diverted += 1,
         }
+        queued
     }
 }
 

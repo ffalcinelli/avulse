@@ -585,6 +585,30 @@ fn sockets_refuse_and_flows_report() {
     // Ending twice, or an unknown flow, does nothing.
     ext.flow_end(id);
     assert_eq!(recv(&ext, 2, flows, 0).unwrap().len(), 1);
+
+    // Loopback and IPv6 flags are populated on flow events.
+    let lo_v6 = try_open(
+        &ext,
+        2,
+        "loopback and local.addr == ::1",
+        Layer::Flow,
+        0,
+        Flags::SNIFF | recv_only,
+    )
+    .unwrap();
+    let (v, _, _) = ext.flow_start(&crate::FlowStart {
+        outbound: true,
+        protocol: 6,
+        pid: 42,
+        process_name: None,
+        local: "::1".parse().unwrap(),
+        local_port: 50000,
+        remote: "::1".parse().unwrap(),
+        remote_port: 8080,
+    });
+    assert_eq!(v, Verdict::Allow);
+    let (addr, _) = recv_one(&ext, 2, lo_v6);
+    assert!(addr.loopback && addr.ipv6);
 }
 
 #[test]
