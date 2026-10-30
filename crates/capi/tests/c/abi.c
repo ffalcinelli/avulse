@@ -60,8 +60,16 @@ static void without_privileges(void)
     CHECK(avulse_filter_eval("tcp.dstport == 80", syn, sizeof(syn), false, NULL) == 1);
     addr.layer = 42;
     CHECK(avulse_filter_eval("tcp", syn, sizeof(syn), false, &addr) == AVULSE_E_INVALID);
+    avulse_address_init(&addr, AVULSE_LAYER_NETWORK);
+    addr.version = 0;
+    CHECK(avulse_filter_eval("tcp", syn, sizeof(syn), false, &addr) == AVULSE_E_INVALID);
 
+    h = (avulse_handle *)1;
     CHECK(avulse_open("tcp and (", AVULSE_LAYER_NETWORK, 0, 0, &h) == AVULSE_E_FILTER);
+    CHECK(h == NULL);
+    h = (avulse_handle *)1;
+    CHECK(avulse_open(NULL, AVULSE_LAYER_NETWORK, 0, 0, &h) == AVULSE_E_INVALID);
+    CHECK(h == NULL);
     CHECK(avulse_open("tcp", AVULSE_LAYER_NETWORK, 30001, 0, &h) == AVULSE_E_INVALID);
     CHECK(avulse_open("tcp", AVULSE_LAYER_FLOW, 0, 0, &h) == AVULSE_E_INVALID);
     CHECK(avulse_open("tcp", AVULSE_LAYER_NETWORK, 0,

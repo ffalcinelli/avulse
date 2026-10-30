@@ -62,4 +62,23 @@ fn c_program() {
     let text = String::from_utf8_lossy(&out.stdout) + String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{text}");
     assert_eq!(text.trim(), "ok");
+
+    let cxx = std::env::var("CXX").unwrap_or_else(|_| "c++".into());
+    if Command::new(&cxx).arg("--version").output().is_ok() {
+        let status = Command::new(&cxx)
+            .args([
+                "-std=c++17",
+                "-fsyntax-only",
+                "-Wall",
+                "-Wextra",
+                "-pedantic",
+                "-Werror",
+                "-x",
+                "c++",
+            ])
+            .arg(src.join("include/avulse.h"))
+            .status()
+            .unwrap();
+        assert!(status.success(), "{cxx} header check failed");
+    }
 }

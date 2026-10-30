@@ -233,6 +233,9 @@ impl TryFrom<&avulse_address> for Address {
     type Error = &'static str;
 
     fn try_from(c: &avulse_address) -> Result<Address, &'static str> {
+        if c.version != avulse_rs::ADDRESS_VERSION {
+            return Err("unsupported address version");
+        }
         let mut a = Address::new(Layer::try_from(c.layer).map_err(|_| "unknown layer")?);
         a.timestamp = c.timestamp;
         a.event = Event::try_from(c.event).map_err(|_| "unknown event")?;
@@ -382,14 +385,19 @@ pub unsafe extern "C" fn avulse_open_ex(
     options: *const avulse_open_options,
     handle: *mut *mut avulse_handle,
 ) -> c_int {
+    if handle.is_null() {
+        return invalid("a pointer is NULL");
+    }
+    // SAFETY: valid for a write, per the contract.
+    unsafe { *handle = std::ptr::null_mut() };
+    if options.is_null() {
+        return invalid("a pointer is NULL");
+    }
     // SAFETY: the caller's contract.
     let src = match unsafe { text(filter, "the filter") } {
         Ok(s) => s,
         Err(e) => return e,
     };
-    if handle.is_null() || options.is_null() {
-        return invalid("a pointer is NULL");
-    }
     // SAFETY: not NULL, and valid per the contract.
     let o = unsafe { &*options };
     if (o.size as usize) < size_of::<avulse_open_options>() {

@@ -118,7 +118,7 @@ unsafe fn bytes_mut<'a>(p: *mut c_void, len: u32) -> &'a mut [u8] {
 unsafe fn put<T>(p: *mut T, v: T) {
     if !p.is_null() {
         // SAFETY: the caller's contract.
-        unsafe { p.write(v) };
+        unsafe { p.write_unaligned(v) };
     }
 }
 
@@ -298,10 +298,10 @@ fn timeout(ms: c_int) -> Option<Duration> {
     u64::try_from(ms).ok().map(Duration::from_millis)
 }
 
-/// Runs `f` on `buf`, or on a scratch buffer of the largest packet when `buf` is empty (the caller
-/// wants the length and the address only).
-fn with_buffer<R>(buf: &mut [u8], f: impl FnOnce(&mut [u8]) -> R) -> R {
-    if !buf.is_empty() {
+/// Runs `f` on `buf` when the caller wants packet data (`wants_data`), or on a scratch buffer of
+/// the largest packet when `pkt` was NULL (the caller wants the length and the address only).
+fn with_buffer<R>(buf: &mut [u8], wants_data: bool, f: impl FnOnce(&mut [u8]) -> R) -> R {
+    if wants_data {
         return f(buf);
     }
     SCRATCH.with(|s| {
@@ -336,9 +336,9 @@ pub unsafe extern "C" fn ebpfdivert_recv(
             let buf = bytes_mut(pkt, pkt_len);
             let wants_data = !pkt.is_null();
             let r = if h.layer() == Layer::Reflect {
-                recv_reflect(h, buf, timeout(timeout_ms))
+                recv_reflect(h, buf, wants_data, timeout(timeout_ms))
             } else {
-                with_buffer(buf, |buf| match timeout(timeout_ms) {
+                with_buffer(buf, wants_data, |buf| match timeout(timeout_ms) {
                     Some(t) => h.recv_timeout(buf, t),
                     None => h.recv(buf),
                 })
@@ -365,9 +365,10 @@ pub unsafe extern "C" fn ebpfdivert_recv(
 fn recv_reflect(
     h: &Handle,
     buf: &mut [u8],
+    wants_data: bool,
     timeout: Option<Duration>,
 ) -> avulse::Result<(usize, Address)> {
-    let (data, a) = with_buffer(&mut [], |scratch| {
+    let (data, a) = with_buffer(&mut [], false, |scratch| {
         let (n, a) = match timeout {
             Some(t) => h.recv_timeout(scratch, t),
             None => h.recv(scratch),
@@ -388,7 +389,7 @@ fn recv_reflect(
         Ok::<_, Error>((data, a))
     })?;
     // As for packets, one that does not fit is dropped; no buffer asks for the length only.
-    if !buf.is_empty() {
+    if wants_data {
         buf.get_mut(..data.len())
             .ok_or(Error::BufferTooSmall { needed: data.len() })?
             .copy_from_slice(&data);
@@ -413,10 +414,11 @@ pub unsafe extern "C" fn ebpfdivert_recv_ex(
     addr_len: *mut u32,
     timeout_ms: c_int,
 ) -> c_int {
-    // SAFETY: valid or NULL, per the contract.
-    let Some(&max) = (unsafe { addr_len.as_ref() }) else {
+    if addr_len.is_null() {
         return EINVAL;
-    };
+    }
+    // SAFETY: not NULL, per the check above.
+    let max = unsafe { addr_len.read_unaligned() };
     if max == 0 {
         return EINVAL;
     }
@@ -430,25 +432,33 @@ pub unsafe extern "C" fn ebpfdivert_recv_ex(
             let mut got = vec![Address::default(); max];
             let mut lens = vec![0; max];
             let buf = bytes_mut(pkt, pkt_len);
+            let wants_data = !pkt.is_null();
             // REFLECT events one at a time: their data changes length on the way.
             let r = if h.layer() == Layer::Reflect {
-                recv_reflect(h, buf, timeout(timeout_ms)).map(|(n, a)| {
+                recv_reflect(h, buf, wants_data, timeout(timeout_ms)).map(|(n, a)| {
                     (got[0], lens[0]) = (a, n);
                     1
                 })
             } else {
-                with_buffer(buf, |buf| {
+                with_buffer(buf, wants_data, |buf| {
                     h.recv_batch(buf, &mut got, &mut lens, timeout(timeout_ms))
                 })
             };
             match r {
                 Ok(k) => {
                     for (i, a) in got[..k].iter().enumerate() {
-                        put(addrs.wrapping_add(i), WdAddress::from_avulse(a));
+                        if !addrs.is_null() {
+                            put(addrs.add(i), WdAddress::from_avulse(a));
+                        }
                     }
-                    *addr_len = k as u32;
+                    put(addr_len, k as u32);
                     put(recv_len, lens[..k].iter().sum::<usize>() as u32);
                     0
+                }
+                Err(Error::BufferTooSmall { needed }) if wants_data => {
+                    put(addr_len, 0);
+                    put(recv_len, needed as u32);
+                    -libc::ENOBUFS
                 }
                 Err(e) => errno(&e),
             }
@@ -496,7 +506,7 @@ pub unsafe extern "C" fn ebpfdivert_send(
     // SAFETY: the caller's contract.
     unsafe {
         guarded(h, |h| {
-            let r = send_one(h, bytes(pkt, pkt_len), &*addr);
+            let r = send_one(h, bytes(pkt, pkt_len), &addr.read_unaligned());
             if r == 0 {
                 put(send_len, pkt_len);
             }
@@ -521,7 +531,7 @@ pub unsafe extern "C" fn ebpfdivert_send_ex(
     addrs: *const WdAddress,
     addr_len: u32,
 ) -> c_int {
-    if pkt.is_null() || addrs.is_null() {
+    if pkt.is_null() || addrs.is_null() || addr_len == 0 {
         return EINVAL;
     }
     // SAFETY: the caller's contract.
@@ -534,16 +544,21 @@ pub unsafe extern "C" fn ebpfdivert_send_ex(
                     break;
                 }
                 let p = &all[off..];
-                let len = match p.first().map(|b| b >> 4) {
-                    Some(4) if p.len() >= 20 => usize::from(u16::from_be_bytes([p[2], p[3]])),
-                    Some(6) if p.len() >= 40 => 40 + usize::from(u16::from_be_bytes([p[4], p[5]])),
+                let (len, min) = match p.first().map(|b| b >> 4) {
+                    Some(4) if p.len() >= 20 => (usize::from(u16::from_be_bytes([p[2], p[3]])), 20),
+                    Some(6) if p.len() >= 40 => {
+                        (40 + usize::from(u16::from_be_bytes([p[4], p[5]])), 40)
+                    }
                     _ if i > 0 => break,
                     _ => return EINVAL,
                 };
-                if len == 0 || len > p.len() {
+                if len < min || len > p.len() {
+                    if i > 0 {
+                        break;
+                    }
                     return EINVAL;
                 }
-                r = send_one(h, &p[..len], &*addrs.add(i));
+                r = send_one(h, &p[..len], &addrs.add(i).read_unaligned());
                 if r != 0 {
                     break;
                 }
@@ -660,7 +675,7 @@ pub unsafe extern "C" fn ebpfdivert_get_param(
                     None => return EINVAL,
                 },
             };
-            *value = v;
+            put(value, v);
             0
         })
     }
@@ -709,7 +724,9 @@ pub unsafe extern "C" fn ebpfdivert_get_handle_stats(
                 s.owner_gone,
             ];
             let n = (stats_len as usize).min(STATS);
-            std::slice::from_raw_parts_mut(stats, n).copy_from_slice(&values[..n]);
+            for (i, &v) in values[..n].iter().enumerate() {
+                stats.add(i).write_unaligned(v);
+            }
             n as c_int
         })
     }
@@ -788,8 +805,11 @@ pub unsafe extern "C" fn ebpfdivert_helper_eval_filter(
     pkt_len: u32,
     addr: *const WdAddress,
 ) -> c_int {
+    if addr.is_null() {
+        return EINVAL;
+    }
     // SAFETY: the caller's contract.
-    let (Some(src), Some(addr)) = (unsafe { text(filter) }, unsafe { addr.as_ref() }) else {
+    let (Some(src), addr) = (unsafe { text(filter) }, unsafe { addr.read_unaligned() }) else {
         return EINVAL;
     };
     let Ok(addr) = addr.to_avulse() else {
@@ -855,9 +875,12 @@ pub unsafe extern "C" fn ebpfdivert_helper_calc_checksums(
     }
     // SAFETY: the caller's contract.
     let (ok, set) = helpers::calc_checksums(unsafe { bytes_mut(pkt, pkt_len) }, flags);
-    // SAFETY: valid or NULL, per the contract.
-    if let Some(a) = unsafe { addr.as_mut() } {
+    if !addr.is_null() {
+        // SAFETY: valid, per the contract.
+        let mut a = unsafe { addr.read_unaligned() };
         a.set_checksums(set.ip, set.tcp, set.udp);
+        // SAFETY: valid, per the contract.
+        unsafe { addr.write_unaligned(a) };
     }
     if ok { 0 } else { EINVAL }
 }
