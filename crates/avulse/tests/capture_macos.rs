@@ -457,12 +457,55 @@ fn inject_outbound() {
     let s = UdpSocket::bind(SocketAddr::from((HOST_IP6, 0))).unwrap();
     s.send_to(b"six", SocketAddr::from((PEER_IP6, 47021)))
         .unwrap();
-    let (pkt, addr) = recv_within(&h, SEC).expect("the outbound IPv6 datagram");
+    let Some((pkt, addr)) = recv_within(&h, SEC) else {
+        let wire_saw = recv_within(&wire, SEC).map(|(f, _)| f.len());
+        panic!(
+            "the outbound IPv6 datagram (the wire saw {wire_saw:?}){}",
+            tables()
+        );
+    };
     assert!(addr.ipv6 && addr.outbound);
     let (first, _) = recv_within(&wire, SEC).expect("the original");
     h.send(&pkt, &addr).unwrap();
     let (second, _) = recv_within(&wire, SEC).expect("the copy");
     assert_eq!(first, second);
+}
+
+/// An outbound IPv6 datagram, with every interface captured.
+#[test]
+fn capture_ipv6_outbound() {
+    if !enabled() {
+        return;
+    }
+    let h = Handle::open(
+        "ipv6 and udp.dstport == 47025",
+        Layer::Network,
+        0,
+        Flags::SNIFF,
+    )
+    .unwrap();
+    let s = UdpSocket::bind(SocketAddr::from((HOST_IP6, 0))).unwrap();
+    s.send_to(b"six", SocketAddr::from((PEER_IP6, 47025)))
+        .unwrap();
+    let Some((data, addr)) = recv_within(&h, SEC) else {
+        panic!("the outbound IPv6 datagram{}", tables());
+    };
+    assert_eq!(udp_dst(&data, Link::Ip), Some(47025));
+    assert!(addr.ipv6 && addr.outbound);
+    assert_eq!(addr.if_idx, ifindex(HOST));
+}
+
+/// The neighbor and routing tables, for a failure's message.
+fn tables() -> String {
+    let out = std::process::Command::new("sh")
+        .args([
+            "-c",
+            "ndp -an; netstat -rn -f inet6 | grep -i 'fd77\\|fd00\\|default'",
+        ])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    format!("\n{out}")
 }
 
 /// A handle does not capture what it sends itself; other handles do.
