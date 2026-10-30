@@ -189,7 +189,7 @@ The pipeline is IR → bytecode (forward jumps only, so the verifier proves term
 | FLOW | sockops + cgroup_skb (port `ebpfdivert_events.bpf.c`) | WFP `ALE_FLOW_ESTABLISHED` + flow-delete | `NEFilterDataProvider` flows |
 | SOCKET (block bind/connect) | cgroup connect/bind hooks, `EPERM` | WFP `ALE_{BIND,CONNECT,LISTEN,ACCEPT}` | data provider (connect); bind/listen sniff-only |
 | REFLECT | pinned registry diff (as ebpfdivert) | driver handle table | daemon registry |
-| Reinjection | AF_PACKET + vnet GSO, raw IP, `lo` redirect | `FwpsInject*` / `NdisF{Send,Indicate}NetBufferLists` | outbound: `/dev/bpf` write (L2); inbound: raw IP socket (host-order `ip_len`/`ip_off`; bpf cannot inject inbound) |
+| Reinjection | AF_PACKET + vnet GSO, raw IP, `lo` redirect | `FwpsInject*` / `NdisF{Send,Indicate}NetBufferLists` | IPv4: raw IP socket (host-order `ip_len`/`ip_off`), both ways; outbound frames and IPv6: `/dev/bpf` write (L2); inbound IPv6: a `utun` (bpf cannot inject inbound, no `IPV6_HDRINCL`) |
 | Priority, loop prevention | TC prio + `skb->mark` tagging | WFP sublayer weights + inject-context tagging | daemon-ordered handler chain |
 | Crash safety | heartbeat, fail-open | handle cleanup on process exit | daemon watches XPC client death |
 
@@ -209,8 +209,10 @@ The phases run in order. Each has an exit criterion.
 4. **Spike C, macOS.** Find out whether `NEFilterPacketProvider` exposes Ethernet frames, measure its throughput
    and delay semantics, and test reinjection through `/dev/bpf`. Partly done on GitHub's macOS runners
    (`docs/spikes/macos.md`): bpf injects outbound only; a raw socket (host-order `ip_len`) reinjects inbound on the
-   right interface; pf has no divert; the system extension builds with the Rust library and stops at the user's
-   approval, so the provider's frame level, throughput and delay are still to measure before Phase 6.
+   right interface; pf has no divert; the system extension builds with the Rust library. With SIP off, sysextd's
+   database approves it, an authorization enables the filter, and a launchd job registers the provider, but AMFI
+   will not let launchd run an ad-hoc signed provider (Phase 6, Step 32). So the provider's frame level,
+   throughput and delay wait for a Developer ID or a Mac with AMFI off.
 
 Exit: a written go/no-go note for each spike, and the capability matrix above confirmed or corrected.
 
@@ -291,6 +293,11 @@ Exit: the pydivert and jdivert Windows suites pass against it, and the driver is
 1. Build the NE packet and data providers, the XPC daemon (registry, priority chain, client-death cleanup), and
    L2 reinjection through `/dev/bpf`.
 2. Notarize, and document every gap through `capabilities()`.
+
+Progress (steps in `docs/implementation-plan.md`, Steps 31 to 36): Step 31 gives macOS sniffing and sending at
+NETWORK and ETHERNET without the extension, through `/dev/bpf` (a device per direction), raw sockets and a `utun`,
+tested on GitHub's macOS runners. Step 32 found that the extension cannot run ad-hoc signed on a runner, so it is
+blocked on a Developer ID or a Mac.
 
 Exit: a macOS test suite passes on real hardware, and the capability matrix is published.
 

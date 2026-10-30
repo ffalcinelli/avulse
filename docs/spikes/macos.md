@@ -1,6 +1,11 @@
 # Spike C: macOS, on GitHub's runners
 
-**Verdict: partly answered; no blocker found, and the one question left needs a click.** There is
+**Verdict: partly answered. No blocker for the bpf backend (Phase 6, Step 31). The provider's
+behaviour is still unmeasured, and cannot be measured on a runner. With SIP off, a script gets
+the extension approved (finding 10), the filter enabled (finding 12) and the provider registered
+(finding 13). But AMFI will not let launchd run an ad-hoc signed provider that carries the
+restricted entitlement, and sysextd will not take one without it (findings 14 and 15). It needs
+a Developer ID, or a Mac with AMFI turned off.** There is
 no Mac, so the spike ran on GitHub Actions' macOS runners (macOS 26 and 15 on Apple silicon,
 macOS 26 on Intel). They are VMs with root, and **SIP is off** on all of them. `/dev/bpf`
 captures and injects as the roadmap assumes, but only outbound. Two paths deliver inbound
@@ -98,6 +103,84 @@ Date: 2026-10-21. Code: `spikes/macos` (outside the workspace) and
    bytes start at the link-layer header. The provider logs its first 30 packets' leading bytes
    for when it runs.
 
+## Phase 6's runs (2026-10-30)
+
+Runs 41025892732, 41026701134, 41027504030 and 41028368933, on macOS 15.7 and 26.6 (Apple
+silicon and Intel). Step 31a (the `meta` probe) answered what the bpf backend needed. Step 32
+(`activate.sh`) tried to get the extension running.
+
+8. **Direction.**
+   - `BIOCSDIRECTION` (`_IOW('B', 139)`, values `BPF_D_IN` 1, `BPF_D_OUT` 2, `BPF_D_INOUT` 3,
+     the default) works on every runner. It is XNU's, and the SDK's `net/bpf.h` leaves it out.
+     A device set to IN sees only the inbound datagram, one set to OUT only the outbound one.
+   - On `lo0`, only the OUT device sees a datagram, once.
+   - `BIOCSEXTHDR` (the extended header with direction, PID and command name) fails with
+     EINVAL.
+   - `bh_hdrlen` is 20 on `lo0`, not 18: bpf pads the header so that the network header is
+     aligned.
+9. **utun and IPv6.**
+   - A bpf device on `utun` reports `DLT_NULL`, with the family in host byte order.
+   - IPv6 inbound fails through a raw socket: the SDK has no `IPV6_HDRINCL`, and option 36 is
+     accepted but does nothing.
+   - It also fails through a utun without an IPv6 address.
+   - It works through a utun that has one (`ifconfig utunN inet6 fd78::1 fd78::2 prefixlen
+     128`). The receiver sees the datagram from its real source, on the utun.
+10. **Approving the extension works.** With SIP off, `activate.sh` changes the extension's
+    `state` from `activated_waiting_for_user` to `activated_enabled` in
+    `/Library/SystemExtensions/db.plist` and restarts sysextd (`launchctl kickstart -k
+    system/com.apple.sysextd`).
+    - `systemextensionsctl list` then shows it activated and enabled.
+    - The pending request fails (`OSSystemExtensionErrorDomain` 1), but a new one completes at
+      once.
+    - The "would like to use a new network extension" notice is an alert of
+      `UserNotificationCenter`, which a System Events click dismisses.
+    - The runners grant accessibility to `/bin/bash` and `osascript`, and screen capture to
+      `/bin/bash`, so `screencapture` works. The screenshots are uploaded with the report.
+11. **Enabling the filter is refused.** `NEFilterManager.saveToPreferences` fails with
+    `NEFilterErrorDomain` 5, "permission denied", in every variant tried:
+    - the app run as itself, or as root;
+    - with `system.services.networkextension.filtering` and the other networking rights set to
+      `allow` in the authorization database.
+
+    nehelper logs `entitled = 0, hasProviderPermission = 0`, then "Failed to obtain
+    authorization right for 3: no authorization provided": an ad-hoc signature has no team ID,
+    and nehelper does not count the app as entitled. `NEFilterManager` does not respond to
+    `setAuthorization:`, which `NEVPNManager` has.
+12. **An authorization gets past nehelper** (runs 41028368933, 41028825224).
+    - `NEConfigurationManager` has `setAuthorization:`, `sharedManager` and
+      `sharedManagerForAllUsers`.
+    - The app sets an authorization for `system.services.networkextension.filtering` on both
+      shared managers, and on the filter manager's `_configurationManager` ivar, through the
+      Objective-C runtime.
+    - `saveToPreferences` then succeeds on macOS 15 and 26 (Apple silicon), and authd logs
+      nehelper authorizing the right for the app. On `macos-26-intel` the call never returns.
+13. **The provider is not registered** (run 41029887542). nesessionmanager starts the filter
+    session, then logs "Found 0 registrations for com.github.ffalcinelli.avulse.spike.filter
+    (com.apple.networkextension.filter-packet)" and falls back to looking for an app
+    extension.
+    - Approving through the database skips the launchd job that sysextd makes on activation.
+    - The entry's `additionalLaunchdPlistEntries` (an `NSKeyedArchiver` archive) holds the
+      job's `MachServices` and a `com.apple.networkextension.provider.matching` launch event.
+    - `launchd_job.py` makes the same job from the staged bundle.
+14. **Registered, but not started** (run 41031016569).
+    - With the job bootstrapped, nesessionmanager finds 2 registrations, creates the plugin and
+      sends the start command. The provider never checks in, and the session stays
+      "connecting".
+    - Meanwhile the filter's default drop holds traffic: curl took 30 to 75 s with the filter
+      enabled, against 0.16 s without.
+    - Run 41032129926: nesessionmanager makes its own launchd job for the provider
+      (`NetworkExtension.<identifier>.0.0.0.1`), and launchd fails to start it: "Could not find
+      and/or execute program …: 13: Permission denied".
+    - amfid logs "The file is adhoc signed but contains restricted entitlements" for these
+      binaries. The app runs regardless; the extension's daemon does not.
+15. **The wall** (run 41033234741). Without the restricted entitlement, sysextd refuses the
+    extension at activation (`OSSystemExtensionErrorDomain` 9: it "does not appear to belong
+    to any extension categories"). With it, AMFI keeps launchd from running the provider. So
+    an ad-hoc signed provider cannot run on a runner, SIP or not. It takes either:
+    - a Developer ID with the entitlement;
+    - or a Mac booted with `amfi_get_out_of_my_way=1`, which needs a reboot that a runner
+      cannot do.
+
 ## What Phase 6 must take into account
 
 - Inbound modify (drop and reinject) has a path: the raw socket, with host-order `ip_len` and
@@ -111,12 +194,10 @@ Date: 2026-10-21. Code: `spikes/macos` (outside the workspace) and
 
 ## Left open, and how to close it
 
-- **The provider at work** (frame level, throughput, delay latency) needs an approved
-  extension:
-  - on a runner, script the approval (an `osascript` click in System Settings, if the runner
-    lets the shell use accessibility), then rerun the workflow, which is ready to enable the
-    filter and time it;
-  - or a Mac with SIP off and `systemextensionsctl developer on`, at the console;
-  - or a Developer ID (owner action), with which the extension can be installed and approved
-    normally.
+- **The provider at work** (frame level, throughput, delay latency). `activate.sh` gets as far
+  as launchd starting the provider (findings 10 to 15). What is left needs either:
+  - a Developer ID with the Network Extension entitlement (owner action), with which none of the
+    workarounds is needed;
+  - or a Mac with SIP off and `nvram boot-args="amfi_get_out_of_my_way=1"`, rebooted, where
+    `activate.sh` should take it the rest of the way.
 - **NETWORK_FORWARD through pf** (`route-to` to a `utun`?) was not tried.

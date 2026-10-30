@@ -5,7 +5,7 @@ and backend matrix, the filter-language decisions, and the phases. This file hol
 implementation stands and the next steps, specified well enough to start without re-deriving
 anything. When a step lands, tick it here, update **Status**, and commit this file with the code.
 
-## Status (2026-10-29, Phases 2 to 4 done: Steps 1 to 21 and Spikes A and B, Spike C partly done; Phase 5 done: Steps 22 to 30; next Phase 6)
+## Status (2026-10-30, Phases 2 to 5 done: Steps 1 to 30 and Spikes A and B; Phase 6 started: Step 31 done, Step 32 (Spike C's end) blocked on a Developer ID or a Mac)
 
 | Area | State |
 | --- | --- |
@@ -16,15 +16,15 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
 | `crates/wasm` (`avulse-wasm`) | The filter engine for the website's playground (wasm-bindgen, `publish = false`). |
 | Docs and website | README (front page), guide (`book/`, mdBook), `site/` with the playground, rustdoc and pdoc, built by `scripts/build-site.sh` and deployed by `pages.yml` to <https://ffalcinelli.github.io/avulse/>. Every public item is documented (`missing_docs`). |
 | `crates/ebpf` (`avulse-ebpf`) | Step 10: the generator covers metadata (through `Env`: layer, priority, interface names), IPv6 and MAC addresses, VLAN fields, TCP options (`avulse_options`, behind `CFG_TCP_OPTIONS`), byte order and `contains` in headers, arithmetic, field-to-field comparisons, set trees, `xor` through a slot; `superset`/`compile_superset` widen the rest, and `Matcher::exact` says when user space filters again. Step 9: `avulse_ingress` redirects the inbound packets user space injects through `lo` (`MARK_REDIRECT`, `PRIO_INJECTED`); test runs return the context (`Classifier::run_ctx`). Step 8: the loader attaches through Netlink (`Classifier::attach`, `Attachment::detach`) and opens raw BPF hash maps (`HashMap`, for the registry). Step 7: the capture side of the static TC programs (`avulse_ingress`/`avulse_egress` → matcher → `avulse_act`): per-handle configuration, metadata facts, ring buffer records, divert/sniff/drop, marks, loopback, NETWORK/FORWARD/ETHERNET selection, fragments, the forwarding check, fail-open; `abi.rs` mirrors `bpf/abi.h`. Spike A (go, `docs/spikes/ebpf-codegen.md`): the static TC program `bpf/tc.bpf.c` (parser → per-CPU facts → tail call), `codegen` (IR subset → eBPF matcher; anything else is `Error::Unsupported`), `insn` (assembler, forward labels, dead-code removal), `loader` (Linux: `aya` plus raw `bpf()` for the matcher and `BPF_PROG_TEST_RUN`). `tests/emu.rs` runs the matchers in an eBPF interpreter against the evaluator; `tests/kernel.rs` (`AVULSE_BPF=1`, root, in the VMs) checks facts and verdicts in the kernel. Step 14: the event programs of the FLOW and SOCKET layers (`bpf/events.bpf.c`, `loader::Events`, records in `abi::EventRecord`). Needs clang on Linux. |
-| `spikes/macos` | Spike C (partial, `docs/spikes/macos.md`): probes of bpf, raw-socket and `utun` injection, pf and the filter engine's speed, and a `NEFilterPacketProvider` system extension around a Rust static library; run on GitHub's macOS runners by `.github/workflows/macos-spike.yml` (on changes to the spike). Outside the workspace. |
+| `spikes/macos` | Spike C (partial, `docs/spikes/macos.md`): probes of bpf, raw-socket and `utun` injection, pf and the filter engine's speed, what the bpf backend needs (`meta`: `BIOCSDIRECTION`, utun, IPv6 sends), and a `NEFilterPacketProvider` system extension around a Rust static library. `activate.sh` approves the extension on the runner through sysextd's database; enabling the filter is still refused (Step 32). Run on GitHub's macOS runners by `.github/workflows/macos-spike.yml` (on changes to the spike). Outside the workspace. |
 | `spikes/windows-driver` | Spike B (go, pure Rust, `docs/spikes/windows-driver.md`): a WDM driver with WFP callouts (IPv4 packet layers) and an NDIS LWF running the bytecode interpreter, built with `cargo wdk` in the `windows` VM. Outside the workspace (`exclude`), not built by CI. |
-| `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Steps 15 to 17: the FLOW, SOCKET and REFLECT layers (`events.rs`, `reflect.rs`), SOCKET refusing binds and connects in the kernel; `Address` version 2 (216 bytes) with the process name. Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Other platforms: `Error::Unsupported`. |
+| `crates/avulse` (`avulse`) | Step 6: the handle API. `Handle`/`OpenOptions` (WinDivert's argument rules, native or WinDivert syntax), `Flags`, `Param`, `Shutdown`, `Error`, `capabilities()`, `cleanup()`, and the 184-byte versioned `#[repr(C)]` `Address` with its opaque reinjection `Context`. The crate-private `Backend`/`Opened` traits; the backends are modules of this crate (owner decision: one crate to publish). 18 tests on a fake backend. Steps 8 and 9: the Linux backend (`src/backend/linux/`) receives at the NETWORK, NETWORK_FORWARD and ETHERNET layers (divert, sniff, drop) and sends (`send.rs`: raw IP and `AF_PACKET` sockets, the `lo` redirect, GSO); filters that run in user space reinject what they do not match. Steps 15 to 17: the FLOW, SOCKET and REFLECT layers (`events.rs`, `reflect.rs`), SOCKET refusing binds and connects in the kernel; `Address` version 2 (216 bytes) with the process name. Step 13: devices without a link-layer header (tun, WireGuard, PPP, ipip/ip6tnl/sit) at the NETWORK layers. 15 unit tests without privileges; `tests/capture.rs` (Step 12's privileged suite, 36 tests, `AVULSE_BPF=1`, root, in the VMs and in the `privileged` workflow) on veth pairs, VLAN devices, `lo` and routed namespaces. Steps 24 to 28: the Windows backend (`src/backend/windows/`). Step 31: the macOS backend without the system extension (`src/backend/macos/`): SNIFF handles at NETWORK and ETHERNET through `/dev/bpf`, sending through raw sockets, bpf and a utun; `tests/capture_macos.rs` on a `feth` pair in the `privileged` workflow. Other platforms: `Error::Unsupported`. |
 | `crates/capi` (`avulse-capi`) | Step 18: the C ABI, `libavulse.so`/`.a`, header `include/avulse.h` (hand-written, layout pinned by asserts), 20 functions, tested from C (`tests/c.rs`, `tests/c/abi.c`). |
 | `drivers/windows` | Step 23: `avulse.sys` (WDM, Rust, outside the workspace): the control device, handles opened with verified bytecode, parameters, statistics, shutdown, and `EVAL`, a test IOCTL that runs a handle's filter in the kernel. `test/` passes 243 checks in the `windows` VM under Driver Verifier, WinDivert's filter vectors included. Steps 25 and 26: WFP callouts divert, sniff, drop and inject at the NETWORK layers. Step 27: the NDIS lightweight filter (`lwf.rs`) gives the ETHERNET layer, with VLAN tags and large sends restored. Step 28: FLOW, SOCKET and REFLECT (`ale.rs`, `reflect.rs`). `capture_windows.rs` (27 tests) passes with the driver as a plain service and installed through `netcfg`. Step 30: a panic bugchecks, packet and event paths allocate fallibly and fail open, every suite runs under Driver Verifier with code integrity checks among its extra flags, the images meet HVCI's layout rules, and the driver builds for ARM64 and in CI (`windows-driver`). |
 | `crates/abi` (`avulse-abi`) | Step 23: the types shared with the driver and the C ABI (`Address`, `Flags`, `Param`, `Shutdown`, `Stats`, `Syntax`), and `ioctl`, the driver protocol. `no_std`. |
 | `crates/windivert-compat` | Step 29: on Windows, `avulse_windivert.dll`, a drop-in for `WinDivert.dll` (WinDivert 2.2's exports, overlapped receives through the driver's `WD_RECV`); pydivert's (148) and jdivert's (334, JDK 25 and 8) Windows suites pass against it unchanged, under Driver Verifier. Steps 19 to 21: `libavulse_windivert.so`, libebpfdivert's C API over avulse (21 `ebpfdivert_*` exports, negative errno values, WinDivert's 80-byte address with avulse's reinjection context in its union). WinDivert's helpers (hash, checksums, `eval_filter` with `random*`) agree with WinDivert's own code on generated vectors (`scripts/gen_compat_vectors.py`). REFLECT's data is WinDivert's serialized filter object (`Filter::windivert_object`, matching WinDivert's compiler on 230 filters). 15 unit tests, the exported-symbol test, and `tests/capture.rs` (6, `AVULSE_BPF=1`) on 6.8 and 5.15. pydivert's suite (155) and jdivert's (334, JNA and Panama) pass against it unchanged. `publish = false`. |
 | `bindings/python` | 0.0.0 placeholder, published to PyPI to reserve the name. |
-| CI (`.github/workflows/ci.yml`) | fmt, clippy, tests on ubuntu/windows (x64 and `windows-11-arm`)/macos, the Windows driver's build for x64 and ARM64 (`windows-driver`, WDK from NuGet), tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
+| CI (`.github/workflows/ci.yml`, `privileged.yml`) | `privileged.yml` runs the root suites: Linux's on Ubuntu, and macOS's (`capture_macos`) on `macos-26` and `macos-26-intel`. `ci.yml`: fmt, clippy, tests on ubuntu/windows (x64 and `windows-11-arm`)/macos, the Windows driver's build for x64 and ARM64 (`windows-driver`, WDK from NuGet), tshark comparison (tshark from `ppa:wireshark-dev/stable`), no_std build (`thumbv7em-none-eabihf`), docs (rustdoc `-D warnings`, wasm32 clippy, mdbook), fuzz (each target for 60 s on nightly). `pages.yml` deploys the website. |
 | Release (`.github/workflows/release.yml`) | Builds and publishes the Python placeholder on `v*` tags. **No crates.io job yet.** |
 
 ### Accounts and registries (already set up)
@@ -2299,6 +2299,195 @@ The original plan of the step follows.
 - OSSign for the user-mode binaries.
 - Owner actions: the EV certificate, Partner Center, attestation signing.
 
+## Phase 6: macOS
+
+**Goal** (roadmap, Phase 6): give macOS every layer it can have. The system extension holds an
+`NEFilterPacketProvider` (NETWORK and ETHERNET: allow, drop, delay then allow) and an
+`NEFilterDataProvider` (FLOW, SOCKET). The extension is also the daemon: the registry, the
+priority chain, and cleanup when a client dies. Reinjection goes through bpf and raw sockets.
+Every gap is documented through `capabilities()`. **Exit:** a macOS suite passes on real
+hardware, and the capability matrix is published. Notarization, the Developer ID and the
+Network Extension entitlement are owner actions, part of "Release v0.0.1".
+
+**Where it runs.** There is no Mac and no Developer ID (owner, 2026-10-30), so everything
+runs on GitHub's macOS runners. They are VMs with root, where SIP is off.
+- Workflows are pushed over SSH, and their reports and screenshots are read from the
+  artifacts.
+- The exit's "real hardware" stays an owner item.
+
+Read `docs/spikes/macos.md` first.
+
+**Decisions for this phase** (change them here, with a reason, if the work proves them wrong):
+
+- **Two tiers.**
+  - Without the extension (Step 31), `backend/macos` captures through `/dev/bpf` and runs the
+    filter in user space. Handles sniff and send at NETWORK and ETHERNET. `capabilities()`
+    says so, and `check_support` refuses diverting and dropping with the hint "open it with
+    SNIFF".
+  - With the extension (Steps 33 to 35), the backend talks to it over XPC, and handles divert,
+    drop and modify.
+  - The bpf tier stays as the fallback where the extension is not installed.
+- **Sending needs no extension** (Spike C, Step 31a): the paths in `backend/macos/send.rs`.
+  The extension's reinjection reuses them.
+- **The extension is the daemon.**
+  - One system extension holds both providers and serves an `NEMachServiceName` XPC service.
+    There is no separate launchd daemon.
+  - Its logic is a Rust staticlib, with Swift as a thin shim, as in the spike.
+  - The XPC messages carry `avulse_abi::ioctl`'s open request and records, as the Windows
+    driver's IOCTLs do.
+  - It lives in `drivers/macos/`, outside the workspace, like `drivers/windows`.
+- **Modify** is delay, then allow when the bytes sent back are unchanged; otherwise drop the
+  original and reinject the new bytes.
+- **NETWORK_FORWARD** stays a documented gap: pf has no divert.
+
+### Step 31: Sniffing and sending without the extension (done)
+
+**Outcome.** macOS has a backend: sniffing and sending at NETWORK and ETHERNET, without the
+system extension. `tests/capture_macos.rs` (15 tests) passes on `macos-26` (Apple silicon) and
+`macos-26-intel`, in `privileged.yml`'s `macos` job.
+
+- **Capture** (`backend/macos/`). bpf devices on the selected interfaces, and `Filter::matches`
+  in user space. `capabilities()` gives NETWORK and ETHERNET with `open` and `inject` only, so
+  `check_support` refuses divert and drop ("open it with SNIFF"). The other layers fail with
+  `Error::Unsupported`.
+  - Each interface gets two devices, one per direction: `BIOCSDIRECTION`, which Step 31a found
+    working on 15 and 26 although the SDK leaves it out. A loopback interface gets the outbound
+    one only, which sees each packet once. Where the ioctl fails, one device sees both
+    directions, and the interface's MAC address or addresses decide.
+  - The default interfaces are those up and running with an address that is not link-local,
+    plus `lo0`. At ETHERNET, Ethernet interfaces only.
+  - `DLT_NULL` links (`lo0`, `utun`) serve NETWORK only.
+  - bpf's wall-clock timestamps are moved onto `CLOCK_MONOTONIC`.
+  - A `kqueue` over the devices and a pipe flag makes the handle pollable.
+  - Without `FRAGMENTS`, inbound fragments are skipped: bpf sees packets before reassembly, so
+    there is no reassembled packet to deliver.
+- **Sending** (`send.rs`):
+  - IPv4 goes through a raw socket, with host-order `ip_len`/`ip_off`, either way.
+  - Outbound frames, and outbound IPv6 behind the Ethernet header saved in the `Ctx`, go
+    through a write-only bpf device (filter `ret 0`).
+  - Inbound IPv6 goes through a `utun` the handle creates, given `fd00:a7e1:5e:<unit>::1` with
+    `SIOCAIFADDR_IN6`. The stack sees it arrive on the utun.
+  - Inbound frames that do not carry IP, and outbound IPv6 that has no Ethernet header to go
+    behind, are refused.
+  - A handle skips the packets it sent itself (hashes kept for 2 s). It cannot mark impostors
+    for other handles.
+- **Shared with Linux:** `backend/queue.rs`, the receive queue and its `Entry`.
+- **Found in the runs.**
+  - On the runners, a static neighbor entry (`ndp -s`) does not stop the kernel from cloning
+    an incomplete one and probing. So outbound IPv6 to a made-up peer never leaves, and the
+    suite sends IPv6 to `ff02::1` instead.
+  - `feth` reports `VLAN_HWTAGGING`, and bpf still shows the tag in the frame.
+- **Left for the extension** (Steps 33 to 35): divert, drop, modify, NETWORK_FORWARD, FLOW,
+  SOCKET, REFLECT, impostors across handles, and priorities.
+
+The original plan of the step: the backend above, with the probes first (`BIOCSDIRECTION`,
+pktap or the extended header for the direction; IPv6 sends), the suite on a `feth` pair, and the
+`macos` job.
+
+### Step 32: Close Spike C: the extension at work on a runner (blocked: needs a Developer ID or a Mac)
+
+**Where.** `spikes/macos/sysext/activate.sh`, the spike's host app and provider, and
+`.github/workflows/macos-spike.yml`.
+
+**Found so far** (runs 41025892732, 41026701134, 41027504030):
+- **The approval can be scripted** (SIP off).
+  - Set the extension's `state` in `/Library/SystemExtensions/db.plist` to
+    `activated_enabled` and restart `sysextd` (`launchctl kickstart -k
+    system/com.apple.sysextd`). `systemextensionsctl list` then shows it activated and
+    enabled.
+  - The pending request fails (`OSSystemExtensionErrorDomain` 1), but a new one succeeds at
+    once.
+  - The "would like to use a new network extension" notice is an alert of
+    `UserNotificationCenter`. System Events can click it: the runners grant accessibility to
+    `/bin/bash` and `osascript`, and screen capture to `/bin/bash`.
+- **Enabling the filter is refused.** `NEFilterManager.saveToPreferences` fails with
+  `NEFilterErrorDomain` 5, "permission denied", in every variant tried:
+  - the app run as itself;
+  - the same, with `system.services.networkextension.filtering` and the other networking
+    rights set to `allow` in the authorization database;
+  - the app run as root.
+
+  nehelper logs `entitled = 0, hasProviderPermission = 0` and "Failed to obtain authorization
+  right for 3: no authorization provided". An ad-hoc signature has no team ID, and nehelper
+  does not count it as entitled.
+- **Enabling works, given an authorization** (runs 41028368933, 41028825224).
+  - `NEFilterManager` has no `setAuthorization:`, but `NEConfigurationManager` does.
+  - The app creates an authorization for `system.services.networkextension.filtering` and sets
+    it, through the Objective-C runtime, on three managers: `sharedManager`,
+    `sharedManagerForAllUsers`, and the filter manager's `_configurationManager` ivar.
+  - `saveToPreferences` then succeeds on macOS 15 and 26 (Apple silicon), and authd logs
+    nehelper authorizing the right for the app. On `macos-26-intel` it never returns.
+- **The provider does not start yet** (run 41029887542). nesessionmanager starts the
+  configuration, then finds "0 registrations" for the packet provider: approving through the
+  database skips the launchd job sysextd makes on activation. Run 7 makes that job from the
+  staged bundle (`launchd_job.py`).
+- **Registered, not started** (run 41031016569).
+  - With that job bootstrapped, nesessionmanager finds the provider's registrations and sends
+    the start command, but the provider never checks in.
+  - Meanwhile the default drop holds traffic: curl took 30 to 75 s instead of 0.16 s.
+  - Run 41032129926 shows why. nesessionmanager makes its own job,
+    `NetworkExtension.<identifier>.0.0.0.1`, and launchd cannot start it: "Could not find
+    and/or execute program …: 13: Permission denied".
+  - amfid rejects the ad-hoc signatures that carry restricted entitlements ("The file is adhoc
+    signed but contains restricted entitlements"). The app runs anyway; the extension's daemon
+    does not.
+  - Without the restricted entitlement, sysextd refuses the extension at activation
+    (`OSSystemExtensionErrorDomain` 9: it "does not appear to belong to any extension
+    categories", run 41033234741).
+- **So the provider cannot run ad-hoc signed on a runner.** Activation needs the restricted
+  Network Extension entitlement, and AMFI keeps launchd from running an ad-hoc signed binary
+  that carries it, SIP or not. The step is blocked on one of:
+  - a Developer ID with the Network Extension entitlement (owner action, already part of the
+    release);
+  - a Mac where `nvram boot-args="amfi_get_out_of_my_way=1"` can be set and the machine
+    rebooted (runners cannot reboot).
+
+  What `activate.sh` does stays useful there: the database approval, the authorization, and the
+  launchd registration.
+
+**Then measure:**
+- whether the provider's bytes start at the link layer;
+- which interfaces it sees (`feth`, `lo0`);
+- the delay-then-allow latency;
+- the throughput.
+
+The provider logs the first two of these already.
+
+### Step 33: The extension's skeleton (outline)
+
+- `drivers/macos/`: the Swift shim and the host app, around a Rust staticlib.
+- The staticlib holds:
+  - the XPC listener (`NEMachServiceName`);
+  - the handle table;
+  - client-death cleanup, when an XPC connection is invalidated;
+  - the verified bytecode run per packet (`matches_in`, a register file per queue).
+- `backend/macos/xpc.rs` is the client: libxpc through FFI. Records go into a shared-memory
+  ring if XPC messages are too slow (measure first).
+- Install and activate the extension from the library, as the Windows backend installs its
+  driver.
+
+### Step 34: NETWORK and ETHERNET through the provider (outline)
+
+- Divert (delay and copy to the client), drop, and modify (allow when unchanged, else drop and
+  reinject through `send.rs`'s paths).
+- A priority chain inside the extension.
+- Loop prevention: the extension knows what its clients reinject, so a packet a handle sent is
+  skipped by that handle and the ones before it.
+- `capabilities()` from the extension's state.
+
+### Step 35: FLOW, SOCKET and REFLECT (outline)
+
+- `NEFilterDataProvider` flows for FLOW.
+- SOCKET connects, which the provider can refuse. Binds and listens are reported only (sniff).
+- REFLECT from the extension's handle table.
+
+### Step 36: The capability matrix, CI and the C library (outline)
+
+- The guide's capability matrix for all three platforms.
+- A CI job that builds the extension.
+- `libavulse.dylib` and the C test on macOS.
+- Notarization moves to "Release v0.0.1".
+
 ## Release v0.0.1 (after Phases 5 and 6)
 
 The first release, once Windows and macOS have backends. The plan below was written for a
@@ -2374,6 +2563,12 @@ pre-release tag) passes, then the v0.0.1 tag publishes. The guide and README say
 - [x] Step 29: `WinDivert.dll` and the binding suites on Windows (Phase 5 exit)
 - [x] Step 30: hardening and distribution (Driver Verifier, HVCI checks, CI build, ARM64; signing
   moved to the release)
-- [ ] Phase 6: macOS system extension
+- [x] Step 31: macOS without the extension (bpf sniffing, sending through raw sockets, bpf and
+  utun; the suite on GitHub's runners)
+- [ ] Step 32: Spike C's end: the extension measured (on runners, approval, authorization and
+  registration work; launchd cannot run the ad-hoc signed provider. Blocked on a Developer ID or a
+  Mac with AMFI off)
+- [ ] Steps 33 to 36: the macOS system extension (skeleton, packet layers, event layers,
+  capability matrix and CI)
 - [ ] Release v0.0.1 (crates.io, tarballs; after Phases 5 and 6)
 - [ ] Owner: EV cert + Partner Center, Apple Developer ID + NE entitlement

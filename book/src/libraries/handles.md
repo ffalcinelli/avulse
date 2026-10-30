@@ -1,8 +1,10 @@
 # Handles and addresses
 
-> **Preview.** Only Linux has a backend so far, for the packet layers (`Network`,
-> `NetworkForward` and `Ethernet`) and the event layers (`Flow`, `Socket` and `Reflect`). Elsewhere, `Handle::open` returns
-> `Error::Unsupported`. The API is experimental (0.0.x) and may still change.
+> **Preview.** Linux and Windows have backends for every layer: the packet layers (`Network`,
+> `NetworkForward` and `Ethernet`) and the event layers (`Flow`, `Socket` and `Reflect`). macOS
+> sniffs and sends at `Network` and `Ethernet`, until its system extension exists. Elsewhere,
+> `Handle::open` returns `Error::Unsupported`. The API is experimental (0.0.x) and may still
+> change.
 
 The model is WinDivert's. You open a **handle** at a **layer**, with a filter, a priority and
 flags. It receives the packets or events that the filter matches, each with an **address**. At
@@ -146,6 +148,41 @@ outbound, as in WinDivert. `capabilities()` says what works.
 - **Machines.** The driver builds for x64 and ARM64. It is tested on x64 only, under Driver
   Verifier with its code integrity checks (what memory integrity, HVCI, requires). No ARM64
   machine has run it yet.
+
+## On macOS
+
+macOS is in progress (Phase 6). The system extension that will divert, drop and modify packets,
+and report flows and sockets, does not exist yet. Until it does, the backend captures through
+`/dev/bpf` and runs the filter in user space. That needs root. So, at the `Network` and
+`Ethernet` layers, handles **sniff** (open them with `Flags::SNIFF`) and **send**. Opening a
+diverting or dropping handle, or one at the other layers, fails with `Error::Unsupported`, and
+`capabilities()` says so.
+
+- **Interfaces.** By default, a handle captures every interface that is up and running and has
+  an address that is not link-local, plus `lo0`. `OpenOptions::interfaces` names others. The
+  `Ethernet` layer takes Ethernet interfaces only: `lo0` and `utun` have no link-layer header.
+  Interfaces that appear after the handle opens are not captured.
+- **Direction and loopback.** Each interface has a bpf device per direction, so `outbound` is
+  exact. Loopback packets are seen once, outbound, as in WinDivert.
+- **Fragments.** bpf sees packets before reassembly, so a handle never gets a reassembled
+  packet. With `Flags::FRAGMENTS`, inbound fragments are delivered; without it, they are not.
+- **Sending.**
+
+  | Packet | How it is sent |
+  | --- | --- |
+  | IPv4, either direction | A raw socket. An inbound packet is delivered from the interface that owns its destination. |
+  | IPv6, outbound | Out of the interface it was captured on, behind the Ethernet header saved in its `context`. IPv6 packets the application built, or captured on `lo0`, cannot go out. |
+  | IPv6, inbound | A `utun` device that the handle creates: the stack sees it arrive from that device, not from `if_idx`. |
+  | `Ethernet` frames, outbound | Out of `if_idx`, as they are. |
+  | `Ethernet` frames, inbound | Only frames that carry IP, which go in as at the `Network` layer. |
+
+  The rest fails with `Error::Unsupported`: bpf cannot inject inbound, and macOS has no
+  `IPV6_HDRINCL`.
+- **Impostors and loops.** A handle does not capture back what it sent itself. Other handles
+  see those packets as ordinary ones (`impostor` is never set), and priorities do not order the
+  handles.
+- **Statistics.** `sniffed` counts the packets queued, `ring_full` the packets bpf dropped
+  because a device's buffer was full, and `queue_drops` the receive queue's losses.
 
 ## On Linux
 
