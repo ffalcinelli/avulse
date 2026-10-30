@@ -60,6 +60,7 @@
 extern crate alloc;
 
 pub mod ast;
+pub mod bytecode;
 mod check;
 /// Diagnostics and source spans.
 pub mod error;
@@ -70,9 +71,13 @@ mod labels;
 mod lexer;
 mod lit;
 pub mod meta;
+mod native;
 mod parser;
 pub mod regex;
+mod value;
+mod windivert;
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use avulse_proto::Packet;
@@ -119,6 +124,70 @@ impl Filter {
         })
     }
 
+    /// Compiles a WinDivert filter for a handle at `layer`, with WinDivert 2.2's syntax and
+    /// semantics (see the [guide]). The result is an ordinary filter: it matches packets, compiles
+    /// to bytecode, and its [`ir`](Self::ir) prints as a native filter.
+    ///
+    /// ```
+    /// use avulse_filter::{Filter, Layer};
+    ///
+    /// let f = Filter::compile_windivert("outbound and tcp.DstPort == 80", Layer::Network).unwrap();
+    /// assert_eq!(f.ir().native().to_string(), "outbound and tcp.dstport == 80");
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The first error, as WinDivert reports it: an unknown token (names are case-sensitive), a
+    /// field or macro that the layer does not have, an index out of bounds, or a filter too long
+    /// or too deep. The ETHERNET layer has no WinDivert filters.
+    ///
+    /// [guide]: https://ffalcinelli.github.io/avulse/guide/filters/windivert.html
+    pub fn compile_windivert(src: &str, layer: meta::Layer) -> Result<Self, Diagnostic> {
+        Ok(Filter {
+            ir: windivert::compile(src, layer)?,
+            warnings: Vec::new(),
+            regexes: Vec::new(),
+        })
+    }
+
+    /// A WinDivert filter for `layer`, reformatted in WinDivert syntax: one space around
+    /// operators, flags as bare names (`tcp`, `not outbound`), addresses in their notation, and
+    /// byte offsets for indexes (`packet16[4b]`). The result compiles to the same filter. This is
+    /// what the WinDivert-compatible libraries return for `WinDivertHelperFormatFilter`, whose
+    /// own output (a decompilation of WinDivert's filter object) can differ in form.
+    ///
+    /// ```
+    /// use avulse_filter::{Filter, Layer};
+    ///
+    /// let s = Filter::format_windivert("not  outbound and(tcp.DstPort==80 or udp)", Layer::Network);
+    /// assert_eq!(s.unwrap(), "not outbound and (tcp.DstPort == 80 or udp)");
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`compile_windivert`](Self::compile_windivert).
+    pub fn format_windivert(src: &str, layer: meta::Layer) -> Result<String, Diagnostic> {
+        windivert::format(src, layer)
+    }
+
+    /// WinDivert's serialized filter object (`@WinDiv_…`, without the final NUL) for a WinDivert
+    /// filter at `layer`: the text `WinDivertHelperCompileFilter` produces, which WinDivert
+    /// reports as the data of a REFLECT event. The WinDivert-compatible libraries use it.
+    ///
+    /// ```
+    /// use avulse_filter::{Filter, Layer};
+    ///
+    /// let o = Filter::windivert_object("tcp.DstPort == 80", Layer::Network).unwrap();
+    /// assert!(o.starts_with("@WinDiv_"));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`compile_windivert`](Self::compile_windivert).
+    pub fn windivert_object(src: &str, layer: meta::Layer) -> Result<String, Diagnostic> {
+        windivert::object(src, layer)
+    }
+
     /// Whether `packet`, with metadata `meta`, matches the filter.
     ///
     /// This does not allocate unless the filter uses `matches`, and never panics.
@@ -129,6 +198,17 @@ impl Filter {
     /// Whether the filter needs user space: `matches` cannot run in the kernel backends.
     pub fn user_space_only(&self) -> bool {
         self.ir.user_space_only()
+    }
+
+    /// The filter compiled to bytecode, for the kernel backends. Its results are the same as
+    /// [`matches`](Self::matches)'s.
+    ///
+    /// # Errors
+    ///
+    /// [`bytecode::EncodeError`]: the filter uses `matches` (which runs in user space only), or is
+    /// too deep or too large for the bytecode.
+    pub fn program(&self) -> Result<bytecode::Program, bytecode::EncodeError> {
+        bytecode::Program::compile(&self.ir)
     }
 
     /// The compiled, simplified test. Its `Display` is what `avulse filter explain` prints.

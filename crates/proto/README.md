@@ -1,8 +1,8 @@
 # avulse-proto
 
 Zero-copy packet parsing and checksums for [Avulse](https://ffalcinelli.github.io/avulse/):
-Ethernet, up to two VLAN tags (QinQ), ARP, IPv4, IPv6 (extension headers and fragments), TCP,
-UDP, ICMP and ICMPv6.
+Ethernet, up to two VLAN tags (QinQ), ARP, IPv4, IPv6 (extension headers and fragments), TCP
+(with its options), UDP, ICMP and ICMPv6.
 
 ```rust
 use avulse_proto::{Link, Packet};

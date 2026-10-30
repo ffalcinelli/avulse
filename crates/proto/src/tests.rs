@@ -3,7 +3,7 @@ extern crate std;
 use std::vec;
 use std::vec::Vec;
 
-use crate::checksum::{self, finish, sum};
+use crate::checksum::{self, Updated, finish, sum};
 use crate::*;
 
 const MAC_A: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
@@ -297,6 +297,89 @@ fn recalculate_fixes_every_checksum() {
 }
 
 #[test]
+fn verify_finds_correct_checksums() {
+    let mut frame = eth(
+        ethertype::IPV4,
+        &[],
+        &ipv4(ip_proto::TCP, 0, &tcp(1234, 80, Tcp::ACK, b"GET /")),
+    );
+    assert_eq!(checksum::verify(&frame, Link::Ethernet), Updated::default());
+    let updated = checksum::recalculate(&mut frame, Link::Ethernet);
+    assert_eq!(checksum::verify(&frame, Link::Ethernet), updated);
+    let last = frame.len() - 1;
+    frame[last] ^= 1;
+    let v = checksum::verify(&frame, Link::Ethernet);
+    assert!(v.ipv4 && !v.tcp);
+
+    // A zero UDP checksum means none over IPv4, and is wrong over IPv6.
+    let pkt = ipv4(ip_proto::UDP, 0, &udp(53, 53, b"x"));
+    assert!(checksum::verify(&pkt, Link::Ip).udp);
+    let pkt = ipv6(ip_proto::UDP, &udp(53, 53, b"x"));
+    assert!(!checksum::verify(&pkt, Link::Ip).udp);
+    for mut pkt in [
+        ipv6(ip_proto::ICMPV6, &[128, 0, 0, 0, 0, 1, 0, 2]),
+        ipv4(ip_proto::ICMP, 0, &[8, 0, 0, 0, 0, 1, 0, 1, 1, 2, 3]),
+        ipv6(ip_proto::UDP, &udp(5353, 5353, b"odd")),
+    ] {
+        let updated = checksum::recalculate(&mut pkt, Link::Ip);
+        assert_eq!(checksum::verify(&pkt, Link::Ip), updated);
+    }
+}
+
+#[test]
+fn tcp_large_send_checksums() {
+    let seg = tcp(1234, 80, Tcp::ACK, &[7; 3000]);
+    let mut frame = eth(ethertype::IPV4, &[], &ipv4(ip_proto::TCP, 0, &seg));
+    assert_eq!(
+        checksum::tcp_large_send(&mut frame, Link::Ethernet),
+        Some(34)
+    );
+    // The full checksum is the complement of the partial one plus the length and the segment.
+    let partial = u16::from_be_bytes([frame[50], frame[51]]);
+    let mut full = frame.clone();
+    checksum::recalculate(&mut full, Link::Ethernet);
+    let mut s = partial as u64 + (frame.len() - 34) as u64;
+    s = sum(&frame[34..50], s);
+    s = sum(&frame[52..], s);
+    assert_eq!(finish(s).to_be_bytes(), [full[50], full[51]]);
+
+    let mut v6 = ipv6(ip_proto::TCP, &seg);
+    assert_eq!(checksum::tcp_large_send(&mut v6, Link::Ip), Some(40));
+    let mut not_tcp = ipv4(ip_proto::UDP, 0, &udp(53, 53, b"x"));
+    let before = not_tcp.clone();
+    assert_eq!(checksum::tcp_large_send(&mut not_tcp, Link::Ip), None);
+    assert_eq!(not_tcp, before);
+}
+
+#[test]
+fn recalculate_only_what_is_asked() {
+    let tcp_pkt = ipv4(ip_proto::TCP, 0, &tcp(1234, 80, Tcp::ACK, b"GET /"));
+    let mut pkt = tcp_pkt.clone();
+    let none = checksum::recalculate_only(&mut pkt, Link::Ip, Updated::default());
+    assert_eq!((none, &pkt), (Updated::default(), &tcp_pkt));
+    let tcp_only = Updated {
+        tcp: true,
+        ..Updated::default()
+    };
+    assert_eq!(
+        checksum::recalculate_only(&mut pkt, Link::Ip, tcp_only),
+        tcp_only
+    );
+    assert_eq!(checksum::verify(&pkt, Link::Ip), tcp_only);
+    // Asking for another protocol's checksum changes nothing.
+    let mut pkt = tcp_pkt.clone();
+    let udp_only = Updated {
+        udp: true,
+        ..Updated::default()
+    };
+    assert_eq!(
+        checksum::recalculate_only(&mut pkt, Link::Ip, udp_only),
+        Updated::default()
+    );
+    assert_eq!(pkt, tcp_pkt);
+}
+
+#[test]
 fn recalculate_skips_fragments() {
     let mut pkt = ipv4(ip_proto::UDP, 0x2000, &udp(1, 2, &[0; 8]));
     let u = checksum::recalculate(&mut pkt, Link::Ip);
@@ -355,4 +438,53 @@ fn random_bytes_never_panic() {
             checksum::recalculate(&mut b, link);
         }
     }
+}
+
+/// The option walk agrees with Wireshark on the cases `tests/tshark.rs` in avulse-filter checks:
+/// wrong lengths, overflow, EOL, unknown kinds.
+#[test]
+fn tcp_options() {
+    use crate::tcp_option as k;
+    let hdr = |opts: &[u8]| {
+        let mut h = vec![0; 20];
+        h.extend_from_slice(opts);
+        h.resize(h.len().next_multiple_of(4), 0);
+        h[12] = (h.len() as u8 / 4) << 4;
+        h
+    };
+    let kinds = |opts: &[u8]| {
+        let h = hdr(opts);
+        Tcp::new(&h)
+            .unwrap()
+            .option_iter()
+            .map(|o| o.kind())
+            .collect::<Vec<_>>()
+    };
+    let full = hdr(&[
+        2, 4, 0x05, 0xb4, 4, 2, 8, 10, 0, 0, 0, 1, 0, 0, 0, 2, 1, 3, 3, 7,
+    ]);
+    let t = Tcp::new(&full).unwrap();
+    assert_eq!(
+        kinds(&[
+            2, 4, 0x05, 0xb4, 4, 2, 8, 10, 0, 0, 0, 1, 0, 0, 0, 2, 1, 3, 3, 7
+        ]),
+        [2, 4, 8, 1, 3]
+    );
+    assert_eq!(t.option(k::MSS).unwrap().mss(), Some(1460));
+    assert_eq!(t.option(k::MSS).unwrap().offset(), 20);
+    assert_eq!(t.option(k::SACK_PERM).unwrap().bytes(), [4, 2]);
+    assert_eq!(t.option(k::TIMESTAMP).unwrap().timestamps(), Some((1, 2)));
+    assert_eq!(t.option(k::WSCALE).unwrap().wscale_shift(), Some(7));
+    // A wrong length: the option is there, its value is not.
+    let h = hdr(&[2, 3, 5, 1]);
+    let mss = Tcp::new(&h).unwrap().option(k::MSS).unwrap();
+    assert_eq!((mss.bytes().len(), mss.mss()), (3, None));
+    assert_eq!(kinds(&[2, 3, 5, 1]), [2, 1]);
+    // Past the end, or a length below 2: the walk stops.
+    assert_eq!(kinds(&[1, 3, 10, 7]), [1]);
+    assert_eq!(kinds(&[9, 1, 2, 4, 5, 0xb4]), [0u8; 0]);
+    // Nothing after EOL; unknown kinds are skipped by their length.
+    assert_eq!(kinds(&[1, 0, 2, 4, 5, 0xb4]), [1, 0]);
+    assert_eq!(kinds(&[99, 4, 1, 2, 2, 4, 5, 0xb4]), [99, 2]);
+    assert_eq!(kinds(&[]), [0u8; 0]);
 }

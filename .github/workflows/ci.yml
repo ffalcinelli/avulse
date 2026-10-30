@@ -31,7 +31,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # windows-11-arm: the user-mode side on ARM64 (the driver is built below, but no runner
+        # can load it: that needs test signing and a reboot).
+        os: [ubuntu-latest, windows-latest, windows-11-arm, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -39,6 +41,90 @@ jobs:
         with:
           toolchain: stable
       - run: cargo test --workspace
+
+  windows-driver:
+    # Builds avulse.sys (drivers/windows/driver, outside the workspace) and its test program,
+    # with the WDK from NuGet, for x64 and ARM64, and checks the images for memory integrity
+    # (HVCI). Loading and testing it needs test signing and a reboot: that runs in the windows
+    # Vagrant VM (drivers/windows/scripts/test.ps1).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            nuget: x64
+            target: x86_64-pc-windows-msvc
+            package: target/release/avulse_package
+          - arch: arm64
+            nuget: ARM64
+            target: aarch64-pc-windows-msvc
+            package: target/aarch64-pc-windows-msvc/release/avulse_package
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      # The VM's WDK (10.0.26100, QFE 6584).
+      WDK_VERSION: 10.0.26100.6584
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+          components: clippy
+          targets: ${{ matrix.target }}
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-wdk@0.1.1
+      - name: Install the WDK from NuGet
+        # As microsoft/windows-drivers-rs's install-wdk action does: the host's (x64) package for
+        # the tools, the target's for the headers and libraries, and the SDK they depend on.
+        shell: pwsh
+        run: |
+          $root = "C:\packages"
+          foreach ($p in "Microsoft.Windows.WDK.x64", "Microsoft.Windows.WDK.${{ matrix.nuget }}") {
+              nuget install $p -Version $env:WDK_VERSION -OutputDirectory $root
+              if ($LASTEXITCODE -ne 0) { throw "nuget install $p failed" }
+          }
+          $sdk = "10.0.26100"
+          $dirs = Get-ChildItem $root -Directory
+          $sdkDir = $dirs | Where-Object Name -match "^Microsoft\.Windows\.SDK\.CPP\.$sdk(\.\d+)?$" | Select-Object -First 1
+          $hostDir = $dirs | Where-Object Name -match "^Microsoft\.Windows\.WDK\.x64\.$sdk(\.\d+)?$" | Select-Object -First 1
+          $targetDir = $dirs | Where-Object Name -match "^Microsoft\.Windows\.WDK\.${{ matrix.nuget }}\.$sdk(\.\d+)?$" | Select-Object -First 1
+          if (-not ($sdkDir -and $hostDir -and $targetDir)) { throw "the WDK packages are missing" }
+          @(
+              "Version_Number=$sdk.0"
+              "WindowsSdkBinPath=$($sdkDir.FullName)\c\bin"
+              "WDKContentRoot=$($targetDir.FullName)\c\"
+              "WDKBinRoot=$($hostDir.FullName)\c\bin\$sdk.0"
+              "WDKToolRoot=$($hostDir.FullName)\c\tools\$sdk.0"
+              "NugetPackagesRoot=$root"
+              "FullVersionNumber=$env:WDK_VERSION"
+          ) | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Clippy on the driver
+        working-directory: drivers/windows/driver
+        # The workflow's RUSTFLAGS replaces the driver's .cargo/config.toml, so repeat it here.
+        env:
+          RUSTFLAGS: -D warnings -C target-feature=+crt-static
+        run: cargo clippy --release --target ${{ matrix.target }} -- -D warnings
+      - name: Build the driver
+        working-directory: drivers/windows/driver
+        env:
+          RUSTFLAGS: -D warnings -C target-feature=+crt-static
+        shell: pwsh
+        run: |
+          if ("${{ matrix.arch }}" -eq "amd64") { cargo wdk build --profile release }
+          else { cargo wdk build --profile release --target-arch ${{ matrix.arch }} }
+          if ($LASTEXITCODE -ne 0) { throw "cargo wdk build failed" }
+      - name: Check the image for HVCI
+        shell: pwsh
+        run: drivers/windows/scripts/check-image.ps1 drivers/windows/driver/${{ matrix.package }}/avulse.sys
+      - name: Build the test program
+        working-directory: drivers/windows/test
+        run: cargo build --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: avulse-driver-${{ matrix.arch }}
+          path: drivers/windows/driver/${{ matrix.package }}
 
   tshark:
     # Checks that filters select the same packets as Wireshark (crates/filter/src/tests/tshark.rs).
@@ -67,8 +153,23 @@ jobs:
         with:
           toolchain: stable
           targets: thumbv7em-none-eabihf
-      - run: cargo build -p avulse-proto -p avulse-filter --target thumbv7em-none-eabihf
+      - run: cargo build -p avulse-proto -p avulse-filter -p avulse-abi --target thumbv7em-none-eabihf
       - run: cargo build -p avulse-filter --features regex --target thumbv7em-none-eabihf
+
+  stack:
+    # The interpreter's stack frames in a release build: the Windows driver runs it on a short
+    # kernel stack (scripts/stack-sizes.py, docs/spikes/windows-driver.md).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - name: Install llvm-readobj
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends llvm
+      - run: python3 scripts/stack-sizes.py
 
   docs:
     # rustdoc with broken links as errors, the WebAssembly build of the playground, and the guide.
@@ -88,3 +189,24 @@ jobs:
           RUSTDOCFLAGS: -D warnings
       - run: cargo clippy -p avulse-wasm --target wasm32-unknown-unknown
       - run: mdbook build book
+
+  fuzz:
+    # A short run of each fuzz target (fuzz/): the verifier and interpreter on arbitrary programs,
+    # and the whole filter pipeline, bytecode included, on arbitrary source and packets.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [bytecode, filter, windivert]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: nightly
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-fuzz
+      # cargo-fuzz defaults to the target it was built for, and the prebuilt one install-action
+      # fetches is musl's, whose static libc the sanitizer refuses.
+      - run: cargo fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target }} -- -max_total_time=60
+        working-directory: fuzz

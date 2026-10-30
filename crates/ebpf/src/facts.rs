@@ -1,0 +1,343 @@
+//! The facts the static TC program leaves for the generated matcher, as laid out in
+//! `bpf/facts.h`. The two must agree; the header asserts the offsets below.
+
+use avulse_proto::{Network, Packet, Transport};
+
+/// `struct avulse_facts`: one per CPU, in the `avulse_facts` map.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Facts {
+    /// Frame length.
+    pub len: u32,
+    /// Presence bits ([`F_ETH`] and the others).
+    pub flags: u32,
+    /// Offset of the ARP or IP header (0 when absent).
+    pub l3: u32,
+    /// Offset of the transport header (0 when absent).
+    pub l4: u32,
+    /// Transport header length.
+    pub l4_len: u32,
+    /// Payload start.
+    pub pay: u32,
+    /// Payload end, after the IP and UDP lengths are applied.
+    pub pay_end: u32,
+    /// IPv4 protocol, or the IPv6 next header after the extension headers.
+    pub proto: u8,
+    /// IPv4 header length.
+    pub l3_len: u8,
+    /// Written by the matcher: 1 if the filter matches.
+    pub verdict: u8,
+    /// The handle's layer (`avulse_filter::Layer` as a number).
+    pub layer: u8,
+    /// Where what the filter sees starts: 0, or [`l3`](Facts::l3) at the NETWORK layers.
+    pub base: u32,
+    /// The device the packet is on.
+    pub ifindex: u32,
+    /// The offloaded outer VLAN tag, when [`meta`](Facts::meta) has [`M_VLAN`].
+    pub vlan_tci: u16,
+    /// Metadata bits ([`M_OUTBOUND`] and the others).
+    pub meta: u8,
+    /// The number of VLAN tags in the frame (not counting an offloaded one), at most 2.
+    pub vlans: u8,
+    /// Where the first MSS, window scale, SACK permitted and timestamps options are, from the
+    /// start of the TCP header (0 when there is none), as [`OPT_KINDS`] orders them.
+    pub opts: [u8; 4],
+}
+
+/// Byte offsets of the [`Facts`] fields, for the generated code.
+pub mod off {
+    /// [`Facts::len`](super::Facts::len).
+    pub const LEN: i16 = 0;
+    /// [`Facts::flags`](super::Facts::flags).
+    pub const FLAGS: i16 = 4;
+    /// [`Facts::l3`](super::Facts::l3).
+    pub const L3: i16 = 8;
+    /// [`Facts::l4`](super::Facts::l4).
+    pub const L4: i16 = 12;
+    /// [`Facts::l4_len`](super::Facts::l4_len).
+    pub const L4_LEN: i16 = 16;
+    /// [`Facts::pay`](super::Facts::pay).
+    pub const PAY: i16 = 20;
+    /// [`Facts::pay_end`](super::Facts::pay_end).
+    pub const PAY_END: i16 = 24;
+    /// [`Facts::proto`](super::Facts::proto).
+    pub const PROTO: i16 = 28;
+    /// [`Facts::l3_len`](super::Facts::l3_len).
+    pub const L3_LEN: i16 = 29;
+    /// [`Facts::verdict`](super::Facts::verdict).
+    pub const VERDICT: i16 = 30;
+    /// [`Facts::layer`](super::Facts::layer).
+    pub const LAYER: i16 = 31;
+    /// [`Facts::base`](super::Facts::base).
+    pub const BASE: i16 = 32;
+    /// [`Facts::ifindex`](super::Facts::ifindex).
+    pub const IFINDEX: i16 = 36;
+    /// [`Facts::vlan_tci`](super::Facts::vlan_tci).
+    pub const VLAN_TCI: i16 = 40;
+    /// [`Facts::meta`](super::Facts::meta).
+    pub const META: i16 = 42;
+    /// [`Facts::vlans`](super::Facts::vlans).
+    pub const VLANS: i16 = 43;
+    /// [`Facts::opts`](super::Facts::opts).
+    pub const OPTS: i16 = 44;
+}
+
+/// The TCP option kinds [`Facts::opts`] records, in order: MSS, window scale, SACK permitted,
+/// timestamps.
+pub const OPT_KINDS: [u8; 4] = [2, 3, 4, 8];
+
+/// Size of [`Facts`] in bytes.
+pub const SIZE: usize = 48;
+
+/// An Ethernet header.
+pub const F_ETH: u32 = 1 << 0;
+/// An IPv4 header.
+pub const F_IPV4: u32 = 1 << 1;
+/// An IPv6 header.
+pub const F_IPV6: u32 = 1 << 2;
+/// An ARP packet.
+pub const F_ARP: u32 = 1 << 3;
+/// A TCP header.
+pub const F_TCP: u32 = 1 << 4;
+/// A UDP header.
+pub const F_UDP: u32 = 1 << 5;
+/// An ICMP header.
+pub const F_ICMP: u32 = 1 << 6;
+/// An ICMPv6 header.
+pub const F_ICMPV6: u32 = 1 << 7;
+/// An IPv4 fragment, or an IPv6 fragment header.
+pub const F_FRAG: u32 = 1 << 8;
+/// A fragment with more to come.
+pub const F_MORE: u32 = 1 << 9;
+
+/// Egress.
+pub const M_OUTBOUND: u8 = 1 << 0;
+/// On the loopback device.
+pub const M_LOOPBACK: u8 = 1 << 1;
+/// Injected by a handle of lower or equal priority.
+pub const M_IMPOSTOR: u8 = 1 << 2;
+/// [`Facts::vlan_tci`] holds an offloaded outer VLAN tag.
+pub const M_VLAN: u8 = 1 << 3;
+/// Forwarded (NETWORK_FORWARD).
+pub const M_FORWARD: u8 = 1 << 4;
+/// Records only: the packet was copied and went on.
+pub const M_SNIFFED: u8 = 1 << 5;
+/// With [`M_VLAN`]: the offloaded tag is an 802.1ad tag (TPID 0x88a8), not an 802.1Q one
+/// (0x8100). The kernel offloads no other kind.
+pub const M_VLAN_AD: u8 = 1 << 6;
+
+/// The program array slot of the generated matcher.
+pub const SLOT_MATCHER: u32 = 0;
+/// The program array slot of the action program, which the matcher tail-calls.
+pub const SLOT_ACTION: u32 = 1;
+/// The program array slot of `avulse_options`, which finds the TCP options ([`Facts::opts`])
+/// before the matcher runs, when the configuration asks for them.
+pub const SLOT_OPTIONS: u32 = 2;
+
+impl Facts {
+    /// The facts of a parsed Ethernet frame: what the static TC program computes from the same
+    /// bytes. This is the contract the program is tested against.
+    pub fn from_packet(p: &Packet<'_>) -> Facts {
+        let mut flags = 0;
+        if p.eth().is_some() {
+            flags |= F_ETH;
+        }
+        flags |= match p.network() {
+            Network::None => 0,
+            Network::Arp(_) => F_ARP,
+            Network::Ipv4(_) => F_IPV4,
+            Network::Ipv6(_) => F_IPV6,
+        };
+        flags |= match p.transport() {
+            Transport::None => 0,
+            Transport::Tcp(_) => F_TCP,
+            Transport::Udp(_) => F_UDP,
+            Transport::Icmp(_) => F_ICMP,
+            Transport::Icmpv6(_) => F_ICMPV6,
+        };
+        if let Some(fr) = p.fragment() {
+            flags |= F_FRAG;
+            if fr.more {
+                flags |= F_MORE;
+            }
+        }
+        let pay = p.payload_range();
+        let l4 = p.l4_offset();
+        let mut opts = [0; 4];
+        for o in p.tcp().iter().flat_map(|t| t.option_iter()) {
+            if let Some(i) = OPT_KINDS.iter().position(|&k| k == o.kind())
+                && opts[i] == 0
+            {
+                opts[i] = o.offset() as u8;
+            }
+        }
+        Facts {
+            len: p.data().len() as u32,
+            flags,
+            l3: p.l3_offset().unwrap_or(0) as u32,
+            l4: l4.unwrap_or(0) as u32,
+            l4_len: l4.map_or(0, |o| pay.start - o) as u32,
+            pay: pay.start as u32,
+            pay_end: pay.end as u32,
+            proto: p.ip_protocol().unwrap_or(0),
+            l3_len: p.ipv4().map_or(0, |h| h.header_len()) as u8,
+            vlans: p.vlans().len() as u8,
+            opts,
+            ..Facts::default()
+        }
+    }
+
+    /// The facts of a frame whose outer VLAN tag the device took off: `restored` is the frame
+    /// with the tag in place (as user space puts it back), the kernel sees it without those 4
+    /// bytes, and with [`M_VLAN`] (and [`M_VLAN_AD`] for TPID 0x88a8) and the tag's TCI. The
+    /// parser then takes one in-band tag less, so that it finds what parsing `restored` finds.
+    /// `None` if `restored` has no tag to take off.
+    pub fn offloaded(restored: &Packet<'_>) -> Option<Facts> {
+        let tag = *restored.vlans().first()?;
+        let f = Facts::from_packet(restored);
+        let back = |v: u32| if v >= 16 { v - 4 } else { v };
+        let ad = if tag.tpid == 0x88a8 { M_VLAN_AD } else { 0 };
+        Some(Facts {
+            len: f.len - 4,
+            l3: back(f.l3),
+            l4: back(f.l4),
+            pay: back(f.pay),
+            pay_end: back(f.pay_end),
+            vlans: f.vlans - 1,
+            vlan_tci: tag.tci,
+            meta: f.meta | M_VLAN | ad,
+            ..f
+        })
+    }
+
+    /// The facts at the NETWORK layers, from those of the Ethernet frame: the filter sees the
+    /// IP packet, so the Ethernet header is absent and what it sees starts at the IP header.
+    /// They are what [`from_packet`](Facts::from_packet) gives for the IP packet parsed alone
+    /// (`Link::Ip`), with offsets still counted from the start of the frame.
+    pub fn at_network(mut self) -> Facts {
+        self.flags &= !F_ETH;
+        self.base = self.l3;
+        self.vlans = 0;
+        self
+    }
+
+    /// The bytes of the facts, as the kernel lays them out.
+    pub fn to_bytes(&self) -> [u8; SIZE] {
+        let mut b = [0; SIZE];
+        let words = [
+            self.len,
+            self.flags,
+            self.l3,
+            self.l4,
+            self.l4_len,
+            self.pay,
+            self.pay_end,
+        ];
+        for (i, w) in words.iter().enumerate() {
+            b[i * 4..i * 4 + 4].copy_from_slice(&w.to_ne_bytes());
+        }
+        b[28..32].copy_from_slice(&[self.proto, self.l3_len, self.verdict, self.layer]);
+        b[32..36].copy_from_slice(&self.base.to_ne_bytes());
+        b[36..40].copy_from_slice(&self.ifindex.to_ne_bytes());
+        b[40..42].copy_from_slice(&self.vlan_tci.to_ne_bytes());
+        b[42] = self.meta;
+        b[43] = self.vlans;
+        b[44..48].copy_from_slice(&self.opts);
+        b
+    }
+}
+
+/// The facts of an event, which the event programs leave for the matchers of a SOCKET handle
+/// that refuses calls: `struct avulse_ev_facts` in `bpf/facts.h`. Only [`off::FLAGS`] and
+/// [`off::VERDICT`] are shared with [`Facts`].
+pub mod ev {
+    use crate::abi::{EV_OUTBOUND, EventRecord};
+
+    use super::{M_LOOPBACK, M_OUTBOUND};
+
+    /// The local address is IPv4 (IPv4-mapped).
+    pub const EF_LOCAL4: u32 = 1 << 0;
+    /// The local address is IPv6.
+    pub const EF_LOCAL6: u32 = 1 << 1;
+    /// The remote address is IPv4 (IPv4-mapped).
+    pub const EF_REMOTE4: u32 = 1 << 2;
+    /// The remote address is IPv6.
+    pub const EF_REMOTE6: u32 = 1 << 3;
+
+    /// The process ID (`u32`).
+    pub const PID: i16 = 0;
+    /// `EF_*` bits (`u32`), at [`off::FLAGS`](super::off::FLAGS).
+    pub const FLAGS: i16 = 4;
+    /// The local port (`u16`).
+    pub const LOCAL_PORT: i16 = 8;
+    /// The remote port (`u16`).
+    pub const REMOTE_PORT: i16 = 10;
+    /// The local address (16 bytes, network byte order, IPv4 mapped).
+    pub const LOCAL_ADDR: i16 = 12;
+    /// The IP protocol (`u8`).
+    pub const PROTOCOL: i16 = 28;
+    /// The event (`u8`).
+    pub const EVENT: i16 = 29;
+    /// The matcher's verdict (`u8`), at [`off::VERDICT`](super::off::VERDICT).
+    pub const VERDICT: i16 = 30;
+    /// [`M_OUTBOUND`] and [`M_LOOPBACK`] (`u8`).
+    pub const META: i16 = 31;
+    /// The remote address (16 bytes).
+    pub const REMOTE_ADDR: i16 = 32;
+    /// The endpoint (`u64`).
+    pub const ENDPOINT: i16 = 48;
+    /// The process name (16 bytes, NUL-padded).
+    pub const COMM: i16 = 56;
+    /// The size of the facts.
+    pub const SIZE: usize = 72;
+
+    fn mapped(a: &[u8; 16]) -> bool {
+        a[..10] == [0; 10] && a[10..12] == [0xff, 0xff]
+    }
+
+    /// Whether `a` is a loopback address as user space sees it (`Ipv6Addr::to_canonical`, then
+    /// `is_loopback`): `::1`, or an IPv4-mapped `127.0.0.0/8` address.
+    pub fn is_loopback(a: &[u8; 16]) -> bool {
+        if mapped(a) {
+            a[12] == 127
+        } else {
+            *a == core::net::Ipv6Addr::LOCALHOST.octets()
+        }
+    }
+
+    /// The facts the event programs write for the event of `r`: the contract with the generated
+    /// matchers.
+    pub fn from_record(r: &EventRecord) -> [u8; SIZE] {
+        let mut b = [0; SIZE];
+        let mut flags = 0;
+        flags |= if mapped(&r.local_addr) {
+            EF_LOCAL4
+        } else {
+            EF_LOCAL6
+        };
+        flags |= if mapped(&r.remote_addr) {
+            EF_REMOTE4
+        } else {
+            EF_REMOTE6
+        };
+        let mut meta = 0;
+        if r.flags & EV_OUTBOUND != 0 {
+            meta |= M_OUTBOUND;
+        }
+        if is_loopback(&r.local_addr) || is_loopback(&r.remote_addr) {
+            meta |= M_LOOPBACK;
+        }
+        b[0..4].copy_from_slice(&r.pid.to_ne_bytes());
+        b[4..8].copy_from_slice(&flags.to_ne_bytes());
+        b[8..10].copy_from_slice(&r.local_port.to_ne_bytes());
+        b[10..12].copy_from_slice(&r.remote_port.to_ne_bytes());
+        b[12..28].copy_from_slice(&r.local_addr);
+        b[28] = r.protocol;
+        b[29] = r.event;
+        b[31] = meta;
+        b[32..48].copy_from_slice(&r.remote_addr);
+        b[48..56].copy_from_slice(&r.endpoint.to_ne_bytes());
+        b[56..72].copy_from_slice(&r.comm);
+        b
+    }
+}

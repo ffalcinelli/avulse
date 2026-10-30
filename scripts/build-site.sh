@@ -52,9 +52,14 @@ cat >"$OUT/api/rust/index.html" <<'HTML'
           <h3>avulse_filter</h3>
           <p>The filter language: parser, type checker, IR and evaluator.</p>
         </a>
+        <a class="card link" href="avulse/">
+          <h3>avulse</h3>
+          <p>The handle API (preview): handles, flags, parameters and the packet address. No
+            backend yet.</p>
+        </a>
       </div>
-      <p class="note">The other crates (<code>avulse</code>, <code>avulse_backend_linux</code>,
-        <code>avulse_ebpf</code>, <code>avulse_windivert_compat</code>) are placeholders.</p>
+      <p class="note"><code>avulse_ebpf</code> is a prototype of the Linux in-kernel filter;
+        <code>avulse_windivert_compat</code> is a placeholder.</p>
     </div>
   </main>
 </body>

@@ -48,6 +48,44 @@ pub enum Event {
     ReflectClose = 9,
 }
 
+impl TryFrom<u8> for Layer {
+    type Error = u8;
+
+    /// The layer of number `n` (WinDivert's numbering); `Err(n)` if there is none.
+    fn try_from(n: u8) -> Result<Layer, u8> {
+        Ok(match n {
+            0 => Layer::Network,
+            1 => Layer::NetworkForward,
+            2 => Layer::Flow,
+            3 => Layer::Socket,
+            4 => Layer::Reflect,
+            5 => Layer::Ethernet,
+            _ => return Err(n),
+        })
+    }
+}
+
+impl TryFrom<u8> for Event {
+    type Error = u8;
+
+    /// The event of number `n` (WinDivert's numbering); `Err(n)` if there is none.
+    fn try_from(n: u8) -> Result<Event, u8> {
+        Ok(match n {
+            0 => Event::Packet,
+            1 => Event::FlowEstablished,
+            2 => Event::FlowDeleted,
+            3 => Event::SocketBind,
+            4 => Event::SocketConnect,
+            5 => Event::SocketListen,
+            6 => Event::SocketAccept,
+            7 => Event::SocketClose,
+            8 => Event::ReflectOpen,
+            9 => Event::ReflectClose,
+            _ => return Err(n),
+        })
+    }
+}
+
 /// Endpoints of a flow or socket event (FLOW and SOCKET layers have no packet).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FlowTuple {
@@ -92,4 +130,12 @@ pub struct Meta<'a> {
     pub parent_endpoint_id: Option<u64>,
     /// Flow endpoints, for the FLOW and SOCKET layers (`local.addr`, `remote.port`, …).
     pub flow: Option<FlowTuple>,
+    /// Timestamp of the packet or event (`timestamp`), in the backend's units.
+    pub timestamp: i64,
+    /// Priority of the handle (`priority`); at the REFLECT layer, of the handle the event is
+    /// about.
+    pub priority: i16,
+    /// A deterministic per-packet hash, which the `random8`, `random16` and `random32` fields read
+    /// as WinDivert does: bits 48 to 55, 32 to 47, and 0 to 31.
+    pub hash: u64,
 }

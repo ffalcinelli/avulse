@@ -1,0 +1,28 @@
+# Spike C, the part that runs on GitHub's macOS runners: /dev/bpf capture and injection, inbound
+# reinjection candidates, the filter engine's speed, and a system extension built around a Rust
+# static library. Outside the workspace; see docs/spikes/macos.md.
+[package]
+name = "avulse-spike-macos"
+description = "Spike C: probes of macOS packet interfaces, and the filter engine in a system extension."
+version = "0.0.0"
+edition = "2024"
+license = "LGPL-3.0-or-later OR GPL-2.0-or-later"
+publish = false
+
+[lib]
+# `staticlib` for the system extension (sysext/), `rlib` for the probe.
+crate-type = ["staticlib", "rlib"]
+
+[[bin]]
+name = "probe"
+path = "src/main.rs"
+
+[dependencies]
+avulse-filter = { path = "../../crates/filter" }
+avulse-proto = { path = "../../crates/proto" }
+libc = "0.2"
+
+[profile.release]
+panic = "abort"
+
+[workspace]

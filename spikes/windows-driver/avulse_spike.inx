@@ -1,0 +1,74 @@
+; Spike B: installs avulse_spike.sys as an NDIS lightweight filter (a modifying filter on Ethernet
+; adapters). The same driver registers its WFP callouts when it loads.
+;
+;   netcfg.exe -v -l avulse_spike.inf -c s -i avulse_spike     ; install, bind and start
+;   netcfg.exe -v -u avulse_spike                              ; uninstall and unload
+
+[Version]
+Signature        = "$WINDOWS NT$"
+Class            = NetService
+ClassGUID        = {4D36E974-E325-11CE-BFC1-08002BE10318}
+Provider         = %Avulse%
+CatalogFile      = avulse_spike.cat
+DriverVer        =
+PnpLockdown      = 1
+
+[Manufacturer]
+%Avulse% = Avulse, NT$ARCH$.10.0...16299
+
+[Avulse.NT$ARCH$.10.0...16299]
+%AvulseSpike.Desc% = Install, avulse_spike
+
+[Install]
+AddReg           = Install.AddReg
+Characteristics  = 0x40000                          ; NCF_LW_FILTER
+NetCfgInstanceId = "{6a3f8b2e-9d41-4c07-b5e2-7f18c0d94a63}"
+CopyFiles        = Install.CopyFiles
+
+[SourceDisksNames]
+1 = %DiskDescription%,,,
+
+[SourceDisksFiles]
+avulse_spike.sys = 1
+
+[DestinationDirs]
+Install.CopyFiles = 13
+
+[Install.CopyFiles]
+avulse_spike.sys,,,2
+
+[Install.Services]
+AddService = avulse_spike,, Service.Install
+
+[Service.Install]
+DisplayName      = %AvulseSpike.Desc%
+ServiceType      = 1                                ; SERVICE_KERNEL_DRIVER
+StartType        = 1                                ; SERVICE_SYSTEM_START
+ErrorControl     = 1                                ; SERVICE_ERROR_NORMAL
+ServiceBinary    = %13%\avulse_spike.sys
+LoadOrderGroup   = NDIS
+Description      = %AvulseSpike.Desc%
+AddReg           = Service.AddReg
+
+[Install.Remove.Services]
+DelService       = avulse_spike, 0x200              ; SPSVCINST_STOPSERVICE
+
+[Install.AddReg]
+HKR, Ndi, Service, 0, "avulse_spike"
+HKR, Ndi, CoServices, 0x00010000, "avulse_spike"
+HKR, Ndi, HelpText, 0, %AvulseSpike.Help%
+HKR, Ndi, FilterClass, 0, custom
+HKR, Ndi, FilterType, 0x00010001, 2                 ; modifying
+HKR, Ndi, FilterRunType, 0x00010001, 2              ; optional: the stack works without it
+HKR, Ndi\Interfaces, UpperRange, 0, "noupper"
+HKR, Ndi\Interfaces, LowerRange, 0, "nolower"
+HKR, Ndi\Interfaces, FilterMediaTypes, 0, "ethernet"
+
+[Service.AddReg]
+HKR, Parameters, NdisImPlatformBindingOptions, 0x00010001, 0
+
+[Strings]
+Avulse            = "Avulse"
+AvulseSpike.Desc  = "Avulse spike filter"
+AvulseSpike.Help  = "Spike B: a WFP callout and an NDIS lightweight filter written in Rust"
+DiskDescription   = "Avulse spike driver"

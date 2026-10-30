@@ -5,7 +5,7 @@ use std::io::{IsTerminal, Read, Write};
 use std::process::ExitCode;
 
 use avulse_filter::fields::{APPLICATION, FIELDS, FieldDef, Origin, Ty, UNSUPPORTED};
-use avulse_filter::{Diagnostic, Filter, Meta, parse};
+use avulse_filter::{Diagnostic, Filter, Layer, Meta, parse};
 use avulse_proto::{Link, Packet};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -25,6 +25,9 @@ enum Command {
     /// Work with filters.
     #[command(subcommand)]
     Filter(FilterCommand),
+    /// Remove what processes that died without closing their handles left behind (on Linux, their
+    /// TC filters). Needs root.
+    Cleanup,
 }
 
 #[derive(Subcommand)]
@@ -34,7 +37,13 @@ enum FilterCommand {
     /// Print a filter in canonical form.
     Fmt(Source),
     /// Print the compiled filter (typed IR).
-    Explain(Source),
+    Explain {
+        #[command(flatten)]
+        source: Source,
+        /// Also print the bytecode that kernel backends run.
+        #[arg(long)]
+        bytecode: bool,
+    },
     /// Evaluate a filter against one packet given in hex. Exits 0 on a match, 1 otherwise.
     Eval {
         #[command(flatten)]
@@ -51,6 +60,14 @@ enum FilterCommand {
         /// Interface name for `iface`.
         #[arg(long)]
         iface: Option<String>,
+    },
+    /// Convert a WinDivert filter to an Avulse filter that selects the same packets.
+    Convert {
+        #[command(flatten)]
+        source: Source,
+        /// The WinDivert layer the filter is for.
+        #[arg(long, value_enum, default_value_t = LayerArg::Network)]
+        layer: LayerArg,
     },
     /// List the fields filters can use.
     Fields {
@@ -77,6 +94,19 @@ struct Source {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum LayerArg {
+    Network,
+    NetworkForward,
+    Flow,
+    Socket,
+    Reflect,
+}
+
+/// Largest converted filter, in tests: native filters have no conditional, so WinDivert's
+/// `(a? b: c)` repeats `a`, and nested conditions can double the size at every level.
+const CONVERT_MAX_TESTS: usize = 10_000;
+
+#[derive(Clone, Copy, ValueEnum)]
 enum LinkArg {
     Ethernet,
     Ip,
@@ -97,6 +127,27 @@ impl Source {
             }
             (Some(f), None) => Ok(f.clone()),
             (None, None) => Err("no filter given".into()),
+        }
+    }
+}
+
+/// What the Linux kernel runs of a filter, at the NETWORK layer.
+fn linux_kernel(f: &Filter) -> String {
+    use avulse_ebpf::codegen::{self, Env};
+    let env = Env::new(Layer::Network);
+    match codegen::compile(f.ir(), &env) {
+        Ok(_) => "linux kernel: exact\n".into(),
+        Err(codegen::Error::TooLarge) => {
+            "linux kernel: every packet, and user space filters them (the filter is too large)\n"
+                .into()
+        }
+        Err(e) => {
+            let s = codegen::superset(f.ir(), &env);
+            let widened = match s.test {
+                avulse_filter::ir::Test::Const(true) => "every packet".to_string(),
+                t => format!("the superset `{}`", t.native()),
+            };
+            format!("linux kernel: {widened}, and user space filters what it takes ({e})\n")
         }
     }
 }
@@ -141,7 +192,17 @@ fn compile(src: &str) -> Result<Filter, String> {
 }
 
 fn run(cli: Cli) -> Result<ExitCode, String> {
-    let Command::Filter(cmd) = cli.command;
+    let cmd = match cli.command {
+        Command::Filter(cmd) => cmd,
+        Command::Cleanup => {
+            let n = avulse::cleanup().map_err(|e| format!("cleanup: {e}"))?;
+            out(&format!(
+                "removed {n} handle{} of dead processes\n",
+                if n == 1 { "" } else { "s" }
+            ));
+            return Ok(ExitCode::SUCCESS);
+        }
+    };
     match cmd {
         FilterCommand::Check(src) => {
             compile(&src.read()?)?;
@@ -152,13 +213,50 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             out(&format!("{}\n", parse(&s).map_err(|e| render(&e, &s))?));
             Ok(ExitCode::SUCCESS)
         }
-        FilterCommand::Explain(src) => {
-            let f = compile(&src.read()?)?;
+        FilterCommand::Explain { source, bytecode } => {
+            let f = compile(&source.read()?)?;
             let mut text = format!("{}\n", f.ir());
             if f.user_space_only() {
                 text += "note: `matches` runs in user space only; kernel backends pass these packets up\n";
             }
+            text += &linux_kernel(&f);
+            if bytecode {
+                match f.program() {
+                    Ok(p) => {
+                        let size = p.to_bytes().len();
+                        let _ = write!(
+                            text,
+                            "\nbytecode, {} instructions, {size} bytes:\n{p}",
+                            p.len()
+                        );
+                    }
+                    Err(e) => {
+                        let _ = writeln!(text, "\nno bytecode: {e}");
+                    }
+                }
+            }
             out(&text);
+            Ok(ExitCode::SUCCESS)
+        }
+        FilterCommand::Convert { source, layer } => {
+            let s = source.read()?;
+            let layer = match layer {
+                LayerArg::Network => Layer::Network,
+                LayerArg::NetworkForward => Layer::NetworkForward,
+                LayerArg::Flow => Layer::Flow,
+                LayerArg::Socket => Layer::Socket,
+                LayerArg::Reflect => Layer::Reflect,
+            };
+            let f = Filter::compile_windivert(&s, layer).map_err(|e| render(&e, &s))?;
+            let n = f.ir().native_tests();
+            if n > CONVERT_MAX_TESTS {
+                return Err(format!(
+                    "the converted filter would have {}{n} tests, more than {CONVERT_MAX_TESTS}: \
+                     native filters have no conditional, so each `(a? b: c)` repeats `a`",
+                    if n == usize::MAX { "at least " } else { "" },
+                ));
+            }
+            out(&format!("{}\n", f.ir().native()));
             Ok(ExitCode::SUCCESS)
         }
         FilterCommand::Eval {

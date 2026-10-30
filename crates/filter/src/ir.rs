@@ -8,6 +8,7 @@ use core::fmt;
 
 pub use crate::ast::{ArithOp, Quant, Slice, SliceEnd};
 use crate::fields::{Field, def};
+pub use crate::native::Native;
 
 /// A typed, name-resolved test: what [`Filter::matches`](crate::Filter::matches) evaluates.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,6 +73,9 @@ pub enum Test {
     Or(Vec<Test>),
     /// Exclusive or.
     Xor(Box<Test>, Box<Test>),
+    /// A conditional: the second test if the first holds, else the third. WinDivert filters
+    /// have it (`(a? b: c)`); native ones do not.
+    If(Box<Test>, Box<Test>, Box<Test>),
 }
 
 /// A comparison, applied to pairs of occurrences of multi-occurrence fields (`ip.addr`,
@@ -194,6 +198,7 @@ impl Test {
             Test::Not(t) => t.user_space_only(),
             Test::And(v) | Test::Or(v) => v.iter().any(Test::user_space_only),
             Test::Xor(a, b) => a.user_space_only() || b.user_space_only(),
+            Test::If(c, a, b) => c.user_space_only() || a.user_space_only() || b.user_space_only(),
             _ => false,
         }
     }
@@ -212,6 +217,17 @@ pub fn simplify(t: Test) -> Test {
         Test::Xor(a, b) => match (simplify(*a), simplify(*b)) {
             (Test::Const(a), Test::Const(b)) => Test::Const(a != b),
             (a, b) => Test::Xor(Box::new(a), Box::new(b)),
+        },
+        Test::If(c, a, b) => match simplify(*c) {
+            Test::Const(true) => simplify(*a),
+            Test::Const(false) => simplify(*b),
+            c => match (simplify(*a), simplify(*b)) {
+                // Tests have no side effects: the condition does not matter.
+                (a, b) if a == b => a,
+                (Test::Const(true), Test::Const(false)) => c,
+                (Test::Const(false), Test::Const(true)) => simplify(Test::Not(Box::new(c))),
+                (a, b) => Test::If(Box::new(c), Box::new(a), Box::new(b)),
+            },
         },
         t => t,
     }
@@ -291,6 +307,7 @@ impl fmt::Display for Test {
             Test::And(v) => list(f, "and", v),
             Test::Or(v) => list(f, "or", v),
             Test::Xor(a, b) => write!(f, "(xor {a} {b})"),
+            Test::If(c, a, b) => write!(f, "(if {c} {a} {b})"),
         }
     }
 }

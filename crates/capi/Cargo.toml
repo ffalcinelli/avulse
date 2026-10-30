@@ -13,6 +13,12 @@ workspace = true
 
 [lib]
 name = "avulse"
-crate-type = ["cdylib", "staticlib", "rlib"]
-# Same name as the `avulse` facade crate; its API is documented by the C header.
+# No rlib: it would collide with the `avulse` crate's. The API is documented by the C header,
+# `include/avulse.h`.
+crate-type = ["cdylib", "staticlib"]
 doc = false
+
+[dependencies]
+avulse-rs = { package = "avulse", path = "../avulse", version = "0.0.0" }
+avulse-filter.workspace = true
+avulse-proto.workspace = true

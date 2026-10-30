@@ -83,6 +83,7 @@ pub enum Origin {
 pub type Consts = &'static [(&'static str, u64)];
 
 /// The registry entry of a [`Field`].
+#[derive(Debug)]
 pub struct FieldDef {
     /// The name used in filters, such as `tcp.dstport`.
     pub name: &'static str,
@@ -324,6 +325,16 @@ fields! {
     TcpWindowSizeValue: "tcp.window_size_value", U16, Wireshark, NONE, "Window (unscaled)";
     TcpChecksum: "tcp.checksum", U16, Wireshark, NONE, "Checksum";
     TcpUrgentPointer: "tcp.urgent_pointer", U16, Wireshark, NONE, "Urgent pointer";
+    TcpOptions: "tcp.options", Ty::Bytes, Wireshark, NONE, "Option bytes (when the header has options)";
+    TcpOptionsMss: "tcp.options.mss", Ty::Proto, Wireshark, NONE, "Maximum segment size option (the first one)";
+    TcpOptionsMssVal: "tcp.options.mss_val", U16, Wireshark, NONE, "MSS value";
+    TcpOptionsWscale: "tcp.options.wscale", Ty::Proto, Wireshark, NONE, "Window scale option (the first one)";
+    TcpOptionsWscaleShift: "tcp.options.wscale.shift", U8, Wireshark, NONE, "Window scale shift count";
+    TcpOptionsWscaleMultiplier: "tcp.options.wscale.multiplier", U16, Wireshark, NONE, "Window scale multiplier: 2 to the shift count, at most 16384";
+    TcpOptionsSackPerm: "tcp.options.sack_perm", Ty::Proto, Wireshark, NONE, "SACK permitted option";
+    TcpOptionsTimestamp: "tcp.options.timestamp", Ty::Proto, Wireshark, NONE, "Timestamps option (the first one)";
+    TcpOptionsTimestampTsval: "tcp.options.timestamp.tsval", U32, Wireshark, NONE, "Timestamp value";
+    TcpOptionsTimestampTsecr: "tcp.options.timestamp.tsecr", U32, Wireshark, NONE, "Timestamp echo reply";
     TcpLen: "tcp.len", U32, Wireshark, NONE, "Payload length (absent on IP fragments)";
     TcpPayload: "tcp.payload", Ty::Bytes, Wireshark, NONE, "Payload (when not empty)";
 
@@ -368,6 +379,11 @@ fields! {
     ProcessName: "process.name", Ty::Str, Extension, NONE, "Process name (FLOW, SOCKET layers)";
     EndpointId: "endpoint.id", U64, Extension, NONE, "Endpoint ID (FLOW, SOCKET layers)";
     ParentEndpointId: "parent.endpoint.id", U64, Extension, NONE, "Parent endpoint ID (FLOW, SOCKET layers)";
+    Timestamp: "timestamp", Ty::Int, Extension, NONE, "Timestamp of the packet or event, as the backend reports it";
+    Priority: "priority", Ty::Int, Extension, NONE, "Priority of the handle (REFLECT layer: of the handle the event is about)";
+    Random8: "random8", U8, Extension, NONE, "8 bits of a per-packet hash (WinDivert's `random8`)";
+    Random16: "random16", U16, Extension, NONE, "16 bits of a per-packet hash (WinDivert's `random16`)";
+    Random32: "random32", U32, Extension, NONE, "32 bits of a per-packet hash (WinDivert's `random32`)";
 }
 
 /// The field named `name`, if Avulse supports it.
@@ -424,8 +440,38 @@ pub const UNSUPPORTED: &[(&str, &str)] = &[
     ("tcp.segment", "needs TCP reassembly"),
     ("tcp.reassembled", "needs TCP reassembly"),
     (
+        "tcp.option_kind",
+        "a header has up to 40 options, more than a field can hold; test an option, e.g. \
+         `tcp.options.sack_perm`, or search `tcp.options`",
+    ),
+    (
+        "tcp.option_len",
+        "a header has up to 40 options, more than a field can hold; test an option, e.g. \
+         `tcp.options.sack_perm`, or search `tcp.options`",
+    ),
+    (
+        "tcp.options.nop",
+        "NOP options repeat; search the option bytes, e.g. `tcp.options contains 01:01`",
+    ),
+    (
+        "tcp.options.eol",
+        "search the option bytes, e.g. `tcp.options contains 00`",
+    ),
+    (
+        "tcp.options.sack",
+        "SACK edges are relative sequence numbers, which need stream tracking",
+    ),
+    (
+        "tcp.options.sack_le",
+        "SACK edges are relative sequence numbers, which need stream tracking",
+    ),
+    (
+        "tcp.options.sack_re",
+        "SACK edges are relative sequence numbers, which need stream tracking",
+    ),
+    (
         "tcp.options",
-        "TCP options are not decoded yet; slice `tcp` instead, e.g. `tcp[20:1] == 02`",
+        "this TCP option is not decoded; slice `tcp.options` instead, e.g. `tcp.options[0] == 02`",
     ),
     ("ip.host", "host names need DNS; compare addresses"),
     ("ip.src_host", "host names need DNS; compare addresses"),

@@ -12,7 +12,11 @@ WinDivert feature, adds an Ethernet layer, and uses Wireshark display filters.
 > *Avulsion*: a river suddenly abandoning its channel for a new one.
 
 **Status: pre-alpha.** The packet parser, the filter language and the `avulse filter` CLI work.
-Packet capture does not exist yet, and the crates.io and PyPI packages only reserve the name.
+On Linux, the `avulse` crate diverts, sniffs, drops and sends packets at the packet layers,
+reports flows at the FLOW layer, reports or refuses binds and connects at the SOCKET layer, and
+reports handles at the REFLECT layer. A WinDivert-compatible library (`libavulse_windivert.so`)
+runs the pydivert and jdivert test suites unchanged. Windows and macOS have no backend yet.
+The crates.io and PyPI packages only reserve the name.
 
 **[Website](https://ffalcinelli.github.io/avulse/)** ·
 **[Filter playground](https://ffalcinelli.github.io/avulse/#playground)** ·
@@ -96,9 +100,12 @@ assert!(filter.matches(&packet, &Meta { outbound: true, ..Meta::default() }));
 | --- | --- |
 | [`avulse-proto`](crates/proto) | Zero-copy parsing of Ethernet, VLAN/QinQ, ARP, IPv4, IPv6, TCP, UDP, ICMP, ICMPv6; checksums. `no_std`. |
 | [`avulse-filter`](crates/filter) | The filter language: parser, type checker, IR, evaluator. `no_std` + `alloc`. |
-| [`avulse-cli`](crates/cli) | The `avulse` command: `filter check`, `fmt`, `explain`, `eval`, `fields`. |
+| [`avulse-cli`](crates/cli) | The `avulse` command: `filter check`, `fmt`, `explain`, `eval`, `fields`; `cleanup`. |
 | [`avulse-wasm`](crates/wasm) | The engine compiled to WebAssembly, for the playground. |
-| `avulse`, `avulse-ebpf`, `avulse-backend-linux`, `avulse-capi`, `avulse-windivert-compat` | Placeholders for the coming phases. |
+| [`avulse`](crates/avulse) | The handle API (preview): handles, flags, parameters, the packet address, and the platform backends. Linux works at every layer; the other platforms are to come. |
+| `avulse-ebpf` | The Linux kernel side: TC programs, the event programs, filter IR to eBPF, the loader. |
+| `avulse-capi` | The C interface, `libavulse` (preview), with the header `include/avulse.h`. |
+| `avulse-windivert-compat` | Placeholder for the WinDivert-compatible shim (Phase 4). |
 | [`bindings/python`](bindings/python) | The `avulse` PyPI package: a placeholder. |
 
 ## Related projects

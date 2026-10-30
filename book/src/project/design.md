@@ -21,12 +21,11 @@ macOS.
 
 ```text
 crates/proto            no_std: Ethernet, VLAN, ARP, IPv4/6, TCP, UDP, ICMP/v6; checksums
-crates/filter           filter language: parser → checker → IR → evaluator (bytecode planned)
-crates/ebpf             IR → eBPF code generation; static C programs (TC, cgroup)    planned
-crates/backend-linux    aya loader, TC attach, ring buffer, injection, registry      planned
+crates/filter           filter language: parser → checker → IR → evaluator, bytecode
+crates/ebpf             IR → eBPF code generation; static C programs (TC, cgroup)    prototype
 driver/windows          KMDF driver: WFP callouts + NDIS filter, runs proto+filter    planned
 macos/                  system extension (Network Extension) + XPC client             planned
-crates/avulse           public Rust API, backend trait, capability query             planned
+crates/avulse           public API, capabilities; platform backends as modules     API done
 crates/capi             C ABI (libavulse)                                             planned
 crates/windivert-compat WinDivert ABI shim                                            planned
 crates/cli              the avulse command
@@ -54,15 +53,38 @@ one engine, one set of semantics, one fuzz target.
 | Windows | own KMDF driver: WFP callouts, an NDIS lightweight filter for Ethernet | verified bytecode, run by the `no_std` interpreter in the driver |
 | macOS | system extension: Network Extension providers, `/dev/bpf` | the same interpreter |
 
+## Compiled programs
+
+The Windows driver and the macOS system extension do not walk the IR that user space builds. User
+space compiles each filter to a flat bytecode program (`Filter::program`), and the kernel side
+verifies it once, when the handle opens, before running it on each packet:
+
+- **Format.** A versioned header, fixed-width instructions over 16 value registers, and a
+  constant pool of literals, ranges and sets. The format is specified in the
+  [`bytecode` module documentation](../../api/rust/avulse_filter/bytecode/index.html).
+- **Verifier.** It checks every opcode and operand, register and field indexes, and every
+  constant an instruction refers to. Jumps only go forward, so every program terminates. Neither
+  the verifier nor the interpreter allocates or panics.
+- **One set of semantics.** The interpreter shares every operation on values with the IR
+  evaluator, and tests check that the two agree on every `tshark` table filter and on random
+  filters and packets. Fuzz targets feed arbitrary programs to the verifier and arbitrary filters
+  to the whole pipeline.
+- **User space only.** `matches` has no bytecode: a filter that uses it runs in user space.
+
+`avulse filter explain --bytecode` prints the program.
+
 ## Roadmap
 
 | Phase | Content | State |
 | --- | --- | --- |
-| 0 | Repository, CI, names; spikes: eBPF codegen, Rust Windows driver, macOS | setup done, spikes pending |
-| 1 | `proto` and `filter`: parser, checker, IR, evaluator, `tshark` validation, CLI | in progress: bytecode and the WinDivert front-end remain |
-| 2 | Linux packet layers: NETWORK, NETWORK_FORWARD, ETHERNET | planned |
-| 3 | Linux event layers (FLOW, SOCKET, REFLECT); API v0.1 | planned |
-| 4 | WinDivert compatibility shim; pydivert and jdivert suites as conformance tests | planned |
+| 0 | Repository, CI, names; spikes: eBPF codegen, Rust Windows driver, macOS | done, except the macOS provider's measurements |
+| 1 | `proto` and `filter`: parser, checker, IR, evaluator, bytecode, WinDivert front-end, `tshark` validation, CLI | done |
+| 2 | Linux packet layers: NETWORK, NETWORK_FORWARD, ETHERNET | done |
+| 3 | Linux event layers (FLOW, SOCKET, REFLECT); API 0.x and the C library | done |
+| 4 | WinDivert compatibility shim; pydivert and jdivert suites as conformance tests | in progress |
 | 5 | Windows driver, signed | planned |
 | 6 | macOS system extension, notarized | planned |
 | 7 | Native Python and Java bindings; 1.0 | planned |
+
+Versions stay 0.0.x while the project is experimental. The first release, 0.0.1, comes after the
+Windows and macOS backends.

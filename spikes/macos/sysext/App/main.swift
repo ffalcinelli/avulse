@@ -1,0 +1,199 @@
+// The host app: checks that the Rust library runs inside a Swift process, asks for the system
+// extension to be activated, and, if that works, enables it as the packet filter and times a
+// few HTTPS requests with and without it, plus pings on lo0 and the feth pair so that the
+// provider logs which interfaces it sees. Prints `RESULT <outcome>` lines. activate.sh approves
+// the extension and the filter while this waits (up to five minutes).
+
+import Foundation
+import NetworkExtension
+import Security
+import SystemExtensions
+
+let extensionId = "com.github.ffalcinelli.avulse.spike.filter"
+
+func selfTest() -> String {
+    var prog = [UInt8](repeating: 0, count: 65536)
+    let src = Array("tcp.dstport == 443".utf8)
+    let n = avulse_spike_compile(src, src.count, &prog, prog.count)
+    guard n > 0 else { return "compile failed: \(n)" }
+    // An IPv4 SYN to port 443, then the same to port 80.
+    var pkt: [UInt8] = [
+        0x45, 0, 0, 40, 0, 0, 0x40, 0, 64, 6, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2,
+        0xc3, 0x50, 0x01, 0xbb, 0, 0, 0, 0, 0, 0, 0, 0, 0x50, 0x02, 0xff, 0xff, 0, 0, 0, 0,
+    ]
+    let hit = avulse_spike_matches(prog, Int(n), pkt, pkt.count, 1, true)
+    pkt[23] = 80
+    let miss = avulse_spike_matches(prog, Int(n), pkt, pkt.count, 1, true)
+    return hit == 1 && miss == 0 ? "ok (\(n) bytes of bytecode)" : "wrong: \(hit) \(miss)"
+}
+
+/// Seconds for each of a few HTTPS requests.
+func timeRequests(_ label: String) {
+    var times: [String] = []
+    for _ in 0..<5 {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        p.arguments = ["-sS", "-o", "/dev/null", "-w", "%{time_total}", "https://github.com/"]
+        let out = Pipe()
+        p.standardOutput = out
+        try? p.run()
+        p.waitUntilExit()
+        let s = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+        times.append(s ?? "?")
+    }
+    print("RESULT curl \(label): \(times.joined(separator: " "))")
+}
+
+/// The selectors of the class `name` (instance and class methods) that mention authorization or
+/// a configuration manager: where an authorization could be handed to nehelper.
+func selectors(_ name: String) -> [String] {
+    guard let cls: AnyClass = NSClassFromString(name) else { return ["no class \(name)"] }
+    var out: [String] = []
+    for c in [cls, object_getClass(cls)].compactMap({ $0 }) {
+        var n: UInt32 = 0
+        guard let list = class_copyMethodList(c, &n) else { continue }
+        for i in 0..<Int(n) {
+            let s = NSStringFromSelector(method_getName(list[i]))
+            let l = s.lowercased()
+            if l.contains("author") || l.contains("configurationmanager") || l.contains("shared") {
+                out.append(s)
+            }
+        }
+        free(list)
+    }
+    return out
+}
+
+/// nehelper does not consider an ad-hoc signed app entitled, and then wants an authorization
+/// for `system.services.networkextension.filtering` (activate.sh sets that right to "allow").
+/// NEVPNManager takes one through `setAuthorization:`; NEFilterManager does not (run
+/// 41027504030), so this tries the configuration manager behind it.
+func authorize(_ m: NEFilterManager) {
+    for c in ["NEFilterManager", "NEVPNManager", "NEConfigurationManager"] {
+        print("RESULT selectors \(c): \(selectors(c).joined(separator: " "))")
+    }
+    var auth: AuthorizationRef?
+    let status = "system.services.networkextension.filtering".withCString { name -> OSStatus in
+        var item = AuthorizationItem(name: name, valueLength: 0, value: nil, flags: 0)
+        return withUnsafeMutablePointer(to: &item) { p in
+            var rights = AuthorizationRights(count: 1, items: p)
+            return AuthorizationCreate(&rights, nil, [.extendRights, .preAuthorize], &auth)
+        }
+    }
+    print("RESULT authorization-create \(status)")
+    guard status == errAuthorizationSuccess, let auth = auth else { return }
+    let sel = NSSelectorFromString("setAuthorization:")
+    var targets: [(String, NSObject)] = [("filter manager", m)]
+    let getter = NSSelectorFromString("configurationManager")
+    if m.responds(to: getter), let cm = m.perform(getter)?.takeUnretainedValue() as? NSObject {
+        targets.append(("its configurationManager", cm))
+    }
+    if let cls = NSClassFromString("NEConfigurationManager") as? NSObject.Type {
+        // Run 41028368933: sharedManager takes it, but saving is still refused. A filter is
+        // system-wide, so try the manager for all users too.
+        for name in ["sharedManager", "sharedManagerForAllUsers"] {
+            let shared = NSSelectorFromString(name)
+            if cls.responds(to: shared), let cm = cls.perform(shared)?.takeUnretainedValue() as? NSObject {
+                targets.append(("NEConfigurationManager.\(name)", cm))
+            }
+        }
+    }
+    // And whatever configuration manager the filter manager keeps in its instance variables.
+    var n: UInt32 = 0
+    if let ivars = class_copyIvarList(NEFilterManager.self, &n) {
+        for i in 0..<Int(n) {
+            let name = ivar_getName(ivars[i]).map { String(cString: $0) } ?? "?"
+            let type = ivar_getTypeEncoding(ivars[i]).map { String(cString: $0) } ?? "?"
+            print("RESULT ivar NEFilterManager.\(name) \(type)")
+            if type.contains("NEConfigurationManager"), let v = object_getIvar(m, ivars[i]) as? NSObject {
+                targets.append(("ivar \(name)", v))
+            }
+        }
+        free(ivars)
+    }
+    for (label, t) in targets where t.responds(to: sel) {
+        typealias SetAuth = @convention(c) (AnyObject, Selector, AuthorizationRef) -> Void
+        let imp = unsafeBitCast(t.method(for: sel), to: SetAuth.self)
+        imp(t, sel, auth)
+        print("RESULT authorization-set on \(label)")
+    }
+}
+
+func enableFilter() {
+    let m = NEFilterManager.shared()
+    authorize(m)
+    m.loadFromPreferences { err in
+        if let err = err { print("RESULT load-preferences failed: \(err)") }
+        let c = NEFilterProviderConfiguration()
+        c.filterPackets = true
+        c.filterSockets = false
+        c.filterPacketProviderBundleIdentifier = extensionId
+        m.providerConfiguration = c
+        m.localizedDescription = "Avulse spike"
+        m.isEnabled = true
+        m.saveToPreferences { err in
+            if let err = err as NSError? {
+                print("RESULT filter-save failed domain=\(err.domain) code=\(err.code) \(err)")
+                exit(5)
+            }
+            print("RESULT filter-enabled")
+            DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+                timeRequests("with the filter")
+                for host in ["127.0.0.1", "10.77.1.2"] {
+                    let p = Process()
+                    p.executableURL = URL(fileURLWithPath: "/sbin/ping")
+                    p.arguments = ["-c", "3", "-t", "4", host]
+                    try? p.run()
+                    p.waitUntilExit()
+                }
+                // Let the provider log its totals.
+                Thread.sleep(forTimeInterval: 3)
+                m.isEnabled = false
+                m.saveToPreferences { _ in exit(0) }
+            }
+        }
+    }
+}
+
+class Delegate: NSObject, OSSystemExtensionRequestDelegate {
+    func request(
+        _ request: OSSystemExtensionRequest,
+        actionForReplacingExtension existing: OSSystemExtensionProperties,
+        withExtension ext: OSSystemExtensionProperties
+    ) -> OSSystemExtensionRequest.ReplacementAction {
+        return .replace
+    }
+
+    func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
+        // Keep waiting: the request may still complete if something approves it.
+        print("RESULT needs-user-approval")
+    }
+
+    func request(
+        _ request: OSSystemExtensionRequest,
+        didFinishWithResult result: OSSystemExtensionRequest.Result
+    ) {
+        print("RESULT activated \(result.rawValue)")
+        enableFilter()
+    }
+
+    func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
+        let e = error as NSError
+        print("RESULT failed domain=\(e.domain) code=\(e.code) \(e.localizedDescription)")
+        exit(1)
+    }
+}
+
+setvbuf(stdout, nil, _IOLBF, 0)
+print("SELFTEST \(selfTest())")
+timeRequests("without the filter")
+let delegate = Delegate()
+let request = OSSystemExtensionRequest.activationRequest(
+    forExtensionWithIdentifier: extensionId, queue: .main)
+request.delegate = delegate
+OSSystemExtensionManager.shared.submitRequest(request)
+DispatchQueue.main.asyncAfter(deadline: .now() + 300) {
+    print("RESULT timeout")
+    exit(4)
+}
+dispatchMain()

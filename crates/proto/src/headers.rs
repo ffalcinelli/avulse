@@ -340,6 +340,32 @@ impl<'a> Ipv4<'a> {
     pub fn options(&self) -> &'a [u8] {
         &self.0[20..]
     }
+    /// The options, in order. The walk ends after an End of Option List, and at an option whose
+    /// length is missing, below 2, or past the header, as Wireshark's does.
+    pub fn option_iter(&self) -> TcpOptions<'a> {
+        TcpOptions {
+            b: self.options(),
+            at: 0,
+        }
+    }
+    /// The first option of `kind` (see [`tcp_option`]).
+    ///
+    /// ```
+    /// use avulse_proto::{Tcp, tcp_option};
+    ///
+    /// // A SYN with MSS 1460 and window scale 7.
+    /// let hdr = [
+    ///     0x9c, 0x40, 0x01, 0xbb, 0, 0, 0, 1, 0, 0, 0, 0, 0x70, 0x02, 0xff, 0xff, 0, 0, 0, 0,
+    ///     2, 4, 0x05, 0xb4, 1, 3, 3, 7,
+    /// ];
+    /// let tcp = Tcp::new(&hdr).unwrap();
+    /// assert_eq!(tcp.option(tcp_option::MSS).and_then(|o| o.mss()), Some(1460));
+    /// assert_eq!(tcp.option(tcp_option::WSCALE).and_then(|o| o.wscale_shift()), Some(7));
+    /// assert!(tcp.option(tcp_option::SACK_PERM).is_none());
+    /// ```
+    pub fn option(&self, kind: u8) -> Option<TcpOption<'a>> {
+        self.option_iter().find(|o| o.kind() == kind)
+    }
     /// The header bytes, options included.
     pub fn bytes(&self) -> &'a [u8] {
         self.0
@@ -503,9 +529,138 @@ impl<'a> Tcp<'a> {
     pub fn options(&self) -> &'a [u8] {
         &self.0[20..]
     }
+    /// The options, in order. The walk ends after an End of Option List, and at an option whose
+    /// length is missing, below 2, or past the header, as Wireshark's does.
+    pub fn option_iter(&self) -> TcpOptions<'a> {
+        TcpOptions {
+            b: self.options(),
+            at: 0,
+        }
+    }
+    /// The first option of `kind` (see [`tcp_option`]).
+    ///
+    /// ```
+    /// use avulse_proto::{Tcp, tcp_option};
+    ///
+    /// // A SYN with MSS 1460 and window scale 7.
+    /// let hdr = [
+    ///     0x9c, 0x40, 0x01, 0xbb, 0, 0, 0, 1, 0, 0, 0, 0, 0x70, 0x02, 0xff, 0xff, 0, 0, 0, 0,
+    ///     2, 4, 0x05, 0xb4, 1, 3, 3, 7,
+    /// ];
+    /// let tcp = Tcp::new(&hdr).unwrap();
+    /// assert_eq!(tcp.option(tcp_option::MSS).and_then(|o| o.mss()), Some(1460));
+    /// assert_eq!(tcp.option(tcp_option::WSCALE).and_then(|o| o.wscale_shift()), Some(7));
+    /// assert!(tcp.option(tcp_option::SACK_PERM).is_none());
+    /// ```
+    pub fn option(&self, kind: u8) -> Option<TcpOption<'a>> {
+        self.option_iter().find(|o| o.kind() == kind)
+    }
     /// The header bytes, options included.
     pub fn bytes(&self) -> &'a [u8] {
         self.0
+    }
+}
+
+/// TCP option kinds.
+pub mod tcp_option {
+    /// End of Option List.
+    pub const EOL: u8 = 0;
+    /// No-Operation (padding).
+    pub const NOP: u8 = 1;
+    /// Maximum Segment Size.
+    pub const MSS: u8 = 2;
+    /// Window Scale.
+    pub const WSCALE: u8 = 3;
+    /// SACK Permitted.
+    pub const SACK_PERM: u8 = 4;
+    /// SACK blocks.
+    pub const SACK: u8 = 5;
+    /// Timestamps.
+    pub const TIMESTAMP: u8 = 8;
+}
+
+/// One TCP option: its kind, where it starts in the TCP header, and its bytes (kind and length
+/// included).
+#[derive(Clone, Copy, Debug)]
+pub struct TcpOption<'a> {
+    offset: usize,
+    bytes: &'a [u8],
+}
+
+impl<'a> TcpOption<'a> {
+    /// The option kind (see [`tcp_option`]).
+    pub fn kind(&self) -> u8 {
+        self.bytes.first().copied().unwrap_or_default()
+    }
+    /// Offset of the option from the start of the TCP header.
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+    /// The option's bytes, as long as its length field says (one byte for EOL and NOP).
+    pub fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+    /// The data after kind and length, when the option has the given kind and length.
+    fn data<const N: usize>(&self, kind: u8) -> Option<[u8; N]> {
+        if self.kind() != kind || self.bytes.len() != N + 2 {
+            return None;
+        }
+        self.bytes.get(2..)?.try_into().ok()
+    }
+    /// The MSS, for a well-formed MSS option (length 4).
+    pub fn mss(&self) -> Option<u16> {
+        self.data(tcp_option::MSS).map(u16::from_be_bytes)
+    }
+    /// The shift count, for a well-formed Window Scale option (length 3).
+    pub fn wscale_shift(&self) -> Option<u8> {
+        self.data::<1>(tcp_option::WSCALE).map(|[s]| s)
+    }
+    /// Timestamp value and echo reply, for a well-formed Timestamps option (length 10).
+    pub fn timestamps(&self) -> Option<(u32, u32)> {
+        let d = self.data::<8>(tcp_option::TIMESTAMP)?;
+        Some((be32(&d, 0), be32(&d, 4)))
+    }
+}
+
+/// The options of a TCP header, from [`Tcp::option_iter`].
+#[derive(Clone, Debug)]
+pub struct TcpOptions<'a> {
+    b: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Iterator for TcpOptions<'a> {
+    type Item = TcpOption<'a>;
+
+    fn next(&mut self) -> Option<TcpOption<'a>> {
+        let offset = self.at;
+        let len = match *self.b.get(offset)? {
+            tcp_option::NOP => 1,
+            tcp_option::EOL => {
+                // Nothing after the end of the list is an option.
+                self.at = self.b.len();
+                return Some(TcpOption {
+                    offset: 20 + offset,
+                    bytes: self.b.get(offset..offset + 1)?,
+                });
+            }
+            _ => match self.b.get(offset + 1) {
+                Some(&n) if n >= 2 => n as usize,
+                _ => {
+                    self.at = self.b.len();
+                    return None;
+                }
+            },
+        };
+        let Some(bytes) = self.b.get(offset..offset + len) else {
+            self.at = self.b.len();
+            return None;
+        };
+        self.at = offset + len;
+        Some(TcpOption {
+            offset: 20 + offset,
+            bytes,
+        })
     }
 }
 

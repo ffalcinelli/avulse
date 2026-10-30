@@ -1,0 +1,125 @@
+name: macOS spike
+
+# Spike C on GitHub's macOS runners (docs/spikes/macos.md): bpf capture and injection on a feth
+# pair, inbound reinjection candidates, what Phase 6's bpf backend needs (direction, process,
+# utun, IPv6 sends: the `meta` probe), the filter engine's speed, and a system extension built
+# around the Rust library, which activate.sh tries to get approved (Step 32). Not part of CI: it
+# runs when the spike changes, or by hand.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - spikes/macos/**
+      - .github/workflows/macos-spike.yml
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, macos-15, macos-26-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: spikes/macos
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - run: cargo build --release
+      # Created by the runner user, so that the steps that do not run as root can append too.
+      - run: touch report.jsonl
+      - name: Environment (before any setup)
+        continue-on-error: true
+        run: sudo ./target/release/probe report.jsonl env
+      - name: Set up the feth pair
+        continue-on-error: true
+        run: |
+          sudo ifconfig feth0 create
+          sudo ifconfig feth1 create
+          sudo ifconfig feth0 peer feth1
+          sudo ifconfig feth0 up
+          sudo ifconfig feth1 inet 10.77.1.1/24 up
+          sudo ifconfig feth1 inet6 fd77::1/64
+          sudo arp -s 10.77.1.2 02:00:00:00:00:99
+          sudo ndp -s fd77::2 02:00:00:00:00:99
+          # Duplicate address detection keeps the new IPv6 address tentative for a moment.
+          sleep 3
+          ifconfig feth0; ifconfig feth1; netstat -rn -f inet | head -30
+      - name: bpf
+        continue-on-error: true
+        run: sudo ./target/release/probe report.jsonl bpf
+      - name: Inbound injection
+        continue-on-error: true
+        run: sudo ./target/release/probe report.jsonl inject
+      - name: Direction, process, utun and IPv6 (Step 31a)
+        continue-on-error: true
+        run: sudo ./target/release/probe report.jsonl meta
+      - name: Filter engine benchmark
+        continue-on-error: true
+        run: ./target/release/probe report.jsonl bench
+      - name: Build the system extension
+        id: sysext
+        continue-on-error: true
+        run: sysext/build.sh
+      - name: Try to activate and approve it
+        if: steps.sysext.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 20
+        run: sysext/activate.sh report.jsonl
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## ${{ matrix.os }}"
+            echo '```'
+            python3 -c 'import json,sys
+          for l in open("report.jsonl"):
+              r = json.loads(l)
+              v = r["value"] if isinstance(r["value"], str) else str(r["value"])
+              mark = {True: "ok  ", False: "FAIL", None: "    "}[r["ok"]]
+              print(mark, r["probe"], r["name"], "|", v.splitlines()[0][:200] if v else "")'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: report-${{ matrix.os }}
+          path: |
+            spikes/macos/report.jsonl
+            spikes/macos/target/shots/
+            spikes/macos/target/*.out
+      - name: Clean up
+        if: always()
+        run: |
+          sudo ifconfig feth1 destroy || true
+          sudo ifconfig feth0 destroy || true
+          sudo rm -rf /Applications/AvulseSpike.app /Applications/AvulseSpikePlain.app
+
+  linux-baseline:
+    # The same benchmark on a Linux x86-64 runner, for comparison.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: spikes/macos
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - run: cargo build --release
+      - run: ./target/release/probe report.jsonl env bench
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: report-ubuntu
+          path: spikes/macos/report.jsonl

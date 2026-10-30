@@ -77,12 +77,20 @@ impl Diagnostic {
 
     /// Renders the diagnostic with the offending source line underlined, like rustc does.
     pub fn render(&self, src: &str) -> String {
-        let start = self.span.start.min(src.len());
+        // Snap to character boundaries, so that a span inside a character cannot panic.
+        let floor = |mut i: usize| {
+            i = i.min(src.len());
+            while !src.is_char_boundary(i) {
+                i -= 1;
+            }
+            i
+        };
+        let start = floor(self.span.start);
         let line_start = src[..start].rfind('\n').map_or(0, |i| i + 1);
         let line_end = src[start..].find('\n').map_or(src.len(), |i| start + i);
         let line_no = src[..start].matches('\n').count() + 1;
         let col = src[line_start..start].chars().count();
-        let end = self.span.end.clamp(start, line_end);
+        let end = floor(self.span.end).clamp(start, line_end);
         let width = src[start..end].chars().count().max(1);
         let gutter = format!("{line_no}").len();
         let level = match self.level {

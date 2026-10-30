@@ -11,5 +11,34 @@ readme = "README.md"
 keywords = ["windivert", "packet", "divert", "ebpf", "firewall"]
 categories = ["network-programming", "os"]
 
+[dependencies]
+avulse-abi.workspace = true
+# User space evaluates `matches` filters too (the fallback when the kernel cannot run a filter).
+avulse-filter = { workspace = true, features = ["regex"] }
+avulse-proto.workspace = true
+
+# The Linux backend: the eBPF programs, their loader and the matcher generator.
+[target.'cfg(target_os = "linux")'.dependencies]
+avulse-ebpf.workspace = true
+libc = "0.2"
+
+# The macOS backend, without the system extension: bpf devices, kqueue and raw sockets.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+# The Windows backend: the service control manager, the driver's device and overlapped I/O.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Services",
+    "Win32_System_Threading",
+] }
+
 [lints]
 workspace = true

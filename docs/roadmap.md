@@ -59,11 +59,12 @@ avulse/                    (Cargo workspace)
 ├─ crates/filter           parser (std) → typed AST → IR → optimizer → bytecode + verifier + interpreter (no_std)
 │                          + `windivert` front-end (old syntax → same IR)
 ├─ crates/ebpf             IR → eBPF codegen; static C programs (TC parser/dispatch, cgroup/sockops events)
-├─ crates/backend-linux    aya loader, TC clsact attach, ringbuf, injection, registry/heartbeat, events
-├─ crates/backend-windows  user side: IOCTL/overlapped I/O to the driver
 ├─ driver/windows          KMDF driver (windows-drivers-rs): WFP callouts + NDIS LWF, uses proto+filter
 ├─ macos/                  system extension (Swift NE providers ↔ Rust staticlib) + XPC client backend
-├─ crates/avulse           public Rust API, Backend trait, capability query
+├─ crates/avulse           public Rust API, capability query, and the backends as modules:
+│                            backend/linux (aya loader, TC clsact attach, ringbuf, injection,
+│                            registry/heartbeat, events), backend/windows (IOCTL/overlapped I/O
+│                            to the driver), backend/macos (XPC client)
 ├─ crates/capi             C ABI (cbindgen) → libavulse
 ├─ crates/windivert-compat WinDivert ABI shim (WinDivertOpen/Recv/Send…, 80-byte WINDIVERT_ADDRESS)
 └─ crates/cli              capture / inject / `filter check|explain|fmt|test`
@@ -168,8 +169,10 @@ event == connect and process.pid == 1234 and remote.port == 443   # SOCKET layer
 The pipeline is IR → bytecode (forward jumps only, so the verifier proves termination) → interpreter.
 
 - **Linux.** The IR is code-generated into eBPF **at runtime**. A static C TC program parses the headers into a
-  per-CPU "facts" struct, then calls `bpf_tail_call` into the handle's generated matcher, which returns the
-  verdict. This makes filtering **exact in the kernel**, which fixes ebpfdivert's main weakness.
+  per-CPU "facts" struct, then calls `bpf_tail_call` into the handle's generated matcher. A tail call does not
+  return, so the matcher writes its verdict into the facts and tail-calls a static action program, which diverts
+  or passes the packet. This makes filtering **exact in the kernel**, which fixes ebpfdivert's main weakness.
+  Spike A confirmed it on 5.15 and 6.8 (`docs/spikes/ebpf-codegen.md`).
 - **Linux fallback.** If the verifier rejects the generated program (for example, an old kernel or a huge
   filter), fall back to ebpfdivert's approach: superset rules in the kernel, then the interpreter in user space
   with auto-reinjection.
@@ -180,15 +183,15 @@ The pipeline is IR → bytecode (forward jumps only, so the verifier proves term
 
 | Feature | Linux | Windows (own driver) | macOS (system extension) |
 | --- | --- | --- | --- |
-| NETWORK | TC clsact cls_bpf (not TCX), `TC_ACT_STOLEN` | WFP `INBOUND/OUTBOUND_IPPACKET` callouts | `NEFilterPacketProvider` (drop + delay); modify = drop + reinject |
-| NETWORK_FORWARD | TC with `ingress_ifindex` / `bpf_fib_lookup` (as ebpfdivert) | WFP `IPFORWARD` | limited: pf + bpf device; documented gap |
+| NETWORK | TC clsact cls_bpf (not TCX), `TC_ACT_STOLEN` | WFP `INBOUND/OUTBOUND_IPPACKET` callouts | `NEFilterPacketProvider` (allow, drop, delay then allow); modify = drop + reinject |
+| NETWORK_FORWARD | TC with `ingress_ifindex` / `bpf_fib_lookup` (as ebpfdivert) | WFP `IPFORWARD` | limited: pf has no divert (`route-to`/`dup-to` only) + bpf device; documented gap |
 | **ETHERNET** | TC sees L2; restore the offloaded VLAN tag (`skb->vlan_tci`) in captured frames | **NDIS Lightweight Filter** send/receive NBL hooks | `NEFilterPacketProvider` / `/dev/bpf` for L2 inject |
-| FLOW | sockops + cgroup_skb (port `ebpfdivert_events.bpf.c`) | WFP `ALE_FLOW_ESTABLISHED` + flow-delete | `NEFilterDataProvider` flows |
-| SOCKET (block bind/connect) | cgroup connect/bind hooks, `EPERM` | WFP `ALE_{BIND,CONNECT,LISTEN,ACCEPT}` | data provider (connect); bind/listen sniff-only |
-| REFLECT | pinned registry diff (as ebpfdivert) | driver handle table | daemon registry |
-| Reinjection | AF_PACKET + vnet GSO, raw IP, `lo` redirect | `FwpsInject*` / `NdisF{Send,Indicate}NetBufferLists` | `/dev/bpf` write / raw socket |
-| Priority, loop prevention | TC prio + `skb->mark` tagging | WFP sublayer weights + inject-context tagging | daemon-ordered handler chain |
-| Crash safety | heartbeat, fail-open | handle cleanup on process exit | daemon watches XPC client death |
+| FLOW | sockops + cgroup_skb (port `ebpfdivert_events.bpf.c`) | WFP `ALE_FLOW_ESTABLISHED` + flow-delete | `NEFilterDataProvider` new flows, ends through `NEFilterReport` (`flowClosed`) |
+| SOCKET (block bind/connect) | cgroup connect/bind hooks, `EPERM` | WFP `ALE_{BIND,CONNECT,LISTEN,ACCEPT}` | data provider: connect and accept (refusable), close; bind and listen not visible |
+| REFLECT | pinned registry diff (as ebpfdivert) | driver handle table | the extension's handle table |
+| Reinjection | AF_PACKET + vnet GSO, raw IP, `lo` redirect | `FwpsInject*` / `NdisF{Send,Indicate}NetBufferLists` | IPv4: raw IP socket (host-order `ip_len`/`ip_off`), both ways; outbound frames and IPv6: `/dev/bpf` write (L2); inbound IPv6: a `utun` (bpf cannot inject inbound, no `IPV6_HDRINCL`) |
+| Priority, loop prevention | TC prio + `skb->mark` tagging | WFP sublayer weights + inject-context tagging | the extension's priority chain; notes of what clients inject |
+| Crash safety | heartbeat, fail-open | handle cleanup on process exit | the extension closes a dead XPC client's handles; held packets go on |
 
 ## Roadmap
 
@@ -199,12 +202,17 @@ The phases run in order. Each has an exit criterion.
 1. Create the repo, Cargo workspace, CI (Linux, Windows, macOS runners), licenses, and claim the name on crates.io,
    PyPI and GitHub.
 2. **Spike A, eBPF codegen.** Generate a trivial matcher at runtime, tail-call into it from a static TC program,
-   and get it through the verifier on 5.15 and 6.8.
+   and get it through the verifier on 5.15 and 6.8. Done: go (`docs/spikes/ebpf-codegen.md`).
 3. **Spike B, Windows Rust driver.** Build a `windows-drivers-rs` KMDF driver that registers one WFP callout and
    one NDIS LWF, test-signed, loaded in a Windows VM. Decide whether pure Rust is viable or whether a thin C shim is
-   needed.
+   needed. Done: go, pure Rust, with our own bindgen for NDIS and WFP (`docs/spikes/windows-driver.md`).
 4. **Spike C, macOS.** Find out whether `NEFilterPacketProvider` exposes Ethernet frames, measure its throughput
-   and delay semantics, and test reinjection through `/dev/bpf`.
+   and delay semantics, and test reinjection through `/dev/bpf`. Partly done on GitHub's macOS runners
+   (`docs/spikes/macos.md`): bpf injects outbound only; a raw socket (host-order `ip_len`) reinjects inbound on the
+   right interface; pf has no divert; the system extension builds with the Rust library. With SIP off, sysextd's
+   database approves it, an authorization enables the filter, and a launchd job registers the provider, but AMFI
+   will not let launchd run an ad-hoc signed provider (Phase 6, Step 32). So the provider's frame level,
+   throughput and delay wait for a Developer ID or a Mac with AMFI off.
 
 Exit: a written go/no-go note for each spike, and the capability matrix above confirmed or corrected.
 
@@ -230,21 +238,40 @@ and the CLI is usable.
 2. Add the runtime eBPF codegen from the IR, with the superset fallback.
 3. Add ETHERNET: non-IP frames, VLAN tag restore on capture and on reinjection.
 
+Progress (steps in `docs/implementation-plan.md`): the kernel side of capture (Step 7), the backend's receive
+side (Step 8: open, attach, registry, heartbeat, queue, `avulse cleanup`) and injection (Step 9: raw and
+`AF_PACKET` sockets, the `lo` redirect, GSO, reinjection by user-space filters) and the matcher's coverage with the
+superset fallback (Step 10: metadata, IPv6, VLAN, TCP options, arithmetic, set trees) and the ETHERNET layer
+(Step 11: ARP, VLAN and QinQ with or without offload, non-IP injection) are done, and the privileged suite (Step 12)
+passes on both VMs. **Phase 2 is done.** Devices without an Ethernet header (tun, WireGuard, PPP, IP tunnels) are
+supported at the NETWORK layers since Step 13. Phase 3 comes next.
+
 Exit: privileged tests pass on both Vagrant VMs, covering divert, inject, GSO, forward, ETHERNET/ARP/VLAN, crash
 cleanup, and exact in-kernel match versus interpreter (`BPF_PROG_TEST_RUN`).
 
-### Phase 3: Linux event layers and API v0.1
+### Phase 3: Linux event layers and API 0.x
 
 1. Port `ebpfdivert/src/ebpfdivert_events.bpf.c` for FLOW and SOCKET, add `process.name` (comm), and REFLECT.
-2. Freeze the Rust API and C ABI as 0.x, publish `libavulse.so` (static, manylinux_2_28).
+2. Review the Rust API and the C ABI as 0.x (`libavulse.so`).
 
-Exit: Linux release v0.1.
+Progress (steps in `docs/implementation-plan.md`): the event programs (Step 14), the FLOW layer (Step 15) and the
+SOCKET layer, which refuses binds and connects with eBPF matchers generated for the cgroup programs (Step 16), and
+`process.name` with the REFLECT layer (Step 17) are done: every layer works on Linux. The API is reviewed for 0.x
+(batch calls, `#[non_exhaustive]`) and the C ABI is `crates/capi` (Step 18). **Phase 3 is done.**
+
+Exit: every layer on Linux, and the C ABI. The release first planned here waits for Phases 5 and 6 (see "Releases"
+below).
 
 ### Phase 4: WinDivert compat shim on Linux and conformance
 
 1. Build `libavulse-windivert.so`, which exports ebpfdivert's C API surface.
 2. Run the **pydivert and jdivert test suites unchanged** against it, through the existing hooks:
    `PYDIVERT_EBPFDIVERT_LIB` and `-Debpfdivert.local`.
+
+Progress (steps in `docs/implementation-plan.md`): `crates/windivert-compat` builds `libavulse_windivert.so`. It
+exports libebpfdivert's API over avulse, and its helpers agree with WinDivert's own code (Steps 19 and 20). pydivert's
+suite and jdivert's suite (JNA and Panama) pass against it unchanged (Step 21). **Phase 4 is done.** Phase 5 comes
+next.
 
 Exit: both suites pass. The binding suites become a free cross-language conformance suite.
 
@@ -256,6 +283,9 @@ Exit: both suites pass. The binding suites become a free cross-language conforma
 3. Set up the signing pipeline: EV certificate and attestation signing through Partner Center.
 4. Ship the compat `WinDivert.dll` drop-in.
 
+Progress (steps in `docs/implementation-plan.md`, Steps 22 to 30): the interpreter is ready for the kernel stack
+(Step 22: a register file the caller provides, borrowed operands, about twice as fast, frames checked in CI); Step 23: the ABI crate and the driver's skeleton; Steps 24 to 26: the user-mode backend, the NETWORK layers and injection through WFP; Step 27: the ETHERNET layer through the NDIS lightweight filter, with VLAN tags and large sends restored on reinjection; Step 28: FLOW, SOCKET (refusing all four calls) and REFLECT, in the driver; Step 29: the drop-in `WinDivert.dll`, against which pydivert's and jdivert's Windows suites pass unchanged, under Driver Verifier: the exit, but for the attestation signature).
+
 Exit: the pydivert and jdivert Windows suites pass against it, and the driver is attestation-signed.
 
 ### Phase 6: macOS system extension
@@ -264,7 +294,25 @@ Exit: the pydivert and jdivert Windows suites pass against it, and the driver is
    L2 reinjection through `/dev/bpf`.
 2. Notarize, and document every gap through `capabilities()`.
 
+Progress (steps in `docs/implementation-plan.md`, Steps 31 to 36): Step 31 gives macOS sniffing and sending at
+NETWORK and ETHERNET without the extension, through `/dev/bpf` (a device per direction), raw sockets and a `utun`,
+tested on GitHub's macOS runners. Step 32 found that the extension cannot run ad-hoc signed on a runner, so it is
+blocked on a Developer ID or a Mac. Steps 33 and 34 write the extension anyway: its logic in Rust
+(`crates/macos-ext`: handles by priority, divert as delay, a packet sent back unchanged going on down the chain, a
+modified one dropped and injected by the client), a Swift shim around it, and the backend's XPC tier, tested on the
+runners against the extension's test mode, without the provider. Step 35 adds FLOW and SOCKET (an
+`NEFilterDataProvider`: connects and accepts, refusable, and closes; binds and listens are not visible on macOS)
+and REFLECT (the extension's handles), and Step 36 the capability matrix in the guide (`libraries/platforms.md`)
+and the C library on macOS. What is left of Phase 6 is running the extension's providers on a Mac, which waits
+for a Developer ID.
+
 Exit: a macOS test suite passes on real hardware, and the capability matrix is published.
+
+### Releases
+
+Versions stay 0.0.x while the project is experimental (owner decision, 2026-10-28). The first release, **v0.0.1**,
+comes after Phases 5 and 6, so that it covers Linux, Windows and macOS: the crates on crates.io, and signed
+`libavulse` tarballs (static, manylinux_2_28) with SBOMs. The plan is in `docs/implementation-plan.md`.
 
 ### Phase 7: Bindings and 1.0
 
@@ -285,7 +333,7 @@ Exit: a macOS test suite passes on real hardware, and the capability matrix is p
 - `ebpfdivert/src/ebpfdivert.bpf.c` and `ebpfdivert/src/ebpfdivert_events.bpf.c`: verifier-tuned BPF code (global
   funcs for 5.15, inline-asm length bounds, `barrier_var`), ported as the static BPF programs.
 - `ebpfdivert/src/handle.c`: injection-path table, registry/heartbeat, queue semantics, REFLECT diffing (logic
-  reference for `backend-linux`).
+  reference for the Linux backend).
 - `ebpfdivert/src/prefilter.c`: superset-lowering ideas for the verifier-rejection fallback.
 - `ebpfdivert/tests/test_filter.c`, `test_bpf.c`, `tests/run_integration_tests.sh`: vectors and integration
   scenarios.
@@ -315,8 +363,11 @@ Exit: a macOS test suite passes on real hardware, and the capability matrix is p
 
 ## Main risks
 
-- **Rust in the Windows kernel.** `wdk-sys` may lack WFP/NDIS bindings. Mitigation: our own bindgen, or the thin C
-  shim. Spike B decides.
+- **Rust in the Windows kernel.** `wdk-sys` lacks WFP/NDIS bindings; Spike B generated its own with bindgen, so no
+  C shim is needed.
+- **Kernel stack depth on Windows.** NDIS and WFP leave about 12 KiB of the 24 KiB kernel stack to a filter, and a
+  debug build of the interpreter overflowed it. Mitigation: release builds, a stack check with
+  `KeExpandKernelStackAndCalloutEx`, and a caller-provided register file for the interpreter (Spike B).
 - **macOS fidelity.** There is no in-place modify and only a weak forward layer. Mitigation: the drop+reinject
   emulation, the `capabilities()` API, and setting expectations early.
 - **Driver signing.** The EV certificate and Partner Center enrollment are unavoidable for the kernel driver, and

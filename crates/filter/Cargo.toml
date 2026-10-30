@@ -33,3 +33,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The differential test of the bytecode against the IR evaluator.
+proptest = { version = "1.12", default-features = false, features = ["std"] }
