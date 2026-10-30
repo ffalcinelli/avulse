@@ -4,8 +4,9 @@
 //! [`Shutdown`] directions, a handle's [`Stats`] and the filter [`Syntax`]: the `avulse` crate
 //! re-exports them all. They are `no_std`, so that the Windows driver uses the same definitions,
 //! and the address is `#[repr(C)]` and versioned, so that it crosses the C ABI as it is.
-//! [`ioctl`] is the protocol between the user-mode backend and the Windows driver, and
-//! [`windivert`] WinDivert's own address, for the WinDivert shim and the driver.
+//! [`ioctl`] is the protocol between the user-mode backend and the Windows driver, [`macos`] the
+//! one between the macOS backend and its system extension, and [`windivert`] WinDivert's own
+//! address, for the WinDivert shim and the driver.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -13,6 +14,7 @@
 mod address;
 mod flags;
 pub mod ioctl;
+pub mod macos;
 mod stats;
 mod syntax;
 #[cfg(test)]

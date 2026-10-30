@@ -5,7 +5,9 @@ name: Privileged
 #   the Linux backend on veth pairs and network namespaces (crates/avulse/tests/capture.rs). They
 #   do not replace the runs on the Vagrant VMs: the 5.15 verifier is the strict one;
 # - on macOS, the backend without the system extension on a feth pair
-#   (crates/avulse/tests/capture_macos.rs).
+#   (crates/avulse/tests/capture_macos.rs), then the system extension's build (drivers/macos) and
+#   the backend's extension tier against the extension's XPC service in its test mode (the
+#   runners cannot run its packet provider: docs/spikes/macos.md).
 
 on:
   workflow_dispatch:
@@ -16,6 +18,9 @@ on:
       - crates/ebpf/**
       - crates/filter/**
       - crates/proto/**
+      - crates/abi/**
+      - crates/macos-ext/**
+      - drivers/macos/**
       - Cargo.lock
       - .github/workflows/privileged.yml
 
@@ -64,12 +69,13 @@ jobs:
       matrix:
         os: [macos-26, macos-26-intel]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
           toolchain: stable
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
       - name: Build the tests
         run: |
           cargo test -p avulse --test capture_macos --no-run 2>&1 | tee build.log
@@ -89,6 +95,15 @@ jobs:
           ifconfig feth1
       - name: The macOS backend on real traffic
         run: sudo AVULSE_MACOS=1 "$(cat capture.bin)" --nocapture --test-threads=1
+      - name: Build the system extension
+        run: drivers/macos/scripts/build.sh
+      - name: The extension tier against the extension's test mode
+        run: drivers/macos/scripts/test.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: avulse-macos-${{ matrix.os }}
+          path: target/macos/Avulse.app
       - name: Clean up
         if: always()
         run: |

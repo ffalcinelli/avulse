@@ -123,6 +123,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "avulse-macos-ext"
+version = "0.0.0"
+dependencies = [
+ "avulse-abi",
+ "avulse-filter",
+ "avulse-proto",
+ "libc",
+]
+
+[[package]]
 name = "avulse-proto"
 version = "0.0.0"
 

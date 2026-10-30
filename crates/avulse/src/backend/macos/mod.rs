@@ -1,9 +1,10 @@
-//! The macOS backend, without the system extension (Phase 6, Step 31): `/dev/bpf` copies the
-//! packets of the selected interfaces, and the filter runs here, in user space. So handles
-//! sniff, at the NETWORK and ETHERNET layers only: diverting and dropping need the system
-//! extension's packet filter (Steps 33 and 34), and [`capabilities`](Backend::capabilities) says
-//! so.
+//! The macOS backend. Where the avulse system extension runs, its packet provider serves the
+//! handles ([`extension`], Steps 33 and 34): they divert, drop, sniff and send. Without it (Step
+//! 31), `/dev/bpf` copies the packets of the selected interfaces, and the filter runs here, in
+//! user space: handles sniff and send, at the NETWORK and ETHERNET layers only.
+//! [`capabilities`](Backend::capabilities) says which, per layer.
 //!
+//! The rest of this module is the bpf tier.
 //! Each interface gets two bpf devices, one per direction (`BIOCSDIRECTION`), which is how a
 //! packet's direction is known; a loopback interface gets the outbound one only, which sees each
 //! of its packets once. Where the ioctl is missing, one device sees both, and a packet is
@@ -14,11 +15,13 @@
 //! loopback interface), or the ones the handle names. The ETHERNET layer takes Ethernet
 //! interfaces only. Interfaces that appear after the handle opens are not captured.
 
+mod extension;
 mod record;
 mod send;
 mod sys;
 #[cfg(test)]
 mod tests;
+mod xpc;
 
 use std::io;
 use std::net::IpAddr;
@@ -43,24 +46,40 @@ const READS_PER_DRAIN: usize = 8;
 
 pub(crate) struct MacOs;
 
+/// What the bpf tier supports.
+fn bpf_capabilities() -> Capabilities {
+    let mut c = Capabilities::NONE;
+    for layer in [Layer::Network, Layer::Ethernet] {
+        c.layers[layer as usize] = LayerSupport {
+            open: true,
+            inject: true,
+            ..LayerSupport::default()
+        };
+    }
+    c
+}
+
 impl Backend for MacOs {
+    /// The extension's, layer by layer, where it serves the layer; the bpf tier's elsewhere.
     fn capabilities(&self) -> Capabilities {
-        let mut c = Capabilities::NONE;
-        for layer in [Layer::Network, Layer::Ethernet] {
-            c.layers[layer as usize] = LayerSupport {
-                open: true,
-                inject: true,
-                ..LayerSupport::default()
-            };
+        let mut c = bpf_capabilities();
+        if let Some(ext) = extension::capabilities() {
+            for (i, l) in ext.layers.iter().enumerate() {
+                if l.open {
+                    c.layers[i] = *l;
+                }
+            }
         }
         c
     }
 
     fn open(&self, spec: &Spec<'_>) -> Result<Box<dyn Opened>> {
+        if extension::capabilities().is_some_and(|c| c.layer(spec.layer).open) {
+            return Ok(Box::new(extension::ExtHandle::open(spec)?));
+        }
         if !matches!(spec.layer, Layer::Network | Layer::Ethernet) {
             return Err(Error::Unsupported(
-                "the NETWORK_FORWARD, FLOW, SOCKET and REFLECT layers on macOS (they need the \
-                 system extension)",
+                "the NETWORK_FORWARD, FLOW, SOCKET and REFLECT layers on macOS",
             ));
         }
         Ok(Box::new(Handle::open(spec)?))

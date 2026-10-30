@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.github.ffalcinelli.avulse.extension</string>
+	<key>CFBundleExecutable</key>
+	<string>com.github.ffalcinelli.avulse.extension</string>
+	<key>CFBundleName</key>
+	<string>AvulseExtension</string>
+	<key>CFBundlePackageType</key>
+	<string>SYSX</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>NSSystemExtensionUsageDescription</key>
+	<string>Avulse diverts, drops and reinjects packets for the applications that use it.</string>
+	<key>NetworkExtension</key>
+	<dict>
+		<key>NEMachServiceName</key>
+		<string>group.com.github.ffalcinelli.avulse</string>
+		<key>NEProviderClasses</key>
+		<dict>
+			<key>com.apple.networkextension.filter-packet</key>
+			<string>AvulseExtension.FilterProvider</string>
+		</dict>
+	</dict>
+</dict>
+</plist>

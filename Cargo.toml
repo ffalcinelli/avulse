@@ -9,6 +9,7 @@ members = [
     "crates/avulse",
     "crates/capi",
     "crates/windivert-compat",
+    "crates/macos-ext",
     "crates/cli",
     "crates/wasm",
 ]

@@ -22,7 +22,9 @@ use avulse_filter::Layer;
 use avulse_proto::Link;
 use avulse_proto::checksum::{self, Updated};
 
-use super::record::{Ctx, hash};
+use avulse_abi::macos::MacContext;
+
+use super::record::hash;
 use super::{lock, sys};
 use crate::backend::{decrement_ttl, ip_offset};
 use crate::{Address, Error, Result};
@@ -75,7 +77,7 @@ pub fn path(layer: Layer, addr: &Address, packet: &[u8]) -> Result<Path> {
         return Ok(Path::Utun { at: 0 });
     }
     // Outbound IPv6: out of the interface it was captured on, behind its Ethernet header.
-    let ctx = Ctx::decode(&addr.context).filter(|c| c.ifindex == addr.if_idx);
+    let ctx = MacContext::decode(&addr.context).filter(|c| c.ifindex == addr.if_idx);
     match ctx {
         Some(c) if !addr.loopback && c.l2().len() >= ETH_LEN => {
             let mut l2 = c.l2().to_vec();
@@ -199,6 +201,19 @@ impl State {
             self.sent.remove(0);
         }
         self.sent.push((h, Instant::now()));
+    }
+}
+
+/// The index of the interface named `name`.
+pub fn if_index(name: &str) -> Result<u32> {
+    let c = std::ffi::CString::new(name).map_err(|_| Error::InvalidArgument("interface name"))?;
+    // SAFETY: a NUL-terminated name.
+    match unsafe { libc::if_nametoindex(c.as_ptr()) } {
+        0 => Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no interface {name}"),
+        ))),
+        i => Ok(i),
     }
 }
 

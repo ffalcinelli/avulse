@@ -81,12 +81,12 @@ pub enum Malformed {
 }
 
 /// Little-endian reads that fail instead of panicking.
-struct Reader<'a> {
-    b: &'a [u8],
+pub(crate) struct Reader<'a> {
+    pub(crate) b: &'a [u8],
 }
 
 impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], Malformed> {
+    pub(crate) fn take(&mut self, n: usize) -> Result<&'a [u8], Malformed> {
         if self.b.len() < n {
             return Err(Malformed::Truncated);
         }
@@ -101,19 +101,19 @@ impl<'a> Reader<'a> {
         Ok(a)
     }
 
-    fn u8(&mut self) -> Result<u8, Malformed> {
+    pub(crate) fn u8(&mut self) -> Result<u8, Malformed> {
         Ok(self.array::<1>()?[0])
     }
 
-    fn u16(&mut self) -> Result<u16, Malformed> {
+    pub(crate) fn u16(&mut self) -> Result<u16, Malformed> {
         self.array().map(u16::from_le_bytes)
     }
 
-    fn u32(&mut self) -> Result<u32, Malformed> {
+    pub(crate) fn u32(&mut self) -> Result<u32, Malformed> {
         self.array().map(u32::from_le_bytes)
     }
 
-    fn u64(&mut self) -> Result<u64, Malformed> {
+    pub(crate) fn u64(&mut self) -> Result<u64, Malformed> {
         self.array().map(u64::from_le_bytes)
     }
 

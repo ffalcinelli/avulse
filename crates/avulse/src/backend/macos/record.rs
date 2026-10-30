@@ -6,7 +6,9 @@ use avulse_proto::{Link, Packet, checksum};
 
 use super::sys::{DLT_EN10MB, DLT_NULL};
 pub use crate::backend::queue::Entry;
-use crate::{Address, CONTEXT_LEN, Context};
+use avulse_abi::macos::MacContext;
+
+use crate::Address;
 
 /// The length of `struct bpf_hdr` with its 32-bit `timeval`. `bh_hdrlen` may be larger: bpf
 /// pads it so that the network header is aligned.
@@ -91,62 +93,6 @@ impl Source {
     }
 }
 
-/// The reinjection context of the macOS backend, in the address's 64 bytes:
-///
-/// | Offset | Size | |
-/// | --- | --- | --- |
-/// | 0 | 1 | [`Ctx::MAGIC`]: the backend and version of the layout |
-/// | 1 | 1 | length of the link-layer header |
-/// | 4 | 4 | the interface it was captured on |
-/// | 8 | 22 | the Ethernet header the NETWORK layers strip, with up to 2 VLAN tags |
-///
-/// The numbers are in the host's byte order: a context only goes back to the host it came from.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Ctx {
-    pub ifindex: u32,
-    l2_len: u8,
-    l2: [u8; Ctx::L2_MAX],
-}
-
-// The WinDivert-compatible library keeps the first 56 bytes of a context.
-const _: () = assert!(Ctx::L2_AT + Ctx::L2_MAX <= 56);
-
-impl Ctx {
-    const MAGIC: u8 = 0xc1;
-    const L2_MAX: usize = 22;
-    const L2_AT: usize = 8;
-
-    /// The saved link-layer header (empty at the ETHERNET layer, and on links without one).
-    pub fn l2(&self) -> &[u8] {
-        &self.l2[..self.l2_len as usize]
-    }
-
-    pub fn encode(&self) -> Context {
-        let mut b = [0u8; CONTEXT_LEN];
-        b[0] = Self::MAGIC;
-        b[1] = self.l2_len;
-        b[4..8].copy_from_slice(&self.ifindex.to_ne_bytes());
-        b[Self::L2_AT..Self::L2_AT + Self::L2_MAX].copy_from_slice(&self.l2);
-        Context::from_bytes(b)
-    }
-
-    /// The context of a captured packet; `None` for an empty one (a packet the application
-    /// built), or one this backend did not make.
-    pub fn decode(c: &Context) -> Option<Ctx> {
-        let b = c.as_bytes();
-        if b[0] != Self::MAGIC || b[1] as usize > Self::L2_MAX {
-            return None;
-        }
-        let mut l2 = [0; Self::L2_MAX];
-        l2.copy_from_slice(&b[Self::L2_AT..Self::L2_AT + Self::L2_MAX]);
-        Some(Ctx {
-            ifindex: u32::from_ne_bytes([b[4], b[5], b[6], b[7]]),
-            l2_len: b[1],
-            l2,
-        })
-    }
-}
-
 /// The packet of a frame and its address, for a handle at `layer`; `None` if the frame does
 /// not suit the layer (no IP packet at the NETWORK layer, a truncated capture). `mono_offset`
 /// turns the wall-clock timestamp into the monotonic clock's.
@@ -178,7 +124,7 @@ pub fn entry(f: &Frame<'_>, src: &Source, layer: Layer, mono_offset: i64) -> Opt
         } else {
             &[][..]
         };
-        if l2.len() > Ctx::L2_MAX {
+        if l2.len() > MacContext::L2_MAX {
             return None;
         }
         (l2, &f.data[at..])
@@ -193,12 +139,7 @@ pub fn entry(f: &Frame<'_>, src: &Source, layer: Layer, mono_offset: i64) -> Opt
         _ => None,
     };
     let valid = checksum::verify(data, if network { Link::Ip } else { Link::Ethernet });
-    let mut ctx = Ctx {
-        ifindex: src.ifindex,
-        l2_len: l2.len() as u8,
-        l2: [0; Ctx::L2_MAX],
-    };
-    ctx.l2[..l2.len()].copy_from_slice(l2);
+    let ctx = MacContext::new(src.ifindex, l2, 0)?;
 
     let mut addr = Address::new(layer);
     addr.timestamp = f.wall_ns.saturating_add(mono_offset);

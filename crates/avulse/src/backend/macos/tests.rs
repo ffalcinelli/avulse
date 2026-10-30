@@ -6,7 +6,9 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use avulse_filter::Layer;
 
-use super::record::{self, Ctx, Frame, Source};
+use avulse_abi::macos::MacContext as Ctx;
+
+use super::record::{self, Frame, Source};
 use super::send::{self, Path};
 use super::sys::{DLT_EN10MB, DLT_NULL};
 use crate::{Address, Context, Error};
@@ -201,12 +203,8 @@ fn direction_without_the_ioctl() {
 
 #[test]
 fn contexts() {
-    assert_eq!(Ctx::decode(&Context::EMPTY), None);
     let mut b = [0u8; 64];
     b[0] = 0xa1; // Linux's
-    assert_eq!(Ctx::decode(&Context::from_bytes(b)), None);
-    b[0] = 0xc1;
-    b[1] = 23;
     assert_eq!(Ctx::decode(&Context::from_bytes(b)), None);
 }
 
@@ -281,4 +279,188 @@ fn send_paths() {
             l2: Vec::new()
         })
     );
+}
+
+/// The extension tier against the extension's XPC service in its test mode (`drivers/macos/
+/// scripts/test.sh` runs it as a daemon, then these, as root, with `AVULSE_EXTENSION_TEST` and
+/// `AVULSE_MACH_SERVICE` set). Packets come through `TestPacket`, as the provider would hand
+/// them over.
+mod extension_tests {
+    use std::net::UdpSocket;
+    use std::time::Duration;
+
+    use avulse_abi::macos::{Op, Request, Status, TestPacket, encode_test_packet};
+    use avulse_filter::Layer;
+
+    use super::super::xpc::Connection;
+    use crate::{Error, Flags, Handle, MAX_PACKET_LEN, Shutdown, capabilities};
+
+    fn enabled() -> bool {
+        if std::env::var_os("AVULSE_EXTENSION_TEST").is_some() {
+            return true;
+        }
+        eprintln!("skipped: run by drivers/macos/scripts/test.sh, against the extension's daemon");
+        false
+    }
+
+    /// A UDP datagram from 127.0.0.1:47000 to 127.0.0.1:`port`, checksums right.
+    fn udp(port: u16, payload: &[u8]) -> Vec<u8> {
+        let len = 28 + payload.len();
+        let mut p = vec![
+            0x45, 0, 0, 0, 0x12, 0x34, 0, 0, 64, 17, 0, 0, 127, 0, 0, 1, 127, 0, 0, 1, //
+            0xb7, 0x98, 0, 0, 0, 0, 0, 0,
+        ];
+        p[2..4].copy_from_slice(&(len as u16).to_be_bytes());
+        p[22..24].copy_from_slice(&port.to_be_bytes());
+        p[24..26].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        p.extend_from_slice(payload);
+        avulse_proto::checksum::recalculate(&mut p, avulse_proto::Link::Ip);
+        p
+    }
+
+    /// Hands `data` to the extension's packet path; returns the verdict (0 allow, 1 drop, 2
+    /// delay).
+    fn test_packet(conn: &Connection, data: &[u8]) -> u32 {
+        let payload = encode_test_packet(&TestPacket {
+            ifindex: 1,
+            outbound: true,
+            loopback: true,
+            data,
+        });
+        let (s, p) = conn
+            .call(&Request {
+                op: Op::TestPacket,
+                handle: 0,
+                payload: &payload,
+            })
+            .unwrap();
+        assert_eq!(s, Status::Ok);
+        u32::from_le_bytes(p[..4].try_into().unwrap())
+    }
+
+    fn recv(h: &Handle) -> (Vec<u8>, crate::Address) {
+        let mut buf = vec![0; MAX_PACKET_LEN];
+        let (n, addr) = h.recv_timeout(&mut buf, Duration::from_secs(2)).unwrap();
+        (buf[..n].to_vec(), addr)
+    }
+
+    #[test]
+    fn extension_capabilities() {
+        if !enabled() {
+            return;
+        }
+        let c = capabilities().layer(Layer::Network);
+        assert!(
+            c.open && c.divert && c.drop && c.inject && c.modify,
+            "{c:?}"
+        );
+        // Opening a diverting handle no longer needs SNIFF.
+        Handle::open("udp", Layer::Network, 0, Flags::NONE).unwrap();
+    }
+
+    #[test]
+    fn extension_divert_and_send_back() {
+        if !enabled() {
+            return;
+        }
+        let conn = Connection::open().unwrap();
+        let h = Handle::open("udp.dstport == 47500", Layer::Network, 0, Flags::NONE).unwrap();
+        assert_eq!(test_packet(&conn, &udp(1, b"")), 0);
+        let pkt = udp(47500, b"held");
+        assert_eq!(test_packet(&conn, &pkt), 2);
+        let (data, addr) = recv(&h);
+        assert_eq!(data, pkt);
+        assert!(!addr.sniffed && addr.loopback && addr.outbound);
+        // Unchanged: the extension lets the original go; nothing is injected.
+        h.send(&data, &addr).unwrap();
+        let s = h.stats().unwrap();
+        assert_eq!(s.diverted, 1);
+    }
+
+    #[test]
+    fn extension_modified_packets_are_injected() {
+        if !enabled() {
+            return;
+        }
+        let conn = Connection::open().unwrap();
+        let rx = UdpSocket::bind("127.0.0.1:47501").unwrap();
+        rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let h = Handle::open("udp.dstport == 47501", Layer::Network, 0, Flags::NONE).unwrap();
+        assert_eq!(test_packet(&conn, &udp(47501, b"old")), 2);
+        let (_, addr) = recv(&h);
+        // Modified: the client sends it, through the raw socket, to the bound socket.
+        h.send(&udp(47501, b"new!"), &addr).unwrap();
+        let mut b = [0; 16];
+        assert_eq!(rx.recv(&mut b).unwrap(), 4);
+        assert_eq!(&b[..4], b"new!");
+    }
+
+    #[test]
+    fn extension_sniff_drop_and_priorities() {
+        if !enabled() {
+            return;
+        }
+        let conn = Connection::open().unwrap();
+        let sniffer =
+            Handle::open("udp.dstport == 47502", Layer::Network, 10, Flags::SNIFF).unwrap();
+        let dropper = Handle::open("udp.dstport == 47502", Layer::Network, 0, Flags::DROP).unwrap();
+        assert_eq!(test_packet(&conn, &udp(47502, b"")), 1);
+        let (_, addr) = recv(&sniffer);
+        assert!(addr.sniffed);
+        assert_eq!(dropper.stats().unwrap().dropped, 1);
+    }
+
+    #[test]
+    fn extension_shutdown_and_close() {
+        if !enabled() {
+            return;
+        }
+        let conn = Connection::open().unwrap();
+        let h = Handle::open("udp.dstport == 47503", Layer::Network, 0, Flags::NONE).unwrap();
+        std::thread::scope(|s| {
+            let t = s.spawn(|| {
+                let mut buf = vec![0; MAX_PACKET_LEN];
+                h.recv(&mut buf).map(|(n, _)| n)
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            h.shutdown(Shutdown::Recv).unwrap();
+            assert!(matches!(t.join().unwrap(), Err(Error::Shutdown)));
+        });
+        // Closed, the handle diverts nothing.
+        h.close().unwrap();
+        assert_eq!(test_packet(&conn, &udp(47503, b"")), 0);
+    }
+
+    #[test]
+    fn extension_a_client_that_goes_away_loses_its_handles() {
+        if !enabled() {
+            return;
+        }
+        let probe = Connection::open().unwrap();
+        {
+            let gone = Connection::open().unwrap();
+            let req = avulse_abi::ioctl::OpenRequest {
+                layer: Layer::Network,
+                priority: 0,
+                flags: Flags::NONE,
+                program: &[],
+                interfaces: Vec::new(),
+                filter: "udp.dstport == 47504",
+                syntax: crate::Syntax::Native,
+                windivert_object: &[],
+            };
+            let (s, _) = gone
+                .call(&Request {
+                    op: Op::Open,
+                    handle: 0,
+                    payload: &req.encode(),
+                })
+                .unwrap();
+            assert_eq!(s, Status::Ok);
+            assert_eq!(test_packet(&probe, &udp(47504, b"")), 2);
+        }
+        // The connection is cancelled: its handle closes, and the packet path lets packets by.
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(test_packet(&probe, &udp(47504, b"")), 0);
+    }
 }

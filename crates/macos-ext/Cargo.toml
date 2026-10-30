@@ -1,0 +1,28 @@
+[package]
+name = "avulse-macos-ext"
+description = "The logic of avulse's macOS system extension: handles, the packet path and the XPC protocol."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "avulse_macos_ext"
+# `staticlib` for the Swift shim (drivers/macos), `rlib` for the tests.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+avulse-abi.workspace = true
+# The extension runs in user space, so it evaluates filters with the reference evaluator, `matches`
+# included.
+avulse-filter = { workspace = true, features = ["regex"] }
+avulse-proto.workspace = true
+
+# The monotonic clock, which the macOS backend's queue shares.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

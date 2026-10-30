@@ -255,3 +255,75 @@ fn windivert_receive_requests() {
     );
     assert_eq!(WD_RECV & 3, 2, "METHOD_OUT_DIRECT");
 }
+
+#[test]
+fn macos_protocol() {
+    use crate::ioctl::Malformed;
+    use crate::macos::*;
+
+    let r = Request {
+        op: Op::Recv,
+        handle: 7,
+        payload: &encode_recv(250, 65536),
+    };
+    let b = r.encode();
+    assert_eq!(b.len(), 24);
+    assert_eq!(Request::decode(&b), Ok(r));
+    assert_eq!(decode_recv(r.payload), Ok((250, 65536)));
+    assert_eq!(decode_recv(&[0; 9]), Err(Malformed::Value));
+    let mut bad = b.clone();
+    bad[0] = 99;
+    assert_eq!(Request::decode(&bad), Err(Malformed::Value));
+    assert_eq!(Request::decode(&b[..15]), Err(Malformed::Truncated));
+
+    let resp = encode_response(Status::Timeout, b"xy");
+    assert_eq!(decode_response(&resp), Ok((Status::Timeout, &b"xy"[..])));
+    let mut bad = resp.clone();
+    bad[0] = 5;
+    assert_eq!(decode_response(&bad), Err(Malformed::Value));
+
+    assert_eq!(SendResult::try_from(1), Ok(SendResult::Inject));
+    assert!(SendResult::try_from(2).is_err());
+
+    let caps = [support::OPEN | support::DIVERT, 0, 0, 0, 0, 0x1f];
+    assert_eq!(decode_capabilities(&encode_capabilities(caps)), Ok(caps));
+    assert_eq!(
+        decode_capabilities(&[0x20, 0, 0, 0, 0, 0]),
+        Err(Malformed::Value)
+    );
+    assert_eq!(decode_capabilities(&[0; 5]), Err(Malformed::Truncated));
+
+    let p = TestPacket {
+        ifindex: 3,
+        outbound: true,
+        loopback: false,
+        data: &[0x45, 0],
+    };
+    let b = encode_test_packet(&p);
+    assert_eq!(decode_test_packet(&b), Ok(p));
+    let mut bad = b.clone();
+    bad[4] = 4;
+    assert_eq!(decode_test_packet(&bad), Err(Malformed::Value));
+}
+
+#[test]
+fn macos_context() {
+    use crate::macos::MacContext;
+
+    let l2 = [1u8; 18];
+    let c = MacContext::new(9, &l2, 0x0102_0304_0506_0708).unwrap();
+    let back = MacContext::decode(&c.encode()).unwrap();
+    assert_eq!(back, c);
+    assert_eq!(
+        (back.ifindex, back.token, back.l2()),
+        (9, 0x0102_0304_0506_0708, &l2[..])
+    );
+    // It fits what the WinDivert shim keeps.
+    assert!(c.encode().as_bytes()[56..].iter().all(|&b| b == 0));
+    assert!(MacContext::new(1, &[0; 23], 0).is_none());
+    assert_eq!(MacContext::decode(&Context::EMPTY), None);
+    let mut b = [0u8; 64];
+    b[0] = MacContext::MAGIC;
+    b[1] = 23;
+    assert_eq!(MacContext::decode(&Context::from_bytes(b)), None);
+}
