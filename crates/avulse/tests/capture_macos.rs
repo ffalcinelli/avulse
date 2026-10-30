@@ -6,18 +6,20 @@
 //! sudo ifconfig feth0 create && sudo ifconfig feth1 create && sudo ifconfig feth0 peer feth1
 //! sudo ifconfig feth0 up && sudo ifconfig feth1 inet 10.77.1.1/24 up
 //! sudo ifconfig feth1 inet6 fd77::1/64
-//! sudo arp -s 10.77.1.2 02:00:00:00:00:99 && sudo ndp -s fd77::2 02:00:00:00:00:99
+//! sudo arp -s 10.77.1.2 02:00:00:00:00:99
 //! sudo AVULSE_MACOS=1 target/debug/deps/capture_macos-<hash> --test-threads=1
 //! ```
 //!
 //! `feth0` and `feth1` are peers: a frame sent out of one is received by the other. `feth1` is
 //! the host's side, with addresses; `feth0` plays the wire, where the tests write frames from
-//! a made-up peer (10.77.1.2, `fd77::2`) and watch what the host sends.
+//! a made-up peer (10.77.1.2, `fd77::2`) and watch what the host sends. Outbound IPv6 goes to
+//! the all-nodes multicast address: a static neighbor entry (`ndp -s`) for the peer is not used
+//! on the runners, and the datagram waits for a neighbor discovery that nobody answers.
 
 #![cfg(target_os = "macos")]
 
 use std::ffi::CString;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, UdpSocket};
 use std::os::fd::{AsFd, AsRawFd};
 use std::time::{Duration, Instant};
 
@@ -85,6 +87,15 @@ fn recv_within(h: &Handle, timeout: Duration) -> Option<(Vec<u8>, Address)> {
 fn send_udp(port: u16) {
     let s = UdpSocket::bind(SocketAddr::from((HOST_IP, 0))).unwrap();
     s.send_to(b"avulse", SocketAddr::from((PEER_IP, port)))
+        .unwrap();
+}
+
+/// Sends a datagram to the all-nodes multicast address's `port`, out of `feth1`.
+fn send_multicast6(port: u16) {
+    let s = UdpSocket::bind("[::]:0").unwrap();
+    s.set_multicast_loop_v6(false).unwrap();
+    let all_nodes = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
+    s.send_to(b"six", SocketAddrV6::new(all_nodes, port, 0, ifindex(HOST)))
         .unwrap();
 }
 
@@ -453,10 +464,12 @@ fn inject_outbound() {
     assert_eq!(&got[14..], &ip[..]);
 
     // An IPv6 datagram captured outbound, sent again behind its saved Ethernet header.
-    let h = sniff_on(HOST, "ipv6 and udp.dstport == 47021", Layer::Network);
-    let s = UdpSocket::bind(SocketAddr::from((HOST_IP6, 0))).unwrap();
-    s.send_to(b"six", SocketAddr::from((PEER_IP6, 47021)))
-        .unwrap();
+    let h = sniff_on(
+        HOST,
+        "outbound and ipv6 and udp.dstport == 47021",
+        Layer::Network,
+    );
+    send_multicast6(47021);
     let Some((pkt, addr)) = recv_within(&h, SEC) else {
         let wire_saw = recv_within(&wire, SEC).map(|(f, _)| f.len());
         panic!(
@@ -478,15 +491,13 @@ fn capture_ipv6_outbound() {
         return;
     }
     let h = Handle::open(
-        "ipv6 and udp.dstport == 47025",
+        "outbound and ipv6 and udp.dstport == 47025",
         Layer::Network,
         0,
         Flags::SNIFF,
     )
     .unwrap();
-    let s = UdpSocket::bind(SocketAddr::from((HOST_IP6, 0))).unwrap();
-    s.send_to(b"six", SocketAddr::from((PEER_IP6, 47025)))
-        .unwrap();
+    send_multicast6(47025);
     let Some((data, addr)) = recv_within(&h, SEC) else {
         panic!("the outbound IPv6 datagram{}", tables());
     };
