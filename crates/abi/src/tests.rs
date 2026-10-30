@@ -179,9 +179,31 @@ fn records_and_small_requests() {
     let (a, mut b) = (full_address(), Address::new(Layer::Network));
     b.outbound = true;
     let mut out = Vec::new();
+    let mut slice_out = [0u8; 1024];
+    let mut off = 0;
     for (addr, data) in [(a, &b"hello"[..]), (b, &[][..]), (a, &[7; 8][..])] {
-        Record { addr, data }.encode_into(&mut out);
+        let rec = Record { addr, data };
+        rec.encode_into(&mut out);
+        off += rec.encode(&mut slice_out[off..]).unwrap();
     }
+    assert_eq!(&slice_out[..off], &out[..]);
+    assert_eq!(
+        Record {
+            addr: a,
+            data: b"hello"
+        }
+        .encode(&mut [0; 10]),
+        None
+    );
+    let mut addr_extra = encode_address(&a).to_vec();
+    addr_extra.push(0);
+    assert_eq!(decode_address(&addr_extra), Err(Malformed::Value));
+    let mut param_extra = encode_set_param(Param::QueueTime, 4000).to_vec();
+    param_extra.push(0);
+    assert_eq!(decode_param(&param_extra), Err(Malformed::Value));
+    let mut stats_extra = encode_stats(&Stats::default()).to_vec();
+    stats_extra.push(0);
+    assert_eq!(decode_stats(&stats_extra), Err(Malformed::Value));
     assert_eq!(
         out.len(),
         Record::encoded_len(5) + Record::encoded_len(0) + Record::encoded_len(8)

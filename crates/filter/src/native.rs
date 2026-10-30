@@ -2,7 +2,7 @@
 
 use core::fmt::{self, Display, Formatter, Write};
 
-use crate::ast::{Quant, fmt_layers};
+use crate::ast::{Quant, fmt_layers, fmt_str};
 use crate::fields::{Origin, Ty, def};
 use crate::ir::{CmpOp, Lit, SetItem, Test, Value};
 
@@ -78,14 +78,32 @@ fn test(f: &mut Formatter<'_>, t: &Test, min: u8) -> fmt::Result {
             // Metadata flags are always present, and a bare one tests that it is true.
             Value::Field(x) if def(*x).origin == Origin::Flag => f.write_str("true"),
             // A bare boolean field tests presence, with a warning.
-            Value::Field(x) if def(*x).ty == Ty::Bool => write!(f, "count({}) > 0", def(*x).name),
+            Value::Field(x) | Value::Layer(x, _) if def(*x).ty == Ty::Bool => {
+                f.write_str("count(")?;
+                value(f, v)?;
+                f.write_str(") > 0")
+            }
             v => value(f, v),
         },
         Test::Truthy(v) => match v {
             Value::Field(x) if def(*x).origin == Origin::Flag => f.write_str(def(*x).name),
             Value::Field(x) if def(*x).ty == Ty::Bool => write!(f, "{} == true", def(*x).name),
-            Value::Field(x) if def(*x).ty != Ty::Proto && !def(*x).ty.is_bytes() => {
-                write!(f, "any {} != 0", def(*x).name)
+            Value::Layer(x, _) if def(*x).ty == Ty::Bool => {
+                f.write_str("any ")?;
+                value(f, v)?;
+                f.write_str(" == true")
+            }
+            Value::Field(x) | Value::Layer(x, _)
+                if def(*x).ty != Ty::Proto && !def(*x).ty.is_bytes() =>
+            {
+                f.write_str("any ")?;
+                value(f, v)?;
+                f.write_str(" != 0")
+            }
+            Value::Len(_) | Value::Count(_) | Value::Abs(_) | Value::Extreme { .. } => {
+                f.write_str("any ")?;
+                value(f, v)?;
+                f.write_str(" != 0")
             }
             v => value(f, v),
         },
@@ -108,9 +126,9 @@ fn test(f: &mut Formatter<'_>, t: &Test, min: u8) -> fmt::Result {
             if *quant == Quant::All && !matches!(op, CmpOp::Eq | CmpOp::Ne) {
                 f.write_str("all ")?;
             }
-            value(f, lhs)?;
+            value_for(f, lhs, is_str(rhs))?;
             write!(f, " {sym} ")?;
-            value(f, rhs)
+            value_for(f, rhs, is_str(lhs))
         }
         Test::Member {
             lhs,
@@ -121,18 +139,26 @@ fn test(f: &mut Formatter<'_>, t: &Test, min: u8) -> fmt::Result {
             if *quant == Quant::All {
                 f.write_str("all ")?;
             }
+            let as_str = is_str(lhs);
             value(f, lhs)?;
             f.write_str(if *negate { " not in {" } else { " in {" })?;
             for (i, item) in set.iter().enumerate() {
                 if i > 0 {
-                    f.write_char(' ')?;
+                    if matches!(
+                        item,
+                        SetItem::One(Lit::Int(n)) | SetItem::Range(Lit::Int(n), _) if *n < 0
+                    ) {
+                        f.write_str(", ")?;
+                    } else {
+                        f.write_char(' ')?;
+                    }
                 }
                 match item {
-                    SetItem::One(l) => lit(f, l)?,
+                    SetItem::One(l) => lit_for(f, l, as_str)?,
                     SetItem::Range(a, b) => {
-                        lit(f, a)?;
+                        lit_for(f, a, as_str)?;
                         f.write_str("..")?;
-                        lit(f, b)?;
+                        lit_for(f, b, as_str)?;
                     }
                 }
             }
@@ -144,7 +170,7 @@ fn test(f: &mut Formatter<'_>, t: &Test, min: u8) -> fmt::Result {
             }
             value(f, lhs)?;
             f.write_str(" contains ")?;
-            value(f, rhs)
+            value_for(f, rhs, is_str(lhs))
         }
         Test::Matches {
             lhs,
@@ -215,7 +241,7 @@ fn value(f: &mut Formatter<'_>, v: &Value) -> fmt::Result {
             }
         }
         Value::Slice(base, ranges) => {
-            value(f, base)?;
+            grouped(f, base)?;
             f.write_char('[')?;
             for (i, r) in ranges.iter().enumerate() {
                 if i > 0 {
@@ -235,14 +261,14 @@ fn value(f: &mut Formatter<'_>, v: &Value) -> fmt::Result {
         Value::Case { upper, value: v } => call(f, if *upper { "upper" } else { "lower" }, v),
         Value::Arith(op, a, b) => {
             f.write_char('{')?;
-            value(f, a)?;
+            grouped(f, a)?;
             write!(f, " {op} ")?;
-            value(f, b)?;
+            grouped(f, b)?;
             f.write_char('}')
         }
         Value::Neg(v) => {
             f.write_char('-')?;
-            value(f, v)
+            grouped(f, v)
         }
         Value::Abs(v) => call(f, "abs", v),
         Value::Extreme { max, args } => {
@@ -255,7 +281,32 @@ fn value(f: &mut Formatter<'_>, v: &Value) -> fmt::Result {
             }
             f.write_char(')')
         }
-        Value::Lit(l) => lit(f, l),
+        Value::Lit(l) => lit_for(f, l, false),
+    }
+}
+
+fn grouped(f: &mut Formatter<'_>, v: &Value) -> fmt::Result {
+    if matches!(v, Value::BitAnd(..)) {
+        f.write_char('{')?;
+        value(f, v)?;
+        f.write_char('}')
+    } else {
+        value(f, v)
+    }
+}
+
+fn is_str(v: &Value) -> bool {
+    match v {
+        Value::Field(x) | Value::Layer(x, _) => def(*x).ty == Ty::Str,
+        Value::Case { .. } => true,
+        _ => false,
+    }
+}
+
+fn value_for(f: &mut Formatter<'_>, v: &Value, as_str: bool) -> fmt::Result {
+    match v {
+        Value::Lit(l) => lit_for(f, l, as_str),
+        _ => value(f, v),
     }
 }
 
@@ -265,8 +316,9 @@ fn call(f: &mut Formatter<'_>, name: &str, v: &Value) -> fmt::Result {
     f.write_char(')')
 }
 
-fn lit(f: &mut Formatter<'_>, l: &Lit) -> fmt::Result {
+fn lit_for(f: &mut Formatter<'_>, l: &Lit, as_str: bool) -> fmt::Result {
     match l {
+        Lit::Bytes(b) if as_str => fmt_str(f, b),
         // One byte in hex would read as a decimal integer: write it as one.
         Lit::Bytes(b) if b.len() == 1 => write!(f, "0x{:02x}", b[0]),
         l => write!(f, "{l}"),

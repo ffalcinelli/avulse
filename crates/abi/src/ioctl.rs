@@ -217,6 +217,9 @@ pub fn decode_address(b: &[u8]) -> Result<Address, Malformed> {
     rf.layer = Layer::try_from(r.u8()?).map_err(|_| Malformed::Value)?;
     rf.syntax = Syntax::try_from(r.u8()?).map_err(|_| Malformed::Value)?;
     a.context = Context::from_bytes(r.array::<CONTEXT_LEN>()?);
+    if !r.b.is_empty() {
+        return Err(Malformed::Value);
+    }
     Ok(a)
 }
 
@@ -330,6 +333,19 @@ impl<'a> Record<'a> {
     /// How many bytes the record takes.
     pub fn encoded_len(data_len: usize) -> usize {
         RECORD_HEADER + data_len.next_multiple_of(8)
+    }
+
+    /// Writes the record into `out`, returning how many bytes were written, or `None` if `out` is
+    /// shorter than [`Self::encoded_len`]`(self.data.len())`.
+    pub fn encode(&self, out: &mut [u8]) -> Option<usize> {
+        let total = Self::encoded_len(self.data.len());
+        let dst = out.get_mut(..total)?;
+        dst[..ADDRESS_LEN].copy_from_slice(&encode_address(&self.addr));
+        dst[ADDRESS_LEN..ADDRESS_LEN + 4].copy_from_slice(&(self.data.len() as u32).to_le_bytes());
+        dst[ADDRESS_LEN + 4..RECORD_HEADER].fill(0);
+        dst[RECORD_HEADER..RECORD_HEADER + self.data.len()].copy_from_slice(self.data);
+        dst[RECORD_HEADER + self.data.len()..total].fill(0);
+        Some(total)
     }
 
     /// Appends the record to `out`.
@@ -501,6 +517,9 @@ pub fn decode_param(b: &[u8]) -> Result<(Param, Option<u64>), Malformed> {
     let mut r = Reader { b };
     let p = *Param::ALL.get(r.u32()? as usize).ok_or(Malformed::Value)?;
     let value = if r.b.is_empty() { None } else { Some(r.u64()?) };
+    if !r.b.is_empty() {
+        return Err(Malformed::Value);
+    }
     Ok((p, value))
 }
 
@@ -538,6 +557,9 @@ pub fn decode_stats(b: &[u8]) -> Result<Stats, Malformed> {
         &mut s.queue_drops,
     ] {
         *v = r.u64()?;
+    }
+    if !r.b.is_empty() {
+        return Err(Malformed::Value);
     }
     Ok(s)
 }

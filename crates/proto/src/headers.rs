@@ -340,32 +340,6 @@ impl<'a> Ipv4<'a> {
     pub fn options(&self) -> &'a [u8] {
         &self.0[20..]
     }
-    /// The options, in order. The walk ends after an End of Option List, and at an option whose
-    /// length is missing, below 2, or past the header, as Wireshark's does.
-    pub fn option_iter(&self) -> TcpOptions<'a> {
-        TcpOptions {
-            b: self.options(),
-            at: 0,
-        }
-    }
-    /// The first option of `kind` (see [`tcp_option`]).
-    ///
-    /// ```
-    /// use avulse_proto::{Tcp, tcp_option};
-    ///
-    /// // A SYN with MSS 1460 and window scale 7.
-    /// let hdr = [
-    ///     0x9c, 0x40, 0x01, 0xbb, 0, 0, 0, 1, 0, 0, 0, 0, 0x70, 0x02, 0xff, 0xff, 0, 0, 0, 0,
-    ///     2, 4, 0x05, 0xb4, 1, 3, 3, 7,
-    /// ];
-    /// let tcp = Tcp::new(&hdr).unwrap();
-    /// assert_eq!(tcp.option(tcp_option::MSS).and_then(|o| o.mss()), Some(1460));
-    /// assert_eq!(tcp.option(tcp_option::WSCALE).and_then(|o| o.wscale_shift()), Some(7));
-    /// assert!(tcp.option(tcp_option::SACK_PERM).is_none());
-    /// ```
-    pub fn option(&self, kind: u8) -> Option<TcpOption<'a>> {
-        self.option_iter().find(|o| o.kind() == kind)
-    }
     /// The header bytes, options included.
     pub fn bytes(&self) -> &'a [u8] {
         self.0

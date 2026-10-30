@@ -256,8 +256,7 @@ fn label(out: &mut String, l: u16) {
 
 /// WinDivert's serialized filter object for a WinDivert filter at `layer`.
 pub(crate) fn object(src: &str, layer: crate::meta::Layer) -> Result<String, Diagnostic> {
-    super::compile(src, layer)?;
-    let e = super::parse::parse(src, layer)?;
+    let e = super::parse_checked(src, layer)?;
     let mut stack = Vec::new();
     let entry = flatten(&e, ACCEPT, REJECT, &mut stack).ok_or_else(|| {
         Diagnostic::error(Span::new(0, src.len()), "the filter is too long")

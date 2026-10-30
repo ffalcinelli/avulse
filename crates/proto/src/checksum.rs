@@ -47,12 +47,12 @@ pub fn finish(mut acc: u64) -> u16 {
 }
 
 /// Checksum of an IPv4 header, ignoring the value in its checksum field.
-///
-/// # Panics
-///
-/// If `header` is shorter than 20 bytes. [`Ipv4::bytes`](crate::Ipv4::bytes) never is.
 pub fn ipv4_header(header: &[u8]) -> u16 {
-    finish(sum(&header[12..], sum(&header[..10], 0)))
+    if header.len() < 20 {
+        return finish(sum(header, 0));
+    }
+    let len = ((header[0] & 0x0f) as usize * 4).clamp(20, header.len());
+    finish(sum(&header[12..len], sum(&header[..10], 0)))
 }
 
 /// Which checksums [`recalculate`] updated, or [`verify`] found correct.
@@ -118,7 +118,9 @@ fn locate(buf: &[u8], link: Link) -> Located {
         Transport::None => None,
     };
     let l4 = match (kind, p.l4_offset()) {
-        (Some((proto, field)), Some(off)) if p.fragment().is_none() => {
+        (Some((proto, field)), Some(off))
+            if p.fragment().is_none_or(|f| f.offset == 0 && !f.more) =>
+        {
             let end = p.payload_range().end;
             (end - off >= field + 2).then_some((proto, field, off..end, pseudo))
         }

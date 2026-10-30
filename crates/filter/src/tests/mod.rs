@@ -743,6 +743,18 @@ fn evaluator_limits() {
     for filter in ["tcp.payload[1:0] == 00", "frame[:0]", "vlan.id#[1:0] == 1"] {
         error(filter);
     }
+    // Inclusive slice end at `i64::MAX` or mixing signs must not overflow or pass as bounded.
+    for filter in [
+        "frame[0:1, 0-9223372036854775807] == 00:01",
+        "frame[0:1, 0--1] == 00:01",
+    ] {
+        let e = error(filter);
+        assert!(
+            e.message.contains("more than 32 bytes"),
+            "{filter}: {}",
+            e.message
+        );
+    }
     let e = error("tcp.payload & tcp.payload == tcp.payload");
     assert!(e.message.contains("at most 32 bytes"), "{}", e.message);
 }
@@ -984,4 +996,28 @@ fn tcp_options() {
             "{f}: {e:?}"
         );
     }
+}
+
+#[test]
+fn native_round_trips() {
+    for src in [
+        "iface == \"eth0\"",
+        "iface == \"a\"",
+        "iface in {\"eth0\", \"lo\"}",
+        "process.name contains \"sh\"",
+        "upper(iface) == \"ETH0\"",
+        "{tcp.dstport & 0xff} + 1 == 81",
+        "-{tcp.dstport & 0xff} == -80",
+        "{frame[0:2] & ff:ff}[0] == 0x01",
+        "priority in {1, -1}",
+        "priority in {1, -5..-1}",
+    ] {
+        let f = compile(src);
+        let native = f.ir().native().to_string();
+        let back = compile(&native);
+        assert_eq!(back.ir(), f.ir(), "{src} => {native}");
+    }
+    let wd_len = Filter::compile_windivert("tcp.PayloadLength", Layer::Network).unwrap();
+    let native = wd_len.ir().native().to_string();
+    assert_eq!(compile(&native).ir(), wd_len.ir(), "{native}");
 }
