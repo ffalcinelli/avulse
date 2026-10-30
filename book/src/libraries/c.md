@@ -1,7 +1,8 @@
 # C
 
 `libavulse` is the C interface of the handle API: the `avulse-capi` crate, built as a shared
-(`libavulse.so`) and a static (`libavulse.a`) library, with the header
+(`libavulse.so`, `libavulse.dylib`, `avulse.dll`) and a static (`libavulse.a`, `avulse.lib`)
+library, with the header
 [`crates/capi/include/avulse.h`](https://github.com/ffalcinelli/avulse/blob/main/crates/capi/include/avulse.h).
 It is version 0.x: the interface may still change.
 
@@ -61,7 +62,7 @@ int main(void)
 | `avulse_send`, `avulse_send_batch` | Send packets |
 | `avulse_shutdown`, `avulse_close` | Stop receiving or sending; close and free the handle |
 | `avulse_set_param`, `avulse_get_param` | The queue parameters |
-| `avulse_fd` | A descriptor readable when `avulse_recv` would not block, for `poll` and `epoll` |
+| `avulse_fd` | On Unix, a descriptor readable when `avulse_recv` would not block, for `poll`, `epoll` and `kqueue` (`AVULSE_E_UNSUPPORTED` on Windows) |
 | `avulse_stats` | The handle's counters: diverted, sniffed, dropped, and what was passed on or lost, and why |
 | `avulse_cleanup` | Remove what dead processes left behind |
 | `avulse_filter_check`, `avulse_filter_format`, `avulse_filter_convert`, `avulse_filter_eval` | The filter language without a handle: check, format, convert a WinDivert filter, evaluate on a packet |

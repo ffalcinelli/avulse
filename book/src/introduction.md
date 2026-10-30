@@ -20,14 +20,17 @@ re-inject them, on Linux, Windows and macOS. It aims to cover every feature of
 
 ## Status
 
-Avulse is **pre-alpha**. It cannot capture packets yet. What works today:
+Avulse is **pre-alpha** (0.0.x). What works today:
 
 | Part | State |
 | --- | --- |
 | `avulse-proto` | Zero-copy parsing of Ethernet, VLAN/QinQ, ARP, IPv4, IPv6, TCP, UDP, ICMP and ICMPv6; checksums. |
-| `avulse-filter` | The filter language: parser, type checker, IR and evaluator, validated against `tshark`. |
-| `avulse` CLI | `avulse filter check`, `fmt`, `explain`, `eval` and `fields`. |
-| Capture backends | Planned: eBPF on Linux, a WFP/NDIS driver on Windows, a Network Extension on macOS. |
+| `avulse-filter` | The filter language: parser, type checker, IR, evaluator, bytecode verifier/interpreter, and WinDivert 2.2 front-end, validated against `tshark`. |
+| `avulse-abi` | Shared `no_std` ABI types (`Address`, `Flags`, `Param`, `Shutdown`, `Stats`, `Syntax`), Windows IOCTL wire format, macOS XPC wire format, and WinDivert address conversion. |
+| `avulse` | The handle API and capture backends on Linux (TC and cgroup eBPF), Windows (`avulse.sys` WFP callouts and NDIS lightweight filter), and macOS (`/dev/bpf` and the `Avulse.app` system extension). |
+| `avulse-capi` | The C library (`libavulse`) and header (`include/avulse.h`). |
+| `avulse-windivert-compat` | The WinDivert-compatible shim (`libavulse_windivert.so` on Linux, `avulse_windivert.dll` on Windows), passing the pydivert and jdivert suites unchanged. |
+| `avulse` CLI | `avulse filter check`, `fmt`, `explain`, `convert`, `eval` and `fields`; `avulse cleanup`. |
 
 The [design and roadmap](project/design.md) chapter has the plan. You can try the filter language
 right now in the [playground](https://ffalcinelli.github.io/avulse/#playground), which runs the

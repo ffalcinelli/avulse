@@ -17,6 +17,7 @@ again after adding fields.
 """
 
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -40,7 +41,7 @@ def wireshark_fields():
 
 
 def run(cmd, *args):
-    return subprocess.run(cmd.split() + list(args), capture_output=True, text=True, check=True).stdout
+    return subprocess.run(shlex.split(cmd) + list(args), capture_output=True, text=True, check=True).stdout
 
 
 def tables(lines):

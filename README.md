@@ -11,12 +11,19 @@ WinDivert feature, adds an Ethernet layer, and uses Wireshark display filters.
 
 > *Avulsion*: a river suddenly abandoning its channel for a new one.
 
-**Status: pre-alpha.** The packet parser, the filter language and the `avulse filter` CLI work.
-On Linux, the `avulse` crate diverts, sniffs, drops and sends packets at the packet layers,
-reports flows at the FLOW layer, reports or refuses binds and connects at the SOCKET layer, and
-reports handles at the REFLECT layer. A WinDivert-compatible library (`libavulse_windivert.so`)
-runs the pydivert and jdivert test suites unchanged. Windows and macOS have no backend yet.
-The crates.io and PyPI packages only reserve the name.
+**Status: pre-alpha.** The packet parser, the filter language (native Wireshark syntax and
+WinDivert 2.2 syntax), the bytecode verifier and interpreter, and the `avulse` CLI work. The
+`avulse` crate and the C library (`libavulse`) divert, sniff, drop and send packets at the
+packet layers (`NETWORK`, `NETWORK_FORWARD`, `ETHERNET`), report flows at `FLOW`, report or
+refuse socket calls at `SOCKET`, and report handles at `REFLECT`:
+- on **Linux**, through TC and cgroup eBPF programs with runtime eBPF code generation;
+- on **Windows**, through `avulse.sys` (WFP callouts and an NDIS lightweight filter);
+- on **macOS**, through `/dev/bpf` (`SNIFF` and `send` at `NETWORK` and `ETHERNET`) and the
+  system extension (`Avulse.app`, awaiting Developer ID signing to run its providers on macOS).
+
+The WinDivert-compatible library (`libavulse_windivert.so` on Linux, `avulse_windivert.dll` on
+Windows) passes the pydivert and jdivert test suites unchanged. The crates.io and PyPI packages
+only reserve the name until v0.0.1.
 
 **[Website](https://ffalcinelli.github.io/avulse/)** ·
 **[Filter playground](https://ffalcinelli.github.io/avulse/#playground)** ·
@@ -35,8 +42,8 @@ The crates.io and PyPI packages only reserve the name.
   types and helpful errors.
 - **One engine everywhere**: parsing and matching are `no_std` Rust that never allocates or
   panics while matching, so the same code runs in user space and in kernel drivers.
-- **Exact matching in the kernel** (planned): eBPF generated at runtime on Linux, verified
-  bytecode in the Windows driver and the macOS system extension.
+- **Exact matching in the kernel**: eBPF generated at runtime on Linux, verified bytecode in the
+  Windows driver, and the reference evaluator in the macOS system extension.
 
 ## Try it
 
@@ -99,14 +106,18 @@ assert!(filter.matches(&packet, &Meta { outbound: true, ..Meta::default() }));
 | Crate | State |
 | --- | --- |
 | [`avulse-proto`](crates/proto) | Zero-copy parsing of Ethernet, VLAN/QinQ, ARP, IPv4, IPv6, TCP, UDP, ICMP, ICMPv6; checksums. `no_std`. |
-| [`avulse-filter`](crates/filter) | The filter language: parser, type checker, IR, evaluator. `no_std` + `alloc`. |
-| [`avulse-cli`](crates/cli) | The `avulse` command: `filter check`, `fmt`, `explain`, `eval`, `fields`; `cleanup`. |
+| [`avulse-filter`](crates/filter) | The filter language: parser, type checker, IR, evaluator, bytecode verifier/interpreter, WinDivert 2.2 front-end. `no_std` + `alloc`. |
+| [`avulse-abi`](crates/abi) | Shared ABI types (`Address`, `Flags`, `Param`, `Shutdown`, `Stats`, `Syntax`), Windows IOCTL wire format, macOS XPC wire format, WinDivert address conversion. `no_std` + `alloc`. |
+| [`avulse`](crates/avulse) | The handle API: handles, flags, parameters, the packet address, and the Linux, Windows and macOS backends. |
+| [`avulse-ebpf`](crates/ebpf) | The Linux kernel side: TC programs, the event programs, filter IR to eBPF, the loader. |
+| [`avulse-macos-ext`](crates/macos-ext) | The macOS system extension logic (packet chain, held packets, flow/socket/reflect events, XPC handler). |
+| [`avulse-capi`](crates/capi) | The C interface, `libavulse`, with the header `include/avulse.h`. |
+| [`avulse-windivert-compat`](crates/windivert-compat) | The WinDivert-compatible shim (`libavulse_windivert.so` on Linux, `avulse_windivert.dll` on Windows). |
+| [`avulse-cli`](crates/cli) | The `avulse` command: `filter check`, `fmt`, `explain`, `convert`, `eval`, `fields`; `cleanup`. |
 | [`avulse-wasm`](crates/wasm) | The engine compiled to WebAssembly, for the playground. |
-| [`avulse`](crates/avulse) | The handle API (preview): handles, flags, parameters, the packet address, and the platform backends. Linux works at every layer; the other platforms are to come. |
-| `avulse-ebpf` | The Linux kernel side: TC programs, the event programs, filter IR to eBPF, the loader. |
-| `avulse-capi` | The C interface, `libavulse` (preview), with the header `include/avulse.h`. |
-| `avulse-windivert-compat` | Placeholder for the WinDivert-compatible shim (Phase 4). |
-| [`bindings/python`](bindings/python) | The `avulse` PyPI package: a placeholder. |
+| [`drivers/windows`](drivers/windows) | The Windows kernel driver (`avulse.sys`: WFP callouts and NDIS lightweight filter) and driver test tool. |
+| [`drivers/macos`](drivers/macos) | The macOS system extension bundle (`Avulse.app`: Network Extension providers and XPC service). |
+| [`bindings/python`](bindings/python) | The `avulse` PyPI package: a placeholder until Phase 7. |
 
 ## Related projects
 

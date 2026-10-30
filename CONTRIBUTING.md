@@ -24,12 +24,13 @@ CI runs these on Linux, Windows and macOS. Run them before sending a change:
 $ cargo fmt --check
 $ RUSTFLAGS=-D warnings cargo clippy --workspace --all-targets
 $ cargo test --workspace
-$ cargo build -p avulse-proto -p avulse-filter --target thumbv7em-none-eabihf   # no_std
+$ cargo build -p avulse-proto -p avulse-filter -p avulse-abi --target thumbv7em-none-eabihf   # no_std
 $ RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps --all-features
 ```
 
-`avulse-proto` and `avulse-filter` must stay `#![no_std]` and `#![forbid(unsafe_code)]`, with no
-panicking paths in evaluation code, and every public item documented.
+`avulse-proto`, `avulse-filter` and `avulse-abi` must stay `#![no_std]` and
+`#![forbid(unsafe_code)]`, with no panicking paths in evaluation code, and every public item
+documented.
 
 Filter semantics follow Wireshark 4.6+. To compare with `tshark`:
 

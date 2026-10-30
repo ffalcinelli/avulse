@@ -4,11 +4,12 @@
 avulse <COMMAND>
 
 Commands:
-  filter  Work with filters
+  filter   Work with filters
+  cleanup  Remove what dead processes left behind
 ```
 
-Today the CLI only works with filters. Capture and injection commands will come with the
-backends.
+`avulse filter` checks, formats, explains, converts and evaluates filters without privileges.
+`avulse cleanup` removes handles left behind by dead processes on Linux.
 
 ## Exit codes
 
@@ -122,3 +123,10 @@ match
 
 Lists every field: name, type, description and symbolic names. Extensions are marked with `+`.
 `--format markdown` prints the [field reference](fields.md) of this guide.
+
+## `avulse cleanup`
+
+Removes what processes that died without closing their handles left behind, and prints how many
+handles were reaped. On Linux, the TC filters of a dead process stay attached (failing open after
+the heartbeat expires) until another handle opens or `avulse cleanup` runs; it needs `CAP_BPF` and
+`CAP_NET_ADMIN` (or root). On Windows and macOS, it is a no-op.

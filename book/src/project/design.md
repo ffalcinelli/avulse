@@ -21,13 +21,15 @@ macOS.
 
 ```text
 crates/proto            no_std: Ethernet, VLAN, ARP, IPv4/6, TCP, UDP, ICMP/v6; checksums
-crates/filter           filter language: parser → checker → IR → evaluator, bytecode
-crates/ebpf             IR → eBPF code generation; static C programs (TC, cgroup)    prototype
-driver/windows          KMDF driver: WFP callouts + NDIS filter, runs proto+filter    planned
-macos/                  system extension (Network Extension) + XPC client             planned
-crates/avulse           public API, capabilities; platform backends as modules     API done
-crates/capi             C ABI (libavulse)                                             planned
-crates/windivert-compat WinDivert ABI shim                                            planned
+crates/filter           filter language: parser → checker → IR → evaluator, bytecode, WinDivert
+crates/abi              no_std: Address, Flags, Param, Stats, Windows IOCTL & macOS XPC wire ABI
+crates/ebpf             IR → eBPF code generation; static C programs (TC, cgroup)
+drivers/windows         WDM driver (avulse.sys): WFP callouts + NDIS filter, runs proto+filter
+crates/macos-ext        macOS system extension logic (packets, flows, sockets, reflect, XPC)
+drivers/macos           macOS system extension bundle (Avulse.app: NE providers + XPC service)
+crates/avulse           public API, capabilities; Linux, Windows and macOS backends
+crates/capi             C ABI (libavulse, include/avulse.h)
+crates/windivert-compat WinDivert ABI shim (libavulse_windivert.so, avulse_windivert.dll)
 crates/cli              the avulse command
 ```
 
@@ -81,9 +83,9 @@ verifies it once, when the handle opens, before running it on each packet:
 | 1 | `proto` and `filter`: parser, checker, IR, evaluator, bytecode, WinDivert front-end, `tshark` validation, CLI | done |
 | 2 | Linux packet layers: NETWORK, NETWORK_FORWARD, ETHERNET | done |
 | 3 | Linux event layers (FLOW, SOCKET, REFLECT); API 0.x and the C library | done |
-| 4 | WinDivert compatibility shim; pydivert and jdivert suites as conformance tests | in progress |
-| 5 | Windows driver, signed | planned |
-| 6 | macOS system extension, notarized | planned |
+| 4 | WinDivert compatibility shim on Linux; pydivert and jdivert suites as conformance tests | done |
+| 5 | Windows driver (`avulse.sys`), `WinDivert.dll` shim, Driver Verifier & HVCI checks | done (attestation signing in v0.0.1) |
+| 6 | macOS `/dev/bpf` backend and `Avulse.app` system extension | done, awaiting Developer ID signing to run the providers on macOS |
 | 7 | Native Python and Java bindings; 1.0 | planned |
 
 Versions stay 0.0.x while the project is experimental. The first release, 0.0.1, comes after the

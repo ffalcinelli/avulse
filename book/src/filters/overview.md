@@ -53,12 +53,13 @@ tcp.dstport == 80 and tcp.payload[0:4] == "GET "
 
 ## Where filters run
 
-Filters compile to a typed intermediate representation. Today it runs in an interpreter that
-never allocates (except for regular expressions), so that it can run inside a kernel. The planned
-backends will run the same filter:
+Filters compile to a typed intermediate representation, which runs in an interpreter that never
+allocates (except for regular expressions), or compiles further for the kernel backends:
 
-- on Linux, as eBPF generated at runtime, in the kernel;
-- on Windows and macOS, as verified bytecode, in the driver and the system extension.
+- on Linux, as eBPF generated at runtime, in the kernel (with a superset-in-kernel plus user-space
+  fallback);
+- on Windows, as verified bytecode in the driver (`avulse.sys`);
+- on macOS, in the system extension (`Avulse.app`) or in user space.
 
 Regular expressions (`matches`) run in user space only: kernel backends pass the packets that
 need them up to user space, and `avulse filter explain` says so.
