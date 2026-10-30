@@ -6,6 +6,7 @@
 
 import Foundation
 import NetworkExtension
+import Security
 import SystemExtensions
 
 let extensionId = "com.github.ffalcinelli.avulse.spike.filter"
@@ -43,8 +44,32 @@ func timeRequests(_ label: String) {
     print("RESULT curl \(label): \(times.joined(separator: " "))")
 }
 
+/// nehelper does not consider an ad-hoc signed app entitled, and then wants an authorization
+/// for `system.services.networkextension.filtering` (activate.sh sets that right to "allow").
+/// NEVPNManager takes one through `setAuthorization:`; this tries the same on the filter manager.
+func authorize(_ m: NEFilterManager) {
+    let sel = NSSelectorFromString("setAuthorization:")
+    print("RESULT responds-to-setAuthorization \(m.responds(to: sel))")
+    guard m.responds(to: sel) else { return }
+    var auth: AuthorizationRef?
+    let status = "system.services.networkextension.filtering".withCString { name -> OSStatus in
+        var item = AuthorizationItem(name: name, valueLength: 0, value: nil, flags: 0)
+        return withUnsafeMutablePointer(to: &item) { p in
+            var rights = AuthorizationRights(count: 1, items: p)
+            return AuthorizationCreate(&rights, nil, [.extendRights, .preAuthorize], &auth)
+        }
+    }
+    print("RESULT authorization-create \(status)")
+    guard status == errAuthorizationSuccess, let auth = auth else { return }
+    typealias SetAuth = @convention(c) (AnyObject, Selector, AuthorizationRef) -> Void
+    let imp = unsafeBitCast(m.method(for: sel), to: SetAuth.self)
+    imp(m, sel, auth)
+    print("RESULT authorization-set")
+}
+
 func enableFilter() {
     let m = NEFilterManager.shared()
+    authorize(m)
     m.loadFromPreferences { err in
         if let err = err { print("RESULT load-preferences failed: \(err)") }
         let c = NEFilterProviderConfiguration()
