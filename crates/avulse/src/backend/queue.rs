@@ -57,7 +57,10 @@ impl Queue {
     /// The oldest packet that has waited at most `QUEUE_TIME` at `now` (nanoseconds of the
     /// timestamps' clock). Older ones are dropped.
     pub fn pop(&mut self, now: i64) -> Option<Entry> {
-        let max_wait = self.param(Param::QueueTime) as i64 * 1_000_000;
+        // Saturating: `u64::MAX` (the extension tier's local queue) means no limit.
+        let max_wait = i64::try_from(self.param(Param::QueueTime))
+            .unwrap_or(i64::MAX)
+            .saturating_mul(1_000_000);
         while let Some(e) = self.entries.pop_front() {
             self.bytes -= e.data.len() as u64;
             if now - e.addr.timestamp <= max_wait {
@@ -143,6 +146,12 @@ mod tests {
         q.push(queued(0, 1));
         q.set(Param::QueueLength, 2);
         q.push(queued(0, 1));
+        assert_eq!(q.drops, 0);
+
+        // `u64::MAX` everywhere is no limit at all.
+        let mut q = Queue::new([u64::MAX; 3]);
+        q.push(queued(0, 1500));
+        assert_eq!(q.pop(i64::MAX).unwrap().addr.timestamp, 0);
         assert_eq!(q.drops, 0);
     }
 }
