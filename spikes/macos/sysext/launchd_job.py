@@ -2,16 +2,17 @@
 
 activate.sh approves the extension by editing sysextd's database, which skips that step, and
 nesessionmanager finds packet providers through the job's launch event (run 41029887542: "Found
-0 registrations"). The job comes from the database entry's staged bundle; its MachServices and
-LaunchEvents are what the entry's additionalLaunchdPlistEntries archive holds. Run as root:
-launchd_job.py <extension identifier> <NEMachServiceName>.
+0 registrations"). The job comes from the database entry's staged bundle, with the launch event
+of the entry's additionalLaunchdPlistEntries archive; not its MachServices, which the job that
+nesessionmanager then makes to run the provider owns (run 41032129926). Run as root:
+launchd_job.py <extension identifier>.
 """
 
 import plistlib
 import subprocess
 import sys
 
-ext, mach_service = sys.argv[1], sys.argv[2]
+ext = sys.argv[1]
 with open("/Library/SystemExtensions/db.plist", "rb") as f:
     db = plistlib.load(f)
 entry = next(e for e in db["extensions"] if e["identifier"] == ext)
@@ -19,7 +20,6 @@ staged = entry["stagedBundleURL"]["relative"].removeprefix("file://").rstrip("/"
 job = {
     "Label": ext,
     "Program": f"{staged}/Contents/MacOS/{ext}",
-    "MachServices": {mach_service: True},
     "LaunchEvents": {
         "com.apple.networkextension.provider.matching": {
             ext: {

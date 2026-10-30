@@ -42,7 +42,10 @@ for variant in AvulseSpike AvulseSpikePlain; do
             "$here/Filter/FilterPacketProvider.swift" "$here/Filter/main.swift"
         swift_build AvulseSpike "$app/Contents/MacOS/AvulseSpike" SystemExtensions NetworkExtension -- \
             "$here/App/main.swift"
-        codesign --force --sign - --options runtime --entitlements "$here/Filter.entitlements" "$sx"
+        # Without the restricted Network Extension entitlement (Step 32): launchd could not
+        # execute the ad-hoc signed extension that had it (run 41032129926, EACCES), as AMFI
+        # rejects ad-hoc signatures with restricted entitlements.
+        codesign --force --sign - --options runtime --entitlements "$here/Filter.min.entitlements" "$sx"
         codesign --force --sign - --options runtime --entitlements "$here/App.entitlements" "$app"
     else
         cp "$out/AvulseSpike.app/Contents/MacOS/AvulseSpike" "$app/Contents/MacOS/"

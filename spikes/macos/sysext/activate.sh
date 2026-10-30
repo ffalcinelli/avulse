@@ -103,7 +103,7 @@ EOF
         # job sysextd would have made, if it did not.
         emit launchd_before null "$(sudo launchctl print system 2>&1 | grep -i avulse)"
         if ! sudo launchctl print "system/$ext" >/dev/null 2>&1; then
-            emit launchd_job null "$(sudo python3 "$crate/sysext/launchd_job.py" "$ext" group.com.github.ffalcinelli.avulse.spike 2>&1)"
+            emit launchd_job null "$(sudo python3 "$crate/sysext/launchd_job.py" "$ext" 2>&1)"
             emit launchd_after null "$(sudo launchctl print "system/$ext" 2>&1 | head -40)"
         fi
         shot 2-after-db-edit
@@ -164,6 +164,9 @@ $(cat "$log")"
             2>&1 | tail -n 120)"
         # Did launchd start it, and did anything kill it (run 41031016569: nesessionmanager
         # sends the start command, and the provider never checks in)?
+        staged=$(sudo find /Library/SystemExtensions -name "$ext" -path '*MacOS*' 2>/dev/null | head -1)
+        emit staged_binary null "$(sudo ls -le@ "$staged" 2>&1; sudo xattr -l "$staged" 2>&1; \
+            sudo codesign -dvvv --entitlements - "$staged" 2>&1 | head -40)"
         emit launchd_job_after null "$(sudo launchctl print "system/$ext" 2>&1 | grep -E 'state|runs|last exit|reason|pid' )"
         emit spawn.log null "$(with_timeout 60 log show --start "$start" --style compact --info \
             --predicate '(process == "kernel" OR process == "launchd" OR process == "amfid" OR process == "syspolicyd") AND (eventMessage CONTAINS[c] "avulse" OR eventMessage CONTAINS "AMFI")' \
