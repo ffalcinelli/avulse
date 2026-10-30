@@ -162,6 +162,13 @@ $(cat "$log")"
         emit nesessionmanager.log null "$(with_timeout 60 log show --start "$start" --style compact --info \
             --predicate '(process == "nesessionmanager" OR process == "neagent") AND (eventMessage CONTAINS[c] "filter" OR eventMessage CONTAINS[c] "avulse")' \
             2>&1 | tail -n 120)"
+        # Did launchd start it, and did anything kill it (run 41031016569: nesessionmanager
+        # sends the start command, and the provider never checks in)?
+        emit launchd_job_after null "$(sudo launchctl print "system/$ext" 2>&1 | grep -E 'state|runs|last exit|reason|pid' )"
+        emit spawn.log null "$(with_timeout 60 log show --start "$start" --style compact --info \
+            --predicate '(process == "kernel" OR process == "launchd" OR process == "amfid" OR process == "syspolicyd") AND (eventMessage CONTAINS[c] "avulse" OR eventMessage CONTAINS "AMFI")' \
+            2>&1 | tail -n 80)"
+        emit diagnostic_reports null "$(ls -lt /Library/Logs/DiagnosticReports 2>&1 | head -20)"
         emit crashes null "$(ls -l /Library/Logs/DiagnosticReports ~/Library/Logs/DiagnosticReports 2>&1 | grep -i 'avulse' ; \
             for f in /Library/Logs/DiagnosticReports/*avulse* ; do [ -f "$f" ] && head -c 3000 "$f"; done)"
     fi
