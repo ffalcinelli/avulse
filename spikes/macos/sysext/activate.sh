@@ -147,6 +147,17 @@ $(cat "$log")"
         sudo kill "$app" 2>/dev/null
         emit "$variant.run_as_root" null "$(cat "$log.root")"
     fi
+    if [ "$variant" = AvulseSpike ]; then
+        # The provider's own lines, which the general log's tail can cut off.
+        emit provider.log null "$(with_timeout 60 log show --start "$start" --style compact --info \
+            --predicate 'subsystem == "com.github.ffalcinelli.avulse.spike" OR process CONTAINS "avulse.spike.filter"' \
+            2>&1 | head -n 200)"
+        emit nesessionmanager.log null "$(with_timeout 60 log show --start "$start" --style compact --info \
+            --predicate '(process == "nesessionmanager" OR process == "neagent") AND (eventMessage CONTAINS[c] "filter" OR eventMessage CONTAINS[c] "avulse")' \
+            2>&1 | tail -n 120)"
+        emit crashes null "$(ls -l /Library/Logs/DiagnosticReports ~/Library/Logs/DiagnosticReports 2>&1 | grep -i 'avulse' ; \
+            for f in /Library/Logs/DiagnosticReports/*avulse* ; do [ -f "$f" ] && head -c 3000 "$f"; done)"
+    fi
     emit "$variant.state" null "$(with_timeout 20 systemextensionsctl list 2>&1)"
     logs=$(with_timeout 60 log show --start "$start" --style compact --info \
         --predicate 'process == "sysextd" OR process == "amfid" OR process == "nesessionmanager" OR process == "nehelper" OR subsystem == "com.github.ffalcinelli.avulse.spike" OR eventMessage CONTAINS "AvulseSpike" OR eventMessage CONTAINS "avulse"' \
