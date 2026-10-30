@@ -12,8 +12,8 @@ final class Service {
     private let requests = DispatchQueue(label: "avulse.requests", attributes: .concurrent)
 
     func start(name: String) {
-        let listener = xpc_connection_create_mach_service(
-            name, nil, UInt64(XPC_CONNECTION_MAKE_LISTENER))
+        // XPC_CONNECTION_MAKE_LISTENER (1 << 0), which Swift does not import.
+        let listener = xpc_connection_create_mach_service(name, nil, 1)
         xpc_connection_set_event_handler(listener) { peer in
             if xpc_get_type(peer) == XPC_TYPE_CONNECTION {
                 self.accept(peer)
