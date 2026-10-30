@@ -1,8 +1,9 @@
 // The packet filter provider: every packet goes through the Rust bytecode interpreter. A match
 // is delayed and then allowed again from another queue, which is how a diverting handle would
 // hold a packet and give it back unmodified (NEFilterPacketProvider cannot inject new bytes).
-// It logs the first packets it sees (interface, direction, length, leading bytes: do they start
-// with an Ethernet header?) and, every two seconds, how many packets and bytes it handled.
+// It logs the first packets it sees on each interface (direction, length, leading bytes: do they
+// start with an Ethernet header?) and, every two seconds, how many packets and bytes it handled,
+// per interface, and how long delayed packets waited before `allow` returned.
 
 import Foundation
 import Network
@@ -18,15 +19,28 @@ class FilterPacketProvider: NEFilterPacketProvider {
     private var packets = 0
     private var bytes = 0
     private var delayed = 0
+    private var perInterface: [String: Int] = [:]
+    private var delayNanos: UInt64 = 0
     private var timer: DispatchSourceTimer?
 
-    private func count(_ length: Int, delayed d: Bool) -> Int {
+    /// Counts a packet; returns how many the interface has seen, this one included.
+    private func count(_ length: Int, interface: String, delayed d: Bool) -> Int {
         lock.lock()
         defer { lock.unlock() }
         packets += 1
         bytes += length
         if d { delayed += 1 }
-        return packets
+        let n = (perInterface[interface] ?? 0) + 1
+        perInterface[interface] = n
+        return n
+    }
+
+    private func allow(_ packet: NEPacket, since start: UInt64) {
+        allow(packet)
+        let waited = DispatchTime.now().uptimeNanoseconds - start
+        lock.lock()
+        delayNanos += waited
+        lock.unlock()
     }
 
     override func startFilter(completionHandler: @escaping (Error?) -> Void) {
@@ -47,9 +61,9 @@ class FilterPacketProvider: NEFilterPacketProvider {
                     p.baseAddress, p.count, bytes.assumingMemoryBound(to: UInt8.self), length,
                     0, direction == .outbound)
             }
-            let n = self.count(length, delayed: hit == 1)
-            if n <= 30 {
-                let name = String(cString: nw_interface_get_name(interface))
+            let name = String(cString: nw_interface_get_name(interface))
+            let n = self.count(length, interface: name, delayed: hit == 1)
+            if n <= 5 {
                 let kind = nw_interface_get_type(interface).rawValue
                 let head = UnsafeRawBufferPointer(start: bytes, count: min(length, 48))
                     .map { String(format: "%02x", $0) }.joined()
@@ -58,8 +72,9 @@ class FilterPacketProvider: NEFilterPacketProvider {
                 )
             }
             guard hit == 1 else { return .allow }
+            let start = DispatchTime.now().uptimeNanoseconds
             let packet = self.delayCurrentPacket(context)
-            self.queue.async { self.allow(packet) }
+            self.queue.async { self.allow(packet, since: start) }
             return .delay
         }
         let t = DispatchSource.makeTimerSource(queue: queue)
@@ -68,8 +83,12 @@ class FilterPacketProvider: NEFilterPacketProvider {
             guard let self = self else { return }
             self.lock.lock()
             let (p, b, d) = (self.packets, self.bytes, self.delayed)
+            let per = self.perInterface.map { "\($0.key):\($0.value)" }.sorted().joined(separator: ",")
+            let avg = d > 0 ? self.delayNanos / UInt64(d) : 0
             self.lock.unlock()
-            log.notice("AVULSE totals packets=\(p) bytes=\(b) delayed=\(d)")
+            log.notice(
+                "AVULSE totals packets=\(p) bytes=\(b) delayed=\(d) avg_delay_ns=\(avg) per_interface=\(per, privacy: .public)"
+            )
         }
         t.resume()
         timer = t

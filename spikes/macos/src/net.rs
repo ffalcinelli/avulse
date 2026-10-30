@@ -64,6 +64,8 @@ pub struct Bpf {
 
 /// One captured packet.
 pub struct Record {
+    /// The bpf header as read (`hdrlen` bytes).
+    pub hdr: Vec<u8>,
     pub ts: Duration,
     pub caplen: usize,
     pub datalen: usize,
@@ -199,6 +201,7 @@ pub fn parse_records(mut b: &[u8]) -> Vec<Record> {
             break;
         }
         out.push(Record {
+            hdr: b[..hdrlen].to_vec(),
             ts: Duration::new(u64::from(sec), usec.saturating_mul(1000)),
             caplen,
             datalen,

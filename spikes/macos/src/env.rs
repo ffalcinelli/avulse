@@ -96,6 +96,18 @@ pub fn run(r: &mut Report) {
         "sdk",
         format!("echo {sdk}; xcrun --show-sdk-version; swiftc --version").as_str(),
     );
+    record(
+        r,
+        "bpf_h",
+        &format!(
+            "grep -n 'BIOC\\|bpf_hdr_ext\\|BPF_HDR_EXT\\|BPF_D_\\|bh_\\|DLT_NULL\\|DLT_RAW\\|DLT_PKTAP' {sdk}/usr/include/net/bpf.h"
+        ),
+    );
+    record(
+        r,
+        "ipv6_hdrincl",
+        &format!("grep -rn 'HDRINCL' {sdk}/usr/include/netinet6 {sdk}/usr/include/netinet"),
+    );
     let ne = format!("{sdk}/System/Library/Frameworks/NetworkExtension.framework/Headers");
     for h in [
         "NEFilterPacketProvider.h",

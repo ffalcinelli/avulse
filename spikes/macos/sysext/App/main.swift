@@ -1,6 +1,8 @@
 // The host app: checks that the Rust library runs inside a Swift process, asks for the system
 // extension to be activated, and, if that works, enables it as the packet filter and times a
-// few HTTPS requests with and without it. Prints `RESULT <outcome>` lines.
+// few HTTPS requests with and without it, plus pings on lo0 and the feth pair so that the
+// provider logs which interfaces it sees. Prints `RESULT <outcome>` lines. activate.sh approves
+// the extension and the filter while this waits (up to five minutes).
 
 import Foundation
 import NetworkExtension
@@ -60,6 +62,15 @@ func enableFilter() {
             print("RESULT filter-enabled")
             DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
                 timeRequests("with the filter")
+                for host in ["127.0.0.1", "10.77.1.2"] {
+                    let p = Process()
+                    p.executableURL = URL(fileURLWithPath: "/sbin/ping")
+                    p.arguments = ["-c", "3", "-t", "4", host]
+                    try? p.run()
+                    p.waitUntilExit()
+                }
+                // Let the provider log its totals.
+                Thread.sleep(forTimeInterval: 3)
                 m.isEnabled = false
                 m.saveToPreferences { _ in exit(0) }
             }
@@ -104,7 +115,7 @@ let request = OSSystemExtensionRequest.activationRequest(
     forExtensionWithIdentifier: extensionId, queue: .main)
 request.delegate = delegate
 OSSystemExtensionManager.shared.submitRequest(request)
-DispatchQueue.main.asyncAfter(deadline: .now() + 45) {
+DispatchQueue.main.asyncAfter(deadline: .now() + 300) {
     print("RESULT timeout")
     exit(4)
 }

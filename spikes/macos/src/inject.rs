@@ -16,8 +16,8 @@ use crate::net::*;
 use crate::report::Report;
 
 const SEC: Duration = Duration::from_secs(1);
-const UTUN_LOCAL: [u8; 4] = [10, 77, 9, 1];
-const UTUN_PEER: [u8; 4] = [10, 77, 9, 2];
+pub const UTUN_LOCAL: [u8; 4] = [10, 77, 9, 1];
+pub const UTUN_PEER: [u8; 4] = [10, 77, 9, 2];
 /// An address that is not on any local subnet (TEST-NET-3 would do too, but this one is routed).
 const FAR: [u8; 4] = [93, 184, 216, 34];
 
@@ -138,7 +138,7 @@ const SYSPROTO_CONTROL: i32 = 2;
 const UTUN_OPT_IFNAME: i32 = 2;
 
 /// Opens a new `utunN` and returns it with its name.
-fn open_utun() -> io::Result<(OwnedFd, String)> {
+pub fn open_utun() -> io::Result<(OwnedFd, String)> {
     // SAFETY: kernel-control socket calls with correctly sized structs.
     unsafe {
         let raw = libc::socket(AF_SYSTEM, libc::SOCK_DGRAM, SYSPROTO_CONTROL);
