@@ -2,7 +2,8 @@
 
 > **Preview.** Linux and Windows have backends for every layer: the packet layers (`Network`,
 > `NetworkForward` and `Ethernet`) and the event layers (`Flow`, `Socket` and `Reflect`). macOS
-> sniffs and sends at `Network` and `Ethernet`, until its system extension exists. Elsewhere,
+> sniffs and sends at `Network` and `Ethernet` without the system extension, and supports the
+> packet and event layers with it (`Avulse.app`, awaiting Developer ID signing). Elsewhere,
 > `Handle::open` returns `Error::Unsupported`. The API is experimental (0.0.x) and may still
 > change.
 

@@ -42,8 +42,8 @@ use crate::meta::Layer;
 /// WinDivert's longest filter, in tests.
 const TESTS_MAX: usize = 256;
 
-/// Compiles a WinDivert filter for `layer` into a simplified IR test.
-pub(crate) fn compile(src: &str, layer: Layer) -> Result<ir::Test, Diagnostic> {
+/// Parses a WinDivert filter for `layer` and checks the layer and test-count limits.
+fn parse_checked(src: &str, layer: Layer) -> Result<parse::Expr, Diagnostic> {
     if layer == Layer::Ethernet {
         return Err(Diagnostic::error(
             Span::new(0, 0),
@@ -57,16 +57,20 @@ pub(crate) fn compile(src: &str, layer: Layer) -> Result<ir::Test, Diagnostic> {
                 .help(format!("WinDivert accepts at most {TESTS_MAX} tests")),
         );
     }
+    Ok(e)
+}
+
+/// Compiles a WinDivert filter for `layer` into a simplified IR test.
+pub(crate) fn compile(src: &str, layer: Layer) -> Result<ir::Test, Diagnostic> {
+    let e = parse_checked(src, layer)?;
     Ok(ir::simplify(lower::expr(&e, layer)))
 }
 
 /// A WinDivert filter for `layer` in canonical WinDivert syntax (`Display` of the parse tree), after
 /// checking that it compiles.
 pub(crate) fn format(src: &str, layer: Layer) -> Result<alloc::string::String, Diagnostic> {
-    compile(src, layer)?;
-    Ok(alloc::string::ToString::to_string(&parse::parse(
-        src, layer,
-    )?))
+    let e = parse_checked(src, layer)?;
+    Ok(alloc::string::ToString::to_string(&e))
 }
 
 fn layer_name(layer: Layer) -> &'static str {

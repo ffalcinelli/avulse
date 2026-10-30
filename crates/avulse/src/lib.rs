@@ -1,11 +1,18 @@
 //! Divert, modify and re-inject network packets on Linux, Windows and macOS.
 //!
-//! **Pre-alpha.** On Linux, handles divert, sniff, drop and send packets at the NETWORK,
-//! NETWORK_FORWARD and ETHERNET layers, with eBPF programs on the TC hooks, and report flows,
-//! socket calls (refusing binds and connects) and other handles at the FLOW, SOCKET and REFLECT
-//! layers. Opening a handle needs `CAP_BPF`, `CAP_NET_ADMIN` and `CAP_NET_RAW` (or root). Other platforms have no backend yet, so
-//! [`Handle::open`] returns [`Error::Unsupported`] there (see the
-//! [implementation plan](https://github.com/ffalcinelli/avulse/blob/main/docs/implementation-plan.md)).
+//! **Pre-alpha.**
+//! - On **Linux**, handles divert, sniff, drop and send packets at the `NETWORK`,
+//!   `NETWORK_FORWARD` and `ETHERNET` layers with eBPF programs on the TC hooks, and report flows,
+//!   socket calls (refusing binds and connects) and other handles at the `FLOW`, `SOCKET` and
+//!   `REFLECT` layers. Opening a handle needs `CAP_BPF`, `CAP_NET_ADMIN` and `CAP_NET_RAW` (or
+//!   root).
+//! - On **Windows**, handles support all six layers through `avulse.sys` (WFP callouts and, when
+//!   installed with `netcfg`, an NDIS lightweight filter for `ETHERNET`), as Administrator.
+//! - On **macOS**, handles sniff and send at `NETWORK` and `ETHERNET` through `/dev/bpf` (as
+//!   root), or support `NETWORK`, `ETHERNET`, `FLOW`, `SOCKET` and `REFLECT` when the `Avulse.app`
+//!   system extension is active.
+//! - On other platforms, [`Handle::open`] returns [`Error::Unsupported`] (see the
+//!   [guide](https://ffalcinelli.github.io/avulse/guide/libraries/platforms.html)).
 //!
 //! The model is WinDivert's, extended. A [`Handle`] is opened at a [`Layer`] with a filter, a
 //! priority and [`Flags`]. It receives the packets or events the filter matches, each with an

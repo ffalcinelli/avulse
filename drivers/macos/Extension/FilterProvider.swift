@@ -37,6 +37,7 @@ class FilterProvider: NEFilterPacketProvider {
     ) {
         log.notice("avulse packet provider stopped: \(reason.rawValue)")
         packetHandler = nil
+        Held.shared.reset()
         completionHandler()
     }
 }

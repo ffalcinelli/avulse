@@ -74,8 +74,8 @@ impl Backend for MacOs {
     }
 
     fn open(&self, spec: &Spec<'_>) -> Result<Box<dyn Opened>> {
-        if extension::capabilities().is_some_and(|c| c.layer(spec.layer).open) {
-            return Ok(Box::new(extension::ExtHandle::open(spec)?));
+        if let Some(res) = extension::ExtHandle::open_if_supported(spec) {
+            return res.map(|h| Box::new(h) as Box<dyn Opened>);
         }
         if !matches!(spec.layer, Layer::Network | Layer::Ethernet) {
             return Err(Error::Unsupported(

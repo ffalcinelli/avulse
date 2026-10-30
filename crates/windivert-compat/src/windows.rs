@@ -173,7 +173,7 @@ unsafe fn bytes_mut<'a>(p: *mut c_void, len: u32) -> &'a mut [u8] {
 unsafe fn put<T>(p: *mut T, v: T) {
     if !p.is_null() {
         // SAFETY: the caller's contract.
-        unsafe { p.write(v) };
+        unsafe { p.write_unaligned(v) };
     }
 }
 
@@ -322,7 +322,7 @@ pub unsafe extern "C" fn WinDivertRecvEx(
         (addrs as u64, 1)
     } else {
         // SAFETY: the caller's contract.
-        (addrs as u64, unsafe { *addr_len } / 80)
+        (addrs as u64, unsafe { addr_len.read_unaligned() } / 80)
     };
     if count == 0 {
         return fail(ERROR_INVALID_PARAMETER);
@@ -483,17 +483,21 @@ pub unsafe extern "C" fn WinDivertSendEx(
             break;
         }
         let p = &all[off..];
-        let len = match p.first().map(|b| b >> 4) {
-            Some(4) if p.len() >= 20 => usize::from(u16::from_be_bytes([p[2], p[3]])),
-            Some(6) if p.len() >= 40 => 40 + usize::from(u16::from_be_bytes([p[4], p[5]])),
+        let (len, min) = match p.first().map(|b| b >> 4) {
+            Some(4) if p.len() >= 20 => (usize::from(u16::from_be_bytes([p[2], p[3]])), 20),
+            Some(6) if p.len() >= 40 => (40 + usize::from(u16::from_be_bytes([p[4], p[5]])), 40),
             _ if i > 0 => break,
             _ => return fail(ERROR_INVALID_PARAMETER),
         };
-        if len == 0 || len > p.len() {
+        if len < min || len > p.len() {
+            if i > 0 {
+                break;
+            }
             return fail(ERROR_INVALID_PARAMETER);
         }
         // SAFETY: the caller's contract: `addr_len` bytes of addresses.
-        if let Err(e) = send_one(&s.handle, &p[..len], unsafe { &*addrs.add(i) }) {
+        let addr = unsafe { addrs.add(i).read_unaligned() };
+        if let Err(e) = send_one(&s.handle, &p[..len], &addr) {
             err = e;
             break;
         }
@@ -613,7 +617,7 @@ pub unsafe extern "C" fn WinDivertGetParam(handle: HANDLE, param: u32, value: *m
         },
     };
     // SAFETY: the caller's contract.
-    unsafe { value.write(v) };
+    unsafe { value.write_unaligned(v) };
     TRUE
 }
 
@@ -727,7 +731,7 @@ pub unsafe extern "C" fn WinDivertHelperParseIPv6Address(s: *const c_char, addr:
                 let v = u128::from(a);
                 for i in 0..4 {
                     // SAFETY: as above.
-                    unsafe { addr.add(i).write((v >> (32 * i)) as u32) };
+                    unsafe { addr.add(i).write_unaligned((v >> (32 * i)) as u32) };
                 }
             }
             TRUE
@@ -787,7 +791,7 @@ pub unsafe extern "C" fn WinDivertHelperFormatIPv6Address(
     }
     // SAFETY: the caller's contract.
     let v = (0..4).fold(0u128, |v, i| {
-        v | u128::from(unsafe { *addr.add(i) }) << (32 * i)
+        v | u128::from(unsafe { addr.add(i).read_unaligned() }) << (32 * i)
     });
     // SAFETY: as above.
     unsafe { write_text(&Ipv6Addr::from(v).to_string(), buf, len) }
@@ -811,9 +815,12 @@ pub unsafe extern "C" fn WinDivertHelperCalcChecksums(
     }
     // SAFETY: the caller's contract.
     let (ok, set) = helpers::calc_checksums(unsafe { bytes_mut(packet, packet_len) }, flags);
-    // SAFETY: valid or NULL, per the contract.
-    if let Some(a) = unsafe { addr.as_mut() } {
+    if !addr.is_null() {
+        // SAFETY: valid, per the contract.
+        let mut a = unsafe { addr.read_unaligned() };
         a.set_checksums(set.ip, set.tcp, set.udp);
+        // SAFETY: valid, per the contract.
+        unsafe { addr.write_unaligned(a) };
     }
     if ok {
         TRUE
@@ -904,8 +911,11 @@ pub unsafe extern "C" fn WinDivertHelperEvalFilter(
     packet_len: u32,
     addr: *const WdAddress,
 ) -> BOOL {
+    if addr.is_null() {
+        return fail(ERROR_INVALID_PARAMETER);
+    }
     // SAFETY: the caller's contract.
-    let (Some(src), Some(addr)) = (unsafe { text(filter) }, unsafe { addr.as_ref() }) else {
+    let (Some(src), addr) = (unsafe { text(filter) }, unsafe { addr.read_unaligned() }) else {
         return fail(ERROR_INVALID_PARAMETER);
     };
     let Ok(addr) = addr.to_avulse() else {
@@ -1038,9 +1048,14 @@ unsafe fn swap_ipv6(inp: *const u32, out: *mut u32) {
     }
     // SAFETY: the caller's contract; read everything before writing, for `inp == out`.
     unsafe {
-        let w = [*inp, *inp.add(1), *inp.add(2), *inp.add(3)];
+        let w = [
+            inp.read_unaligned(),
+            inp.add(1).read_unaligned(),
+            inp.add(2).read_unaligned(),
+            inp.add(3).read_unaligned(),
+        ];
         for i in 0..4 {
-            out.add(i).write(w[3 - i].swap_bytes());
+            out.add(i).write_unaligned(w[3 - i].swap_bytes());
         }
     }
 }

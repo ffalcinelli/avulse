@@ -9,7 +9,7 @@
 #   python3 -m http.server -d target/site
 set -euo pipefail
 cd "$(dirname "$0")/.."
-OUT="$PWD/target/site"
+OUT="${1:-$PWD/target/site}"
 
 rm -rf "$OUT"
 mkdir -p "$OUT/api"
@@ -21,8 +21,8 @@ find "$OUT/pkg" -type f ! -name '*.js' ! -name '*.wasm' -delete
 
 mdbook build book --dest-dir "$OUT/guide"
 
-# The CLI and the C ABI crate are left out: their docs are the guide and the C header.
-cargo doc --workspace --no-deps --all-features --exclude avulse-cli --exclude avulse-capi --exclude avulse-wasm
+# The CLI, C ABI, WebAssembly and macOS extension crates are left out: their docs are the guide and the C header.
+cargo doc --workspace --no-deps --all-features --exclude avulse-cli --exclude avulse-capi --exclude avulse-wasm --exclude avulse-macos-ext
 cp -R target/doc "$OUT/api/rust"
 cat >"$OUT/api/rust/index.html" <<'HTML'
 <!doctype html>
@@ -44,22 +44,29 @@ cat >"$OUT/api/rust/index.html" <<'HTML'
         yet; see <a href="../../guide/libraries/rust.html">Rust crates</a> in the guide to use
         them from Git.</p>
       <div class="cards docs">
+        <a class="card link" href="avulse/">
+          <h3>avulse</h3>
+          <p>The handle API: handles, flags, parameters, the packet address, and the Linux, Windows
+            and macOS backends.</p>
+        </a>
         <a class="card link" href="avulse_proto/">
           <h3>avulse_proto</h3>
           <p>Zero-copy packet parsing (Ethernet, VLAN, ARP, IPv4/6, TCP, UDP, ICMP) and checksums.</p>
         </a>
         <a class="card link" href="avulse_filter/">
           <h3>avulse_filter</h3>
-          <p>The filter language: parser, type checker, IR and evaluator.</p>
+          <p>The filter language: parser, type checker, IR, evaluator, bytecode and WinDivert
+            front-end.</p>
         </a>
-        <a class="card link" href="avulse/">
-          <h3>avulse</h3>
-          <p>The handle API (preview): handles, flags, parameters and the packet address. No
-            backend yet.</p>
+        <a class="card link" href="avulse_abi/">
+          <h3>avulse_abi</h3>
+          <p>Shared ABI types (<code>Address</code>, <code>Flags</code>, <code>Param</code>,
+            <code>Stats</code>) and wire encodings.</p>
         </a>
       </div>
-      <p class="note"><code>avulse_ebpf</code> is a prototype of the Linux in-kernel filter;
-        <code>avulse_windivert_compat</code> is a placeholder.</p>
+      <p class="note"><code>avulse_ebpf</code> is the Linux kernel side (TC and event programs,
+        eBPF codegen and loader); <code>avulse_windivert_compat</code> is the WinDivert-compatible
+        shim.</p>
     </div>
   </main>
 </body>

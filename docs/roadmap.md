@@ -56,18 +56,20 @@ set of semantics and one fuzz target.
 ```
 avulse/                    (Cargo workspace)
 ├─ crates/proto            no_std: Ethernet, 802.1Q/QinQ, ARP, IPv4/6 (+ext hdrs, frags), TCP, UDP, ICMP/v6; checksums
-├─ crates/filter           parser (std) → typed AST → IR → optimizer → bytecode + verifier + interpreter (no_std)
+├─ crates/filter           parser → typed AST → IR → optimizer → bytecode + verifier + interpreter (no_std)
 │                          + `windivert` front-end (old syntax → same IR)
+├─ crates/abi              no_std: Address, Flags, Param, Stats, Windows IOCTL and macOS XPC wire encodings
 ├─ crates/ebpf             IR → eBPF codegen; static C programs (TC parser/dispatch, cgroup/sockops events)
-├─ driver/windows          KMDF driver (windows-drivers-rs): WFP callouts + NDIS LWF, uses proto+filter
-├─ macos/                  system extension (Swift NE providers ↔ Rust staticlib) + XPC client backend
+├─ drivers/windows         WDM driver (windows-drivers-rs): WFP callouts + NDIS LWF, uses proto+filter+abi
+├─ crates/macos-ext        macOS system extension logic (Rust staticlib: packet chain, flow/socket/reflect, XPC)
+├─ drivers/macos           system extension bundle (Swift NE providers ↔ crates/macos-ext)
 ├─ crates/avulse           public Rust API, capability query, and the backends as modules:
 │                            backend/linux (aya loader, TC clsact attach, ringbuf, injection,
 │                            registry/heartbeat, events), backend/windows (IOCTL/overlapped I/O
-│                            to the driver), backend/macos (XPC client)
-├─ crates/capi             C ABI (cbindgen) → libavulse
+│                            to the driver), backend/macos (/dev/bpf + XPC client)
+├─ crates/capi             C ABI (include/avulse.h) → libavulse
 ├─ crates/windivert-compat WinDivert ABI shim (WinDivertOpen/Recv/Send…, 80-byte WINDIVERT_ADDRESS)
-└─ crates/cli              capture / inject / `filter check|explain|fmt|test`
+└─ crates/cli              cleanup / `filter check|explain|fmt|convert|eval|fields`
 ```
 
 ### Public model, a superset of WinDivert

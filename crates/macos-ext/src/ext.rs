@@ -668,10 +668,21 @@ impl State {
         after: Option<Key>,
         note: Option<i16>,
     ) -> Outcome {
-        let order = self.order.clone();
+        struct Parsed<'a> {
+            data: &'a [u8],
+            packet: Packet<'a>,
+            valid: checksum::Updated,
+            vlan: Option<u16>,
+            hash: u64,
+        }
+
         let (l2, ip) = split(p.data, link);
+        let ipv6 = ip.and_then(|ip| ip.first()).is_some_and(|v| v >> 4 == 6);
         let now = now_ns();
-        for key in order {
+        let mut parsed: [Option<Parsed<'_>>; 2] = [None, None];
+        let held_full = self.held.len() >= HELD_MAX;
+        for i in 0..self.order.len() {
+            let key = self.order[i];
             if after.is_some_and(|a| key <= a) {
                 continue;
             }
@@ -684,24 +695,33 @@ impl State {
             if h.shut_recv || (!h.interfaces.is_empty() && !h.interfaces.contains(&p.ifindex)) {
                 continue;
             }
-            let Some(data) = view(p.data, link, h.layer) else {
-                continue;
+            let eth_layer = h.layer == Layer::Ethernet;
+            let slot = usize::from(eth_layer);
+            let info = match &parsed[slot] {
+                Some(info) => info,
+                None => {
+                    let Some(data) = view(p.data, link, h.layer) else {
+                        continue;
+                    };
+                    let packet_link = if eth_layer { Link::Ethernet } else { Link::Ip };
+                    let header = if eth_layer { data } else { l2 };
+                    let vlan = match header.get(12..16) {
+                        Some(t) if matches!(t[..2], [0x81, 0x00] | [0x88, 0xa8] | [0x91, 0x00]) => {
+                            Some(u16::from_be_bytes([t[2], t[3]]))
+                        }
+                        _ => None,
+                    };
+                    parsed[slot].insert(Parsed {
+                        data,
+                        packet: Packet::parse(data, packet_link),
+                        valid: checksum::verify(data, packet_link),
+                        vlan,
+                        hash: hash(data),
+                    })
+                }
             };
             let sniff = h.flags.contains(Flags::SNIFF);
             let drop = h.flags.contains(Flags::DROP);
-            let packet_link = if h.layer == Layer::Ethernet {
-                Link::Ethernet
-            } else {
-                Link::Ip
-            };
-            let valid = checksum::verify(data, packet_link);
-            let header = if h.layer == Layer::Ethernet { data } else { l2 };
-            let vlan = match header.get(12..16) {
-                Some(t) if matches!(t[..2], [0x81, 0x00] | [0x88, 0xa8] | [0x91, 0x00]) => {
-                    Some(u16::from_be_bytes([t[2], t[3]]))
-                }
-                _ => None,
-            };
             let mut addr = Address::new(h.layer);
             addr.timestamp = now;
             addr.event = Event::Packet;
@@ -709,45 +729,40 @@ impl State {
             addr.loopback = p.loopback;
             addr.impostor = note.is_some();
             addr.sniffed = sniff;
-            addr.ipv6 = ip.and_then(|ip| ip.first()).is_some_and(|v| v >> 4 == 6);
-            addr.ip_checksum = valid.ipv4;
-            addr.tcp_checksum = valid.tcp;
-            addr.udp_checksum = valid.udp;
+            addr.ipv6 = ipv6;
+            addr.ip_checksum = info.valid.ipv4;
+            addr.tcp_checksum = info.valid.tcp;
+            addr.udp_checksum = info.valid.udp;
             addr.if_idx = p.ifindex;
-            addr.vlan = vlan.is_some();
-            addr.vlan_tci = vlan.unwrap_or(0);
-            let l2_kept = if h.layer == Layer::Ethernet {
-                &[][..]
-            } else {
-                l2
-            };
+            addr.vlan = info.vlan.is_some();
+            addr.vlan_tci = info.vlan.unwrap_or(0);
+            let l2_kept = if eth_layer { &[][..] } else { l2 };
             if let Some(c) = MacContext::new(p.ifindex, l2_kept, 0) {
                 addr.context = c.encode();
             }
-            let packet = Packet::parse(data, packet_link);
             let mut meta = addr.meta();
             meta.iface = Some(p.ifname);
             meta.priority = key.priority.0;
-            meta.hash = hash(data);
-            if !h.filter.matches(&packet, &meta) {
+            meta.hash = info.hash;
+            if !h.filter.matches(&info.packet, &meta) {
                 continue;
             }
             if drop {
                 h.stats.dropped += 1;
                 return Outcome::Drop;
             }
-            if !h.fits(data.len()) {
+            if !h.fits(info.data.len()) || (!sniff && held_full) {
                 // A full queue lets the packet go on, as a full ring buffer does on Linux.
                 h.stats.ring_full += 1;
                 continue;
             }
             if sniff {
                 h.stats.sniffed += 1;
-                h.push(addr, data.to_vec());
+                h.push(addr, info.data.to_vec());
                 continue;
             }
             h.stats.diverted += 1;
-            return Outcome::Divert(key.id, Box::new(addr), data.to_vec());
+            return Outcome::Divert(key.id, Box::new(addr), info.data.to_vec());
         }
         Outcome::Allow
     }
@@ -799,9 +814,6 @@ impl State {
     }
 
     fn open(&mut self, conn: u64, pid: u32, payload: &[u8]) -> Vec<u8> {
-        if self.held.len() >= HELD_MAX {
-            return response(Status::NoMemory);
-        }
         let Ok(req) = OpenRequest::decode(payload) else {
             return response(Status::Invalid);
         };
@@ -920,7 +932,11 @@ impl State {
         refusable: bool,
     ) -> bool {
         let now = now_ns();
-        for key in self.order.clone() {
+        let ipv6 = !flow.local_addr().is_ipv4() || !flow.remote_addr().is_ipv4();
+        let loopback = flow.local_addr().is_loopback() || flow.remote_addr().is_loopback();
+        let flow_hash = hash(&flow.endpoint_id.to_ne_bytes());
+        for i in 0..self.order.len() {
+            let key = self.order[i];
             let Some(h) = self.handles.get_mut(&key.id) else {
                 continue;
             };
@@ -932,10 +948,13 @@ impl State {
             addr.timestamp = now;
             addr.event = event;
             addr.outbound = outbound;
+            addr.loopback = loopback;
             addr.sniffed = sniff;
+            addr.ipv6 = ipv6;
             addr.flow = *flow;
             let mut meta = addr.meta();
             meta.priority = key.priority.0;
+            meta.hash = flow_hash;
             if !h.filter.matches(&Packet::parse(&[], Link::Ip), &meta) {
                 continue;
             }
@@ -1024,8 +1043,7 @@ impl Handle {
         if self.shut_recv {
             return;
         }
-        let mut meta = addr.meta();
-        meta.priority = self.key.priority.0;
+        let meta = addr.meta();
         if !self.filter.matches(&Packet::parse(&[], Link::Ip), &meta) {
             return;
         }

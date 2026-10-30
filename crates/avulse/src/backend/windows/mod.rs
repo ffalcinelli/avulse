@@ -364,7 +364,10 @@ impl Handle {
         let device = match open_device() {
             Ok(d) => {
                 if !spec.flags.contains(Flags::NO_INSTALL) {
-                    start_driver(spec, false)?;
+                    match start_driver(spec, false) {
+                        Err(Error::Io(e)) if e.kind() == io::ErrorKind::NotFound => {}
+                        r => r?,
+                    }
                 }
                 d
             }

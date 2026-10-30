@@ -16,8 +16,9 @@ $ cd avulse
 $ cargo run -p avulse-cli -- filter check 'tcp.port == 443'
 ```
 
-The CLI works the same on Linux, Windows and macOS, and needs no privileges: today it only works
-with filters. The capture and injection commands will come with the backends.
+`avulse filter` works the same on Linux, Windows and macOS, and needs no privileges. On Linux,
+`avulse cleanup` removes handles left behind by processes that exited without closing them (needs
+root, or `CAP_BPF` and `CAP_NET_ADMIN`).
 
 To try filters without installing anything, use the
 [playground](https://ffalcinelli.github.io/avulse/#playground).

@@ -397,6 +397,10 @@ fn address(bytes: &[u8], module: &Module, outbound: bool, oob: &Oob) -> Address 
         at += 4;
     }
     a.ipv6 = bytes.get(at..at + 2) == Some(&[0x86, 0xdd]);
+    let valid = checksum::verify(bytes, Link::Ethernet);
+    a.ip_checksum = valid.ipv4;
+    a.tcp_checksum = valid.tcp;
+    a.udp_checksum = valid.udp;
     a.context = oob.context(module.if_idx);
     a
 }
@@ -437,6 +441,7 @@ unsafe fn process(
             addr.impostor = impostor;
             let mut m: Meta<'_> = addr.meta();
             m.priority = open.priority;
+            m.hash = frame.hash;
             // Fail open: a frame that could not be evaluated goes on.
             if frame.matches(open.program(), Link::Ethernet, &m) != Some(true) {
                 continue;

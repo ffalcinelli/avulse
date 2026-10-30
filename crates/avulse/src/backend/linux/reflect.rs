@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::os::fd::{AsFd, BorrowedFd};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use avulse_filter::{Event, Filter, Layer};
@@ -23,6 +24,7 @@ pub(super) struct ReflectHandle {
     filter: Filter,
     rx: Rx<Seen>,
     registered: Option<u64>,
+    sniffed: AtomicU64,
 }
 
 /// What a handle has seen of the registry: the timer of its reads, and the live entries.
@@ -93,6 +95,7 @@ impl ReflectHandle {
             filter: spec.filter.clone(),
             rx,
             registered: None,
+            sniffed: AtomicU64::new(0),
         };
         let registry = Registry::lock()?;
         let _ = registry.reap();
@@ -122,8 +125,12 @@ impl ReflectHandle {
             return 0;
         }
         let now = match Registry::lock_existing() {
-            Ok(Some(registry)) => registry.entries().unwrap_or_default(),
-            _ => Vec::new(),
+            Ok(Some(registry)) => match registry.entries() {
+                Ok(entries) => entries,
+                Err(_) => return 0,
+            },
+            Ok(None) => Vec::new(),
+            Err(_) => return 0,
         };
         let live = now.into_iter().filter(|(_, e)| e.alive()).collect();
         let mut events = diff(&mut seen.handles, live, sys::now_ns());
@@ -133,6 +140,7 @@ impl ReflectHandle {
                 .matches(&Packet::parse(&[], Link::Ip), &e.addr.meta())
         });
         let n = events.len();
+        self.sniffed.fetch_add(n as u64, Ordering::Relaxed);
         self.rx.push(events);
         n
     }
@@ -164,9 +172,11 @@ impl Opened for ReflectHandle {
         Ok(())
     }
 
-    /// Only the queue's drops: no program reports to this handle.
+    /// The events matched and the queue's drops: no program reports to this handle.
     fn stats(&self) -> Result<Stats> {
-        Ok(self.rx.stats([0; avulse_ebpf::abi::stat::COUNT]))
+        let mut s = self.rx.stats([0; avulse_ebpf::abi::stat::COUNT]);
+        s.sniffed = self.sniffed.load(Ordering::Relaxed);
+        Ok(s)
     }
 
     fn as_fd(&self) -> BorrowedFd<'_> {

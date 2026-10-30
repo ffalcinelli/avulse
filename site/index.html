@@ -53,8 +53,9 @@
             <code>cargo install --locked --git https://github.com/ffalcinelli/avulse avulse-cli</code>
           </div>
           <p class="note">
-            <strong>Pre-alpha.</strong> The filter language and packet parser work today; packet
-            capture is next. The crates.io and PyPI packages only reserve the name.
+            <strong>Pre-alpha.</strong> The filter engine, the CLI, the Linux, Windows and macOS
+            backends, the C library and the WinDivert shim are implemented; the crates.io and PyPI
+            packages reserve the name until v0.0.1.
           </p>
         </div>
         <figure class="hero-code" aria-label="An example filter">
@@ -166,9 +167,9 @@
           </article>
           <article class="card">
             <h3>Exact in the kernel</h3>
-            <p>On Linux, filters will compile to eBPF at runtime and match in the kernel; on
-              Windows and macOS, to verified bytecode. No more superset matching with a user-space
-              re-check.</p>
+            <p>On Linux, filters compile to eBPF at runtime and match in the kernel; on Windows,
+              to verified bytecode in the driver; on macOS, in the system extension. No more
+              superset-only matching with a user-space re-check.</p>
           </article>
         </div>
       </div>
@@ -181,13 +182,13 @@
           <a href="guide/project/design.html">design chapter</a> and the full
           <a href="https://github.com/ffalcinelli/avulse/blob/main/docs/roadmap.md">roadmap</a>.</p>
         <ol class="phases">
-          <li class="done"><span class="phase">0</span><div><h3>Setup and spikes</h3><p>Workspace, CI, names. eBPF codegen, Rust Windows driver and macOS spikes are pending.</p></div></li>
-          <li class="now"><span class="phase">1</span><div><h3>Parser and filter engine</h3><p>Done: parsing, the language, the evaluator, <code>tshark</code> validation, the CLI. Next: bytecode, the WinDivert front-end.</p></div></li>
-          <li><span class="phase">2</span><div><h3>Linux packet layers</h3><p>NETWORK, NETWORK_FORWARD and ETHERNET through TC eBPF, with exact in-kernel matching.</p></div></li>
-          <li><span class="phase">3</span><div><h3>Linux events, API v0.1</h3><p>FLOW, SOCKET and REFLECT; the first release of the Rust API and C ABI.</p></div></li>
-          <li><span class="phase">4</span><div><h3>WinDivert compatibility</h3><p>The shim, validated by the pydivert and jdivert test suites.</p></div></li>
-          <li><span class="phase">5</span><div><h3>Windows driver</h3><p>WFP callouts and an NDIS filter, signed.</p></div></li>
-          <li><span class="phase">6</span><div><h3>macOS</h3><p>A Network Extension system extension, notarized.</p></div></li>
+          <li class="done"><span class="phase">0</span><div><h3>Setup and spikes</h3><p>Workspace, CI, names, eBPF codegen spike, Rust Windows driver spike, macOS probes.</p></div></li>
+          <li class="done"><span class="phase">1</span><div><h3>Parser and filter engine</h3><p>Parsing, the filter language, bytecode verifier/interpreter, WinDivert front-end, <code>tshark</code> validation, CLI.</p></div></li>
+          <li class="done"><span class="phase">2</span><div><h3>Linux packet layers</h3><p>NETWORK, NETWORK_FORWARD and ETHERNET through TC eBPF, with exact in-kernel matching.</p></div></li>
+          <li class="done"><span class="phase">3</span><div><h3>Linux events, API v0.x</h3><p>FLOW, SOCKET and REFLECT; the Rust API and the C ABI (<code>libavulse</code>).</p></div></li>
+          <li class="done"><span class="phase">4</span><div><h3>WinDivert compatibility</h3><p>The shim, validated by the pydivert and jdivert test suites.</p></div></li>
+          <li class="done"><span class="phase">5</span><div><h3>Windows driver</h3><p>WFP callouts, NDIS lightweight filter and <code>WinDivert.dll</code> drop-in, verified under Driver Verifier.</p></div></li>
+          <li class="now"><span class="phase">6</span><div><h3>macOS</h3><p><code>/dev/bpf</code> capture and the Network Extension system extension (awaiting Developer ID signing).</p></div></li>
           <li><span class="phase">7</span><div><h3>Bindings and 1.0</h3><p>Native Python and Java bindings, benchmarks, a frozen API.</p></div></li>
         </ol>
       </div>
@@ -208,7 +209,8 @@
           </a>
           <a class="card link" href="api/rust/">
             <h3>Rust API</h3>
-            <p>rustdoc for <code>avulse-proto</code> and <code>avulse-filter</code>.</p>
+            <p>rustdoc for <code>avulse</code>, <code>avulse-proto</code>, <code>avulse-filter</code>
+              and <code>avulse-abi</code>.</p>
           </a>
           <a class="card link" href="api/python/">
             <h3>Python</h3>

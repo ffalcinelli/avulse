@@ -69,6 +69,16 @@ fn eval_filter() {
     assert_eq!(eval("icmp", p, null()), EINVAL);
     assert_eq!(eval("icmp", &p[..10], &a), EINVAL);
     assert_eq!(eval("true", &[], &eval_address(0, 2, false)), 1);
+    // Unaligned `WdAddress` pointer (as from a byte buffer in FFI callers).
+    let mut raw = [0u8; 88];
+    // SAFETY: 80 bytes at offset 1.
+    unsafe {
+        raw.as_mut_ptr()
+            .add(1)
+            .cast::<WdAddress>()
+            .write_unaligned(a)
+    };
+    assert_eq!(eval("icmp", p, raw.as_ptr().wrapping_add(1).cast()), 1);
 }
 
 #[test]
@@ -206,6 +216,10 @@ fn handle_arguments() {
         );
         assert_eq!(
             ebpfdivert_send(null_mut(), [0u8].as_ptr().cast(), 1, &mut n, &a),
+            EINVAL
+        );
+        assert_eq!(
+            ebpfdivert_send_ex(null_mut(), [0u8].as_ptr().cast(), 1, &mut n, &a, 0),
             EINVAL
         );
         assert_eq!(ebpfdivert_get_param(null_mut(), 0, &mut v), EINVAL);

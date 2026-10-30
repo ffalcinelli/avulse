@@ -18,7 +18,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use avulse_abi::{Address, Flags};
 use avulse_filter::{Layer, Meta};
-use avulse_proto::Link;
+use avulse_proto::{Link, checksum};
 
 use crate::handle::Open;
 use crate::lock::SpinLock;
@@ -96,6 +96,8 @@ struct Hook {
     /// NETWORK or NETWORK_FORWARD.
     avulse: Layer,
     outbound: bool,
+    /// At `INBOUND_IPPACKET_V*`, the NBL starts after the IP header.
+    retreat_ip: bool,
     ipv6: bool,
     /// Indexes of the interface, sub-interface and flags fields in the incoming values
     /// (`FWPS_FIELD_*`; they differ between the layers).
@@ -109,6 +111,7 @@ const HOOKS: [Hook; 6] = [
         layer: INBOUND_IPPACKET_V4,
         avulse: Layer::Network,
         outbound: false,
+        retreat_ip: true,
         ipv6: false,
         if_idx: 4,
         sub_if_idx: 5,
@@ -118,6 +121,7 @@ const HOOKS: [Hook; 6] = [
         layer: INBOUND_IPPACKET_V6,
         avulse: Layer::Network,
         outbound: false,
+        retreat_ip: true,
         ipv6: true,
         if_idx: 4,
         sub_if_idx: 5,
@@ -127,6 +131,7 @@ const HOOKS: [Hook; 6] = [
         layer: OUTBOUND_IPPACKET_V4,
         avulse: Layer::Network,
         outbound: true,
+        retreat_ip: false,
         ipv6: false,
         if_idx: 4,
         sub_if_idx: 5,
@@ -136,6 +141,7 @@ const HOOKS: [Hook; 6] = [
         layer: OUTBOUND_IPPACKET_V6,
         avulse: Layer::Network,
         outbound: true,
+        retreat_ip: false,
         ipv6: true,
         if_idx: 4,
         sub_if_idx: 5,
@@ -145,7 +151,8 @@ const HOOKS: [Hook; 6] = [
     Hook {
         layer: IPFORWARD_V4,
         avulse: Layer::NetworkForward,
-        outbound: true,
+        outbound: false,
+        retreat_ip: false,
         ipv6: false,
         if_idx: 7,
         sub_if_idx: 8,
@@ -154,7 +161,8 @@ const HOOKS: [Hook; 6] = [
     Hook {
         layer: IPFORWARD_V6,
         avulse: Layer::NetworkForward,
-        outbound: true,
+        outbound: false,
+        retreat_ip: false,
         ipv6: true,
         if_idx: 7,
         sub_if_idx: 8,
@@ -388,11 +396,6 @@ pub unsafe fn attach(open: &Arc<Open>) -> Result<(), sys::NTSTATUS> {
 ///
 /// At PASSIVE_LEVEL.
 pub unsafe fn detach(open: &Open) {
-    let last_flow = {
-        let mut handles = HANDLES.lock();
-        handles.remove(&open.id.load(Ordering::Acquire));
-        open.layer == Layer::Flow && !handles.values().any(|h| h.layer == Layer::Flow)
-    };
     let ids: Vec<u64> = core::mem::take(&mut *open.filters.lock());
     let engine = ENGINE.load(Ordering::Acquire);
     if !engine.is_null() {
@@ -401,6 +404,11 @@ pub unsafe fn detach(open: &Open) {
             let _ = unsafe { sys::FwpmFilterDeleteById0(engine, id) };
         }
     }
+    let last_flow = {
+        let mut handles = HANDLES.lock();
+        handles.remove(&open.id.load(Ordering::Acquire));
+        open.layer == Layer::Flow && !handles.values().any(|h| h.layer == Layer::Flow)
+    };
     if last_flow {
         // No FLOW handle is left to report the end of the flows seen.
         // SAFETY: at PASSIVE_LEVEL.
@@ -532,8 +540,9 @@ unsafe fn classify(
     }
     // SAFETY: as above.
     let nb = unsafe { sys::nbl_first_nb(nbl) };
-    // Inbound, the data starts after the IP header: move back to include it.
-    let back = if hook.outbound {
+    // At the inbound IP packet layers, the data starts after the IP header: move back to include
+    // it.
+    let back = if !hook.retreat_ip {
         0
     } else {
         // SAFETY: WFP passes valid metadata.
@@ -576,6 +585,10 @@ unsafe fn classify(
         _ if drop => open.mutable.lock().stats.dropped += 1,
         eval::Copied::Data(data) => {
             addr.sniffed = sniff;
+            let valid = checksum::verify(&data, Link::Ip);
+            addr.ip_checksum = valid.ipv4;
+            addr.tcp_checksum = valid.tcp;
+            addr.udp_checksum = valid.udp;
             open.deliver(addr, data);
         }
         // Fail open: the packet goes on, uncopied.

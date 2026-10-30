@@ -1024,9 +1024,11 @@ fn byte_len(v: &Value) -> Option<usize> {
             ranges.iter().try_fold(0usize, |total, r| {
                 let n = match r.end {
                     ir::SliceEnd::Len(n) => usize::try_from(n).ok(),
-                    ir::SliceEnd::Inclusive(e) => e
+                    ir::SliceEnd::Inclusive(e) if (r.start >= 0) == (e >= 0) => e
                         .checked_sub(r.start)
-                        .and_then(|d| usize::try_from(d + 1).ok()),
+                        .and_then(|d| d.checked_add(1))
+                        .and_then(|n| usize::try_from(n).ok()),
+                    ir::SliceEnd::Inclusive(_) => None,
                     // `[-n:]` is the last `n` bytes.
                     ir::SliceEnd::Open if r.start < 0 => {
                         usize::try_from(r.start.unsigned_abs()).ok()

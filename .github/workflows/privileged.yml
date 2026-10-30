@@ -20,6 +20,7 @@ on:
       - crates/proto/**
       - crates/abi/**
       - crates/macos-ext/**
+      - crates/windivert-compat/**
       - drivers/macos/**
       - Cargo.lock
       - .github/workflows/privileged.yml
@@ -45,10 +46,10 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ethtool
       - name: Build the tests
         run: |
-          for t in "avulse-ebpf kernel" "avulse capture"; do
+          for t in "avulse-ebpf kernel kernel" "avulse capture capture" "avulse-windivert-compat capture compat-capture"; do
             set -- $t
-            cargo test -p "$1" --test "$2" --no-run 2>&1 | tee "build-$2.log"
-            grep -o "target/debug/deps/$2-[0-9a-f]*" "build-$2.log" | head -n 1 > "$2.bin"
+            cargo test -p "$1" --test "$2" --no-run 2>&1 | tee "build-$3.log"
+            grep -o "target/debug/deps/$2-[0-9a-f]*" "build-$3.log" | head -n 1 > "$3.bin"
           done
       - name: Kernel and runner
         run: |
@@ -62,6 +63,8 @@ jobs:
         run: sudo AVULSE_BPF=1 "$(cat kernel.bin)" --nocapture --test-threads=1
       - name: The Linux backend on real traffic
         run: sudo AVULSE_BPF=1 "$(cat capture.bin)" --nocapture --test-threads=1
+      - name: The WinDivert shim on real traffic
+        run: sudo AVULSE_BPF=1 "$(cat compat-capture.bin)" --nocapture --test-threads=1
 
   macos:
     strategy:

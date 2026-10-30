@@ -384,6 +384,22 @@ fn recalculate_skips_fragments() {
     let mut pkt = ipv4(ip_proto::UDP, 0x2000, &udp(1, 2, &[0; 8]));
     let u = checksum::recalculate(&mut pkt, Link::Ip);
     assert!(u.ipv4 && !u.udp);
+
+    // An IPv6 atomic fragment (offset 0, M=0) still carries the complete L4 segment.
+    let seg = udp(5353, 5353, b"atomic");
+    let mut frag = vec![ip_proto::UDP, 0, 0, 0, 0, 0, 0, 1];
+    frag.extend_from_slice(&seg);
+    let mut v6 = ipv6(ip_proto::IPV6_FRAG, &frag);
+    let u = checksum::recalculate(&mut v6, Link::Ip);
+    assert!(u.udp);
+    assert!(checksum::verify(&v6, Link::Ip).udp);
+
+    // Short or oversized slices passed to `ipv4_header` never panic and cap at IHL.
+    assert_eq!(checksum::ipv4_header(&[]), 0xffff);
+    assert_eq!(
+        checksum::ipv4_header(&pkt[..20]),
+        checksum::ipv4_header(&pkt)
+    );
 }
 
 #[test]

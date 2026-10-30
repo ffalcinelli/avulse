@@ -257,6 +257,23 @@ pub(crate) fn fmt_layers(f: &mut fmt::Formatter<'_>, layers: &[Slice]) -> fmt::R
     write!(f, "]")
 }
 
+/// Writes `s` as a double-quoted string literal with escapes.
+pub(crate) fn fmt_str(f: &mut fmt::Formatter<'_>, s: &[u8]) -> fmt::Result {
+    write!(f, "\"")?;
+    for &c in s {
+        match c {
+            b'"' => write!(f, "\\\"")?,
+            b'\\' => write!(f, "\\\\")?,
+            b'\n' => write!(f, "\\n")?,
+            b'\t' => write!(f, "\\t")?,
+            b'\r' => write!(f, "\\r")?,
+            0x20..=0x7e => write!(f, "{}", c as char)?,
+            _ => write!(f, "\\x{c:02x}")?,
+        }
+    }
+    write!(f, "\"")
+}
+
 impl Expr {
     fn precedence(&self) -> u8 {
         match self {
@@ -391,21 +408,7 @@ impl fmt::Display for Operand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Operand::Word(w, _) => f.write_str(w),
-            Operand::Str(s, _) => {
-                write!(f, "\"")?;
-                for &c in s {
-                    match c {
-                        b'"' => write!(f, "\\\"")?,
-                        b'\\' => write!(f, "\\\\")?,
-                        b'\n' => write!(f, "\\n")?,
-                        b'\t' => write!(f, "\\t")?,
-                        b'\r' => write!(f, "\\r")?,
-                        0x20..=0x7e => write!(f, "{}", c as char)?,
-                        _ => write!(f, "\\x{c:02x}")?,
-                    }
-                }
-                write!(f, "\"")
-            }
+            Operand::Str(s, _) => fmt_str(f, s),
             Operand::Char(c, _) => match c {
                 b'\'' => write!(f, "'\\''"),
                 b'\\' => write!(f, "'\\\\'"),

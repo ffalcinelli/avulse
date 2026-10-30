@@ -157,6 +157,14 @@ fn run(
     Some(call.matched)
 }
 
+/// Deterministic per-packet hash (64-bit FNV-1a), for the `random8`, `random16` and `random32`
+/// fields.
+pub fn hash(data: &[u8]) -> u64 {
+    data.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
 /// Whether `program` matches the packet `bytes` (starting with the header `link` names) with
 /// metadata `meta`. `None` if it could not run: no scratch, or no stack. The packet hooks then let
 /// the packet through (fail open).
@@ -166,7 +174,11 @@ pub fn evaluate(
     link: Link,
     meta: &Meta<'_>,
 ) -> Option<bool> {
-    with_scratch(|scratch| run(program, bytes, link, meta, &raw mut scratch.regs)).flatten()
+    let mut meta = *meta;
+    if meta.hash == 0 && !bytes.is_empty() {
+        meta.hash = hash(bytes);
+    }
+    with_scratch(|scratch| run(program, bytes, link, &meta, &raw mut scratch.regs)).flatten()
 }
 
 /// [`evaluate`] on the data of `nb`, read in place when it is contiguous and through the
@@ -201,7 +213,11 @@ pub unsafe fn evaluate_nb(
         // SAFETY: NDIS returned `len` readable bytes, in the packet or in `copy`, which this
         // closure does not otherwise touch while the slice lives.
         let bytes = unsafe { core::slice::from_raw_parts(p.cast::<u8>(), len) };
-        let matched = run(program, bytes, link, meta, &raw mut scratch.regs)?;
+        let mut meta = *meta;
+        if meta.hash == 0 {
+            meta.hash = hash(bytes);
+        }
+        let matched = run(program, bytes, link, &meta, &raw mut scratch.regs)?;
         let copy = match (matched && keep).then(|| sys::try_copy(bytes)) {
             None => Copied::None,
             Some(Some(data)) => Copied::Data(data),
@@ -226,6 +242,7 @@ pub enum Copied {
 /// evaluate the same bytes in turn.
 pub struct Frame<'a> {
     pub bytes: &'a [u8],
+    pub hash: u64,
     regs: *mut MaybeUninit<Registers<'static>>,
 }
 
@@ -288,6 +305,7 @@ pub unsafe fn with_frame<R>(
         };
         let frame = Frame {
             bytes,
+            hash: hash(bytes),
             regs: &raw mut scratch.regs,
         };
         Some(f(&frame))
