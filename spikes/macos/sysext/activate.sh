@@ -99,6 +99,13 @@ EOF
         sudo launchctl kickstart -k system/com.apple.sysextd 2>&1 || sudo killall -9 sysextd 2>&1; echo "sysextd restarted: $?")"
         sleep 10
         emit after_db_edit null "$(with_timeout 20 systemextensionsctl list 2>&1)"
+        # Approved, but not registered with the Network Extension framework: make the launchd
+        # job sysextd would have made, if it did not.
+        emit launchd_before null "$(sudo launchctl print system 2>&1 | grep -i avulse)"
+        if ! sudo launchctl print "system/$ext" >/dev/null 2>&1; then
+            emit launchd_job null "$(sudo python3 "$crate/sysext/launchd_job.py" "$ext" group.com.github.ffalcinelli.avulse.spike 2>&1)"
+            emit launchd_after null "$(sudo launchctl print "system/$ext" 2>&1 | head -40)"
+        fi
         shot 2-after-db-edit
         # Enabled, but the pending request may never hear of it: a new one completes at once.
         if ! grep -q 'RESULT activated' "$log" &&
