@@ -16,11 +16,16 @@ use crate::{Address, Error, Flags, Param, Result, Shutdown, Stats, Syntax};
 
 /// What a backend gets to open a handle. Without a backend, only the tests' fake one reads it,
 /// and not all of it.
-#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "windows", target_os = "macos")),
+    allow(dead_code)
+)]
 pub(crate) struct Spec<'a> {
     pub filter: &'a Filter,
-    /// The filter as written, and its language: what REFLECT reports.
+    /// The filter as written, and its language: what REFLECT reports (not on macOS yet).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub source: &'a str,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub syntax: Syntax,
     pub layer: Layer,
     pub priority: i16,
@@ -39,6 +44,10 @@ pub(crate) struct Spec<'a> {
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+mod queue;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -90,15 +99,17 @@ pub(crate) fn platform() -> &'static dyn Backend {
     return &linux::Linux;
     #[cfg(target_os = "windows")]
     return &windows::Windows;
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    return &macos::MacOs;
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     return &Unavailable;
 }
 
 /// The backend of platforms that have none yet.
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 struct Unavailable;
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 impl Backend for Unavailable {
     fn capabilities(&self) -> Capabilities {
         Capabilities::NONE
@@ -116,7 +127,10 @@ const ETH_LEN: usize = 14;
 
 /// Where the IP header of `packet` starts, after checking that the packet suits the layer:
 /// `None` for a frame that carries no IP packet (ETHERNET).
-#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "windows", target_os = "macos")),
+    allow(dead_code)
+)]
 pub(crate) fn ip_offset(packet: &[u8], layer: Layer) -> Result<Option<usize>> {
     if layer == Layer::Ethernet {
         if packet.len() < ETH_LEN {
@@ -139,7 +153,10 @@ pub(crate) fn ip_offset(packet: &[u8], layer: Layer) -> Result<Option<usize>> {
 /// What WinDivert does to the packets an application sends with the impostor flag: decrement
 /// the TTL (hop limit), so that two handles that reinject each other's packets cannot loop
 /// forever. `ip` starts with the IP header.
-#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "windows", target_os = "macos")),
+    allow(dead_code)
+)]
 pub(crate) fn decrement_ttl(ip: &mut [u8]) -> Result<()> {
     let at = match ip[0] >> 4 {
         4 => 8,

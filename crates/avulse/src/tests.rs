@@ -450,7 +450,39 @@ fn the_linux_backend() {
 }
 
 #[test]
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(target_os = "macos")]
+fn the_macos_backend() {
+    // Without the system extension: sniffing and sending at NETWORK and ETHERNET.
+    for layer in [Layer::Network, Layer::Ethernet] {
+        let s = capabilities().layer(layer);
+        assert!(
+            s.open && s.inject && !s.divert && !s.drop && !s.modify,
+            "{layer:?}"
+        );
+    }
+    for layer in [
+        Layer::NetworkForward,
+        Layer::Flow,
+        Layer::Socket,
+        Layer::Reflect,
+    ] {
+        assert_eq!(capabilities().layer(layer), LayerSupport::default());
+    }
+    // Refused before any device is opened, so these need no privileges.
+    for flags in [Flags::NONE, Flags::DROP] {
+        assert!(matches!(
+            Handle::open("tcp", Layer::Network, 0, flags),
+            Err(Error::Unsupported(_))
+        ));
+    }
+    assert!(matches!(
+        Handle::open("tcp", Layer::NetworkForward, 0, Flags::SNIFF),
+        Err(Error::Unsupported(_))
+    ));
+}
+
+#[test]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 fn no_backend_yet() {
     for layer in [Layer::Network, Layer::Ethernet, Layer::Flow] {
         assert_eq!(capabilities().layer(layer), LayerSupport::default());

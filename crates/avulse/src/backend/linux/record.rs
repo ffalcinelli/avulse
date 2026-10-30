@@ -7,15 +7,8 @@ use avulse_ebpf::facts::{
 use avulse_filter::{Event, Layer};
 use avulse_proto::{Link, checksum};
 
+pub use crate::backend::queue::Entry;
 use crate::{Address, CONTEXT_LEN, Context};
-
-/// A packet waiting in a handle's queue.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Entry {
-    pub addr: Address,
-    /// From the IP header at the NETWORK layers, from the Ethernet header at ETHERNET.
-    pub data: Vec<u8>,
-}
 
 /// The reinjection context of the Linux backend, in the address's 64 bytes:
 ///

@@ -12,7 +12,6 @@
 
 mod events;
 mod heartbeat;
-mod queue;
 mod record;
 mod reflect;
 mod registry;
@@ -35,10 +34,10 @@ use avulse_filter::{Filter, Layer};
 use avulse_proto::{Link, Packet};
 
 use self::heartbeat::Beat;
-use self::queue::Queue;
 use self::record::Entry;
 use self::registry::Registry;
 use self::send::Tx;
+use super::queue::Queue;
 use super::{Backend, Capabilities, LayerSupport, Opened, Spec};
 use crate::{Address, Error, Flags, Param, Result, Shutdown, Stats};
 

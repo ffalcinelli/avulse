@@ -1,9 +1,11 @@
 name: Privileged
 
-# The tests that need root, on a GitHub Ubuntu runner (passwordless sudo, a 6.x kernel): the BPF
-# programs in the kernel (crates/ebpf/tests/kernel.rs) and the Linux backend on veth pairs and
-# network namespaces (crates/avulse/tests/capture.rs). They do not replace the runs on the
-# Vagrant VMs: the 5.15 verifier is the strict one.
+# The tests that need root, on GitHub's runners (passwordless sudo):
+# - on Ubuntu (a 6.x kernel), the BPF programs in the kernel (crates/ebpf/tests/kernel.rs) and
+#   the Linux backend on veth pairs and network namespaces (crates/avulse/tests/capture.rs). They
+#   do not replace the runs on the Vagrant VMs: the 5.15 verifier is the strict one;
+# - on macOS, the backend without the system extension on a feth pair
+#   (crates/avulse/tests/capture_macos.rs).
 
 on:
   workflow_dispatch:
@@ -55,3 +57,41 @@ jobs:
         run: sudo AVULSE_BPF=1 "$(cat kernel.bin)" --nocapture --test-threads=1
       - name: The Linux backend on real traffic
         run: sudo AVULSE_BPF=1 "$(cat capture.bin)" --nocapture --test-threads=1
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, macos-26-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: stable
+      - name: Build the tests
+        run: |
+          cargo test -p avulse --test capture_macos --no-run 2>&1 | tee build.log
+          grep -o 'target/debug/deps/capture_macos-[0-9a-f]*' build.log | head -n 1 > capture.bin
+      # feth0 and feth1 are peers; feth1 is the host's side, feth0 the wire (see the test).
+      - name: Set up the feth pair
+        run: |
+          sudo ifconfig feth0 create
+          sudo ifconfig feth1 create
+          sudo ifconfig feth0 peer feth1
+          sudo ifconfig feth0 up
+          sudo ifconfig feth1 inet 10.77.1.1/24 up
+          sudo ifconfig feth1 inet6 fd77::1/64
+          sudo arp -s 10.77.1.2 02:00:00:00:00:99
+          sudo ndp -s fd77::2 02:00:00:00:00:99
+          # Duplicate address detection keeps the new IPv6 address tentative for a moment.
+          sleep 3
+          ifconfig feth1
+      - name: The macOS backend on real traffic
+        run: sudo AVULSE_MACOS=1 "$(cat capture.bin)" --nocapture --test-threads=1
+      - name: Clean up
+        if: always()
+        run: |
+          sudo ifconfig feth1 destroy || true
+          sudo ifconfig feth0 destroy || true

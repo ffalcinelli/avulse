@@ -22,6 +22,10 @@ avulse-proto.workspace = true
 avulse-ebpf.workspace = true
 libc = "0.2"
 
+# The macOS backend, without the system extension: bpf devices, kqueue and raw sockets.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 # The Windows backend: the service control manager, the driver's device and overlapped I/O.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = [
