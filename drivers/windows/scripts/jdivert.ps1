@@ -2,7 +2,7 @@
 # their names (WinDivert64.dll, WinDivert64.sys), under Driver Verifier. Run with -Jdk 25 (Panama)
 # or -Jdk 8 (JNA). In jdivert's own windows VM, as pydivert.ps1 says, with jdivert's .avulse
 # folder and C:\jdivert:
-#   vagrant winrm windows -e -c 'powershell -ExecutionPolicy Bypass -File C:\jdivert\.avulse\jdivert.ps1 -Jdk 25'
+#   python3 scripts/vm.py exec windows "powershell -ExecutionPolicy Bypass -File C:\jdivert\.avulse\jdivert.ps1 -Jdk 25"
 
 param([string]$Jdk = "25")
 $Av = "C:\jdivert\.avulse"; $Dst = "C:\local_jdivert"

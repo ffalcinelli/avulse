@@ -6,13 +6,11 @@
 //! evaluator agree on real traffic.
 //!
 //! It needs root and changes the network configuration, so it runs only with `AVULSE_BPF=1`, in
-//! the Vagrant VMs, one test at a time:
+//! Docker (`./scripts/test-docker.sh`) or the QEMU/KVM VMs, one test at a time:
 //!
 //! ```text
-//! cargo test -p avulse --test capture --no-run   # on the host; prints the binary's path
-//! vagrant up default
-//! vagrant ssh default -c "sudo AVULSE_BPF=1 /vagrant/target/debug/deps/capture-… --test-threads=1"
-//! vagrant destroy -f default
+//! ./scripts/test-docker.sh
+//! python3 scripts/vm.py run default   # or `legacy` for kernel 5.15
 //! ```
 
 #![cfg(target_os = "linux")]

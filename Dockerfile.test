@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: GPL-2.0-or-later OR LGPL-3.0-or-later
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ethtool \
+    iptables \
+    iproute2 \
+    iputils-ping \
+    procps \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace

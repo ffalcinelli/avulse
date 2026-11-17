@@ -1,5 +1,5 @@
 # Builds and packages the spike driver (test-signed) in the Windows VM. Run with:
-#   vagrant winrm windows -e -c "C:\avulse\spikes\windows-driver\scripts\build.ps1"
+#   python3 scripts/vm.py exec windows "powershell -ExecutionPolicy Bypass -File C:\avulse\spikes\windows-driver\scripts\build.ps1"
 # The package lands in C:\build\avulse\spikes\windows-driver\target\release\avulse_spike_package.
 
 $ErrorActionPreference = "Stop"

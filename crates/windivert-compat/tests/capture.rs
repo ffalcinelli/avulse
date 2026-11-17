@@ -1,9 +1,9 @@
 //! The `ebpfdivert_*` exports on real traffic over `lo`, called as C would: what pydivert and
-//! jdivert rely on. It needs root, so it runs only with `AVULSE_BPF=1`, in the Vagrant VMs:
+//! jdivert rely on. It needs root, so it runs only with `AVULSE_BPF=1`, in Docker or the QEMU/KVM VMs:
 //!
 //! ```text
-//! cargo test -p avulse-windivert-compat --test capture --no-run   # prints the binary's path
-//! vagrant ssh default -c "sudo AVULSE_BPF=1 /vagrant/target/debug/deps/capture-… --test-threads=1"
+//! ./scripts/test-docker.sh
+//! python3 scripts/vm.py run default
 //! ```
 
 #![cfg(target_os = "linux")]

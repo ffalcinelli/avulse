@@ -1,6 +1,6 @@
 # Builds avulse.sys (test-signed, with its INF and catalog) and the test program in the Windows VM,
 # for x64 and ARM64, and checks both drivers' images for HVCI (check-image.ps1):
-#   vagrant winrm windows -e -c "C:\avulse\drivers\windows\scripts\build.ps1"
+#   python3 scripts/vm.py exec windows "powershell -ExecutionPolicy Bypass -File C:\avulse\drivers\windows\scripts\build.ps1"
 # The x64 driver package lands in C:\build\avulse\drivers\windows\driver\target\release\avulse_package,
 # the ARM64 one in ...\driver\target\aarch64-pc-windows-msvc\release\avulse_package, the test program
 # in C:\build\avulse\drivers\windows\test\target\release. ARM64 is built only: no ARM64 machine runs
