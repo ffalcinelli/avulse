@@ -5,7 +5,7 @@ connection to its end, then answers with the number of bytes it read, in decimal
 Run it on the host, then pass the port to the VM, which reaches the host as 10.0.2.2:
 
     python3 drivers/windows/scripts/tcp-sink.py 9500 &
-    vagrant winrm windows -e -c '$env:AVULSE_TCP_PEER = "10.0.2.2:9500"; C:\\avulse\\drivers\\windows\\scripts\\test.ps1'
+    AVULSE_TCP_PEER=10.0.2.2:9500 python3 scripts/vm.py run windows
 """
 
 import socket

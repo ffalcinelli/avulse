@@ -1,7 +1,7 @@
 # Installs what building a Rust Windows driver needs, without a package manager:
 # Visual Studio 2022 Build Tools (MSVC and the Windows 11 SDK 10.0.26100), the WDK 10.0.26100,
 # LLVM (libclang, for bindgen), Rust (MSVC host) and cargo-wdk. Then turns on test signing, which
-# needs a reboot (`vagrant reload windows`). Safe to run again: installed parts are skipped.
+# needs a reboot (`python3 scripts/vm.py reboot windows`). Safe to run again: installed parts are skipped.
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is very slow with the progress bar
@@ -108,4 +108,4 @@ if (-not (Test-Path "C:\rust\cargo\bin\cargo-wdk.exe")) {
 # Test-signed drivers load only with test signing on, after a reboot. Driver Verifier and crash
 # dumps are drivers/windows/scripts/verifier.ps1's, the VM's next provisioner.
 bcdedit /set testsigning on | Out-Host
-Write-Host "Toolchain ready. Reboot (vagrant reload windows) to turn test signing on."
+Write-Host "Toolchain ready. Reboot (python3 scripts/vm.py reboot windows) to turn test signing on."

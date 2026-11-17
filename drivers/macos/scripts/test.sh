@@ -32,6 +32,8 @@ trap cleanup EXIT
 sudo launchctl bootstrap system "$plist"
 
 cd "$root"
-bin=$(cargo test -p avulse --lib --no-run 2>&1 | grep -o 'target/debug/deps/avulse-[0-9a-f]*' | head -n 1)
-sudo AVULSE_EXTENSION_TEST=1 AVULSE_MACH_SERVICE="$service" "$root/$bin" extension_ \
+bin=$(cargo test -p avulse --lib --no-run --message-format=json \
+    | python3 -c 'import json, sys; print("\n".join(m["executable"] for m in (json.loads(l) for l in sys.stdin if l.startswith("{")) if m.get("reason")=="compiler-artifact" and m.get("profile",{}).get("test") and m.get("executable")))' \
+    | tail -n 1)
+sudo AVULSE_EXTENSION_TEST=1 AVULSE_MACH_SERVICE="$service" "$bin" extension_ \
     --test-threads=1 --nocapture

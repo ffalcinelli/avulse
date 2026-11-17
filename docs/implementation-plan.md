@@ -67,24 +67,20 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
   - The `gh` token has no `workflow` scope, so HTTPS pushes that touch `.github/workflows/` are
     rejected.
   - `gh` is authenticated for API calls (runs, PRs, environments).
-- **Privileged tests run only in Vagrant VMs.** Run one VM at a time and `vagrant destroy -f` it right
-  after, even on failure. Never download big files into `/tmp` (a small tmpfs); use `~/.cache`.
-  - `Vagrantfile` (repo root) has `default` (Ubuntu 24.04, 6.8) and `legacy` (22.04, 5.15), with
-    nothing to provision. Build the test binaries on the host (`cargo test -p avulse-ebpf --test
-    kernel --no-run`, `cargo test -p avulse --test capture --no-run`) and run them in the VM:
-    `vagrant ssh default -c "sudo AVULSE_BPF=1 /vagrant/target/debug/deps/kernel-<hash>
-    --nocapture --test-threads=1"`, and the same for `capture-<hash>` (`--test-threads=1` matters:
-    the capture tests share one veth pair). On 22.04 they print a harmless warning about the weak
-    `GLIBC_2.39` requirement.
-  - The 24.04 box sometimes hangs at boot (guest RCU stalls, `vagrant up` times out waiting for
-    SSH). Destroy it and run `vagrant up` again.
-  - `windows` (Windows 11 24H2) builds and tests the Windows driver: `vagrant up windows && vagrant
-    reload windows` (the provisioning, `spikes/windows-driver/scripts/toolchain.ps1`, downloads
-    several GB and needs the reboot for test signing, Driver Verifier and kernel dumps), then
-    `vagrant winrm windows -e -c "C:\avulse\spikes\windows-driver\scripts\build.ps1"` and
-    `…\test.ps1`. After a crash, the reboot can leave `C:\avulse` unmounted: `vagrant reload
-    windows` mounts it again. Read dumps with the WDK's `kd -z` and frame sizes with `dumpbin
-    /disasm` (commands in the spike note). Give it 6 GB and nothing else running.
+- **Privileged tests run in Docker (`./scripts/test-docker.sh`, host kernel) or QEMU/KVM VMs (`scripts/vm.py`).**
+  Run one VM at a time and `scripts/vm.py destroy` it right after, even on failure. Never download big
+  files into `/tmp` (a small tmpfs); `scripts/vm.py` caches images in `~/.cache/divert-vm`.
+  - `scripts/vm.py` supports `default` (Ubuntu 24.04, 6.8) and `legacy` (22.04, 5.15), with
+    `ethtool` and `iptables` provisioned via cloud-init. `python3 scripts/vm.py run default` (or
+    `legacy`) builds the test binaries on the host, runs them with `AVULSE_BPF=1` and
+    `--test-threads=1` (the capture tests share one veth pair), and destroys the VM on exit. On 22.04
+    they print a harmless warning about the weak `GLIBC_2.39` requirement.
+  - `windows` (Windows 11 24H2) builds and tests the Windows driver: `python3 scripts/vm.py up
+    windows`, provision with `spikes/windows-driver/scripts/toolchain.ps1` and
+    `drivers/windows/scripts/verifier.ps1`, then `python3 scripts/vm.py reboot windows` (for test
+    signing, Driver Verifier and kernel dumps), then `python3 scripts/vm.py run windows`. Read dumps
+    with the WDK's `kd -z` and frame sizes with `dumpbin /disasm` (commands in the spike note). Give
+    it 6 GB and nothing else running.
 - **Fuzzing:** `cargo-fuzz` is installed in `~/.cargo/bin`. Without a nightly toolchain, run it
   with `RUSTC_BOOTSTRAP=1` (Arch's rustc ships the ASan runtime):
   `cd fuzz && RUSTC_BOOTSTRAP=1 cargo fuzz run filter -- -max_total_time=600`. Seed the `filter`
@@ -1606,10 +1602,10 @@ The original plan of the step follows.
 - Build `cargo build --release -p avulse-windivert-compat` on the host and copy the library into
   each binding's synced folder, untracked. The binding VMs are Ubuntu 24.04 (glibc 2.39); build
   in an `ubuntu:24.04` container if the host's library needs newer symbols.
-- pydivert: `vagrant up linux`, then its suite as `scripts/run-tests-linux.sh` runs it, with
-  `PYDIVERT_EBPFDIVERT_LIB` pointing at the library; `vagrant destroy -f linux`.
-- jdivert: `vagrant up linux`, `sudo mvn clean verify -Debpfdivert.skipDownload=true
-  -Debpfdivert.local=…` on JDK 25 (Panama) and JDK 8 (JNA); `vagrant destroy -f linux`.
+- pydivert: `./scripts/test-docker.sh` or `python3 scripts/vm.py run linux`, with
+  `PYDIVERT_EBPFDIVERT_LIB` pointing at the library.
+- jdivert: `./scripts/test-docker.sh` or `python3 scripts/vm.py run linux -Debpfdivert.skipDownload=true
+  -Debpfdivert.local=…` on JDK 25 (Panama) and JDK 8 (JNA).
 - One VM at a time. Then avulse's own privileged suites on `default` and `legacy` again.
 
 **Acceptance.** Both suites pass unchanged. The guide has a page on the shim

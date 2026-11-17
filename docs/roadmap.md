@@ -385,8 +385,9 @@ comes after Phases 5 and 6, so that it covers Linux, Windows and macOS: the crat
   - `cargo fuzz` (parser, verifier, interpreter differential);
   - the WinDivert vector conformance tests;
   - the eBPF codegen tests through `BPF_PROG_TEST_RUN`. These need root, so they run on a VM.
-- **Linux privileged.** Vagrant `default` (6.8) and `legacy` (5.15) VMs, one at a time, `vagrant destroy -f` right
-  after. Run the integration scenarios from ebpfdivert, plus the ETHERNET/VLAN/ARP tests.
+- **Linux privileged.** Docker (`./scripts/test-docker.sh`) on the host kernel, and QEMU/KVM `default`
+  (6.8) and `legacy` (5.15) VMs via `scripts/vm.py`, one at a time, destroyed right after. Run the
+  integration scenarios from ebpfdivert, plus the ETHERNET/VLAN/ARP tests.
 - **Conformance.** The pydivert and jdivert suites through the compat shim, on Linux (Phase 4) and Windows
   (Phase 5).
 - **Windows.** VM in test-signing mode with Driver Verifier enabled. HLK before 1.0.

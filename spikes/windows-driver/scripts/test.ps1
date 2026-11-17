@@ -1,6 +1,6 @@
 # Installs the spike driver, checks that it blocks DNS (WFP) and counts frames (NDIS), then
 # uninstalls it and prints the counters it saved. Run after build.ps1, with test signing on:
-#   vagrant winrm windows -e -c "C:\avulse\spikes\windows-driver\scripts\test.ps1"
+#   python3 scripts/vm.py exec windows "powershell -ExecutionPolicy Bypass -File C:\avulse\spikes\windows-driver\scripts\test.ps1"
 
 $ErrorActionPreference = "Stop"
 $pkg = "C:\build\avulse\spikes\windows-driver\target\release\avulse_spike_package"

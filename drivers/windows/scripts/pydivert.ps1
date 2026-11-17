@@ -2,13 +2,11 @@
 # in place of WinDivert's two files, under their names, under Driver Verifier. In pydivert's own
 # windows VM: copy WinDivert64.dll (avulse_windivert.dll), avulse.sys, WDRLocalTestCert.cer and
 # this folder's verifier.ps1 and pydivert.ps1 into pydivert's .avulse folder (untracked), then
-#   vagrant up windows
-#   vagrant winrm windows -c 'bcdedit /set testsigning on; powershell -ExecutionPolicy Bypass -File C:\pydivert\.avulse\verifier.ps1; exit 0'
-#   vagrant reload windows
-# (If `vagrant up` timed out connecting, the folder is not mounted and verifier.ps1 is not found:
-# `vagrant reload windows` first. The run fails if Verifier did not watch the driver.)
-#   vagrant winrm windows -e -c 'powershell -ExecutionPolicy Bypass -File C:\pydivert\.avulse\pydivert.ps1'
-#   vagrant destroy -f windows; rm -r .avulse
+#   python3 scripts/vm.py up windows
+#   python3 scripts/vm.py exec windows 'powershell -Command "bcdedit /set testsigning on; powershell -ExecutionPolicy Bypass -File C:\pydivert\.avulse\verifier.ps1; exit 0"'
+#   python3 scripts/vm.py reboot windows
+#   python3 scripts/vm.py exec windows "powershell -ExecutionPolicy Bypass -File C:\pydivert\.avulse\pydivert.ps1"
+#   python3 scripts/vm.py destroy windows; rm -r .avulse
 
 $Src = "C:\pydivert"; $Dst = "C:\pydivert_test"; $Av = "C:\pydivert\.avulse"
 $start = Get-Date
@@ -22,7 +20,12 @@ Set-Location $Dst
 $env:UV_PROJECT_ENVIRONMENT = "C:\pydivert_venv"
 # The newest CPython may have no wheels yet for some test dependencies (pyyaml for 3.15).
 $env:UV_PYTHON = "3.13"
-$env:Path = "C:\Users\vagrant\.local\bin;$env:Path"
+foreach ($uvPath in @("$env:USERPROFILE\.local\bin", "$env:USERPROFILE\.cargo\bin")) {
+    if (Test-Path "$uvPath\uv.exe") {
+        $env:Path = "$uvPath;$env:Path"
+        break
+    }
+}
 uv sync --extra test
 if ($LASTEXITCODE -ne 0) { throw "uv sync failed" }
 uv run python scripts/fetch_binaries.py

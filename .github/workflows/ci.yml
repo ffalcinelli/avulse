@@ -69,7 +69,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
-          toolchain: stable
+          # cargo-wdk@0.1.1 expects Cargo's pre-1.100 `deps/` artifact layout.
+          toolchain: 1.99.1
           components: clippy
           targets: ${{ matrix.target }}
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28

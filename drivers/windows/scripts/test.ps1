@@ -4,9 +4,9 @@
 # driver as a lightweight filter with its INF (netcfg) and runs the backend's tests again, with
 # the ETHERNET layer; and checks that no crash dump was written. Run after build.ps1, with test
 # signing on:
-#   vagrant winrm windows -e -c "C:\avulse\drivers\windows\scripts\test.ps1"
+#   python3 scripts/vm.py exec windows "powershell -ExecutionPolicy Bypass -File C:\avulse\drivers\windows\scripts\test.ps1"
 # With a TCP sink on the host (tcp-sink.py), set AVULSE_TCP_PEER first for the large-send test:
-#   vagrant winrm windows -e -c '$env:AVULSE_TCP_PEER = "10.0.2.2:9500"; C:\avulse\drivers\windows\scripts\test.ps1'
+#   AVULSE_TCP_PEER=10.0.2.2:9500 python3 scripts/vm.py run windows
 
 $ErrorActionPreference = "Stop"
 # Pick up the PATH and variables the toolchain script set (cargo, for the backend's tests).

@@ -3,7 +3,6 @@
 /bindings/python/dist
 __pycache__/
 /book/book
-/.vagrant
 /spikes/*/target
 /drivers/*/*/target
 

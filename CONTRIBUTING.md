@@ -14,7 +14,8 @@ You need a stable Rust toolchain (edition 2024). Optional tools:
 
 On Linux, building `avulse-ebpf` also needs `clang` (with the BPF target, as distributions ship
 it) and the kernel UAPI headers (`linux-libc-dev` on Debian and Ubuntu). Tests that load BPF
-programs need root, so they are opt-in (`AVULSE_BPF=1`) and meant for a VM: see `Vagrantfile`.
+programs need root, so they are opt-in (`AVULSE_BPF=1`) and run in Docker (`./scripts/test-docker.sh`)
+or the QEMU/KVM VMs (`python3 scripts/vm.py run default` / `legacy`).
 
 ## Checks
 

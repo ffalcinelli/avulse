@@ -1,8 +1,8 @@
 # Turns on Driver Verifier for avulse's driver under each name it is installed as (avulse.sys,
 # WinDivert64.sys for the WinDivert shim, avulse_spike.sys for Spike B), and full kernel memory
-# dumps. Both take effect after a reboot. The Vagrantfile runs it when provisioning the windows
-# VM; to test the bindings under Verifier, copy it into their VMs and run it there too:
-#   powershell -ExecutionPolicy Bypass -File verifier.ps1; then reboot
+# dumps. Both take effect after a reboot. Run it when provisioning the windows VM;
+# to test the bindings under Verifier, copy it into their VMs and run it there too:
+#   powershell -ExecutionPolicy Bypass -File verifier.ps1; then reboot (`python3 scripts/vm.py reboot windows`)
 # test.ps1 checks that these flags are on (Driver Verifier's "Level") before it runs a suite.
 
 $ErrorActionPreference = "Stop"

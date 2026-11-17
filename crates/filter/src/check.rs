@@ -754,19 +754,31 @@ impl<'a> Checker<'a> {
             .help("e.g. `tcp.payload matches \"^GET \"`"));
         };
         let pattern = regex::pattern(bytes);
-        let re = regex::compile(&pattern).map_err(|why| {
-            Diagnostic::error(*span, format!("invalid regular expression: {why}")).help(
-                "patterns use Rust's regex syntax: no look-around and no backreferences, unlike \
-                 Wireshark's PCRE2",
-            )
-        })?;
-        self.regexes.push(re);
-        Ok(Test::Matches {
-            lhs: l.value,
-            pattern,
-            index: self.regexes.len() - 1,
-            quant: quant.unwrap_or(Quant::Any),
-        })
+        match regex::compile(&pattern) {
+            Ok(re) => {
+                #[cfg(feature = "regex")]
+                {
+                    self.regexes.push(re);
+                    Ok(Test::Matches {
+                        lhs: l.value,
+                        pattern,
+                        index: self.regexes.len() - 1,
+                        quant: quant.unwrap_or(Quant::Any),
+                    })
+                }
+                #[cfg(not(feature = "regex"))]
+                {
+                    let _ = (l, quant);
+                    match re {}
+                }
+            }
+            Err(why) => Err(
+                Diagnostic::error(*span, format!("invalid regular expression: {why}")).help(
+                    "patterns use Rust's regex syntax: no look-around and no backreferences, unlike \
+                     Wireshark's PCRE2",
+                ),
+            ),
+        }
     }
 
     fn comparison(
