@@ -29,9 +29,17 @@ const EXPORTS: &[&str] = &[
     "ebpfdivert_version",
 ];
 
-/// `target/<profile>`, above this test's `deps`.
+/// `target/<profile>` (handling both `deps/` and `build/<pkg>/<hash>/out/`).
 fn target_dir() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
+    for ancestor in exe.ancestors().skip(1) {
+        if matches!(
+            ancestor.file_name().and_then(|n| n.to_str()),
+            Some("debug" | "release")
+        ) {
+            return ancestor.to_path_buf();
+        }
+    }
     exe.parent().unwrap().parent().unwrap().to_path_buf()
 }
 

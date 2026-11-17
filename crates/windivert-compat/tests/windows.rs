@@ -95,12 +95,17 @@ fn exports() {
         return;
     }
     // Tests do not build the DLL: build it, then look each name up.
-    let dir = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+    let exe = std::env::current_exe().unwrap();
+    let dir = exe
+        .ancestors()
+        .skip(1)
+        .find(|a| {
+            matches!(
+                a.file_name().and_then(|n| n.to_str()),
+                Some("debug" | "release")
+            )
+        })
+        .unwrap_or_else(|| exe.parent().unwrap().parent().unwrap())
         .to_path_buf();
     let mut build = Command::new(env!("CARGO"));
     build.args(["build", "-p", "avulse-windivert-compat"]);
