@@ -10,7 +10,7 @@ $start = Get-Date
 certutil -f -addstore Root "$Av\WDRLocalTestCert.cer" | Out-Null
 certutil -f -addstore TrustedPublisher "$Av\WDRLocalTestCert.cer" | Out-Null
 verifier /querysettings | Out-Host
-robocopy C:\jdivert $Dst /MIR /XD .git .vagrant target .local .avulse /R:1 /W:1 /NFL /NDL /NJH /NJS
+robocopy C:\jdivert $Dst /MIR /XD .git target .local .avulse /R:1 /W:1 /NFL /NDL /NJH /NJS
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed: $LASTEXITCODE" }
 Set-Location $Dst
 $env:JAVA_HOME = if ($Jdk -eq "8") { "C:\tools\jdk8" } else { "C:\tools\jdk25" }

@@ -14,7 +14,7 @@ certutil -f -addstore Root "$Av\WDRLocalTestCert.cer" | Out-Null
 certutil -f -addstore TrustedPublisher "$Av\WDRLocalTestCert.cer" | Out-Null
 verifier /querysettings | Out-Host
 if (!(Test-Path $Dst)) { New-Item -ItemType Directory -Force -Path $Dst | Out-Null }
-robocopy $Src $Dst /MIR /XD .venv .git .vagrant .idea .avulse /XF *.json /R:1 /W:1 /NFL /NDL /NJH /NJS
+robocopy $Src $Dst /MIR /XD .venv .git .idea .avulse /XF *.json /R:1 /W:1 /NFL /NDL /NJH /NJS
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed: $LASTEXITCODE" }
 Set-Location $Dst
 $env:UV_PROJECT_ENVIRONMENT = "C:\pydivert_venv"
