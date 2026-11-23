@@ -816,7 +816,7 @@ def run_linux(target: str) -> int:
             f"sudo AVULSE_BPF=1 /workspace/{shlex.quote(b)} --nocapture --test-threads=1; " for b in binaries
         )
         script += f"sudo AVULSE_BPF=1 /workspace/{shlex.quote(c_test)}"
-        return cmd_exec(target, f"bash -lc {shlex.quote(script)}")
+        return cmd_exec(target, f"bash -c {shlex.quote(script)}")
     finally:
         cmd_destroy(target)
 
