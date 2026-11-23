@@ -46,7 +46,7 @@ jobs:
     # Builds avulse.sys (drivers/windows/driver, outside the workspace) and its test program,
     # with the WDK from NuGet, for x64 and ARM64, and checks the images for memory integrity
     # (HVCI). Loading and testing it needs test signing and a reboot: that runs in the windows
-    # Vagrant VM (drivers/windows/scripts/test.ps1).
+    # QEMU/KVM VM (`scripts/vm.py run windows`, drivers/windows/scripts/test.ps1).
     strategy:
       fail-fast: false
       matrix:

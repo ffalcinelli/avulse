@@ -248,7 +248,7 @@ superset fallback (Step 10: metadata, IPv6, VLAN, TCP options, arithmetic, set t
 passes on both VMs. **Phase 2 is done.** Devices without an Ethernet header (tun, WireGuard, PPP, IP tunnels) are
 supported at the NETWORK layers since Step 13. Phase 3 comes next.
 
-Exit: privileged tests pass on both Vagrant VMs, covering divert, inject, GSO, forward, ETHERNET/ARP/VLAN, crash
+Exit: privileged tests pass on both Linux test VMs, covering divert, inject, GSO, forward, ETHERNET/ARP/VLAN, crash
 cleanup, and exact in-kernel match versus interpreter (`BPF_PROG_TEST_RUN`).
 
 ### Phase 3: Linux event layers and API 0.x
@@ -339,8 +339,8 @@ comes after Phases 5 and 6, so that it covers Linux, Windows and macOS: the crat
 - `ebpfdivert/src/prefilter.c`: superset-lowering ideas for the verifier-rejection fallback.
 - `ebpfdivert/tests/test_filter.c`, `test_bpf.c`, `tests/run_integration_tests.sh`: vectors and integration
   scenarios.
-- `ebpfdivert/Vagrantfile` (5.15 + 6.8 VMs), pydivert/jdivert Vagrant Windows VMs, and the binding test suites as
-  conformance tests.
+- `ebpfdivert/scripts/vm.py` (5.15 + 6.8 VMs), the pydivert/jdivert Windows VMs (`scripts/vm.py`), and the binding
+  test suites as conformance tests.
 - `windivert/sys/windivert.c`: reference for WFP layer and callout usage and injection edge cases. Read it only;
   do not copy it, because of the license and because the new driver is written in Rust.
 

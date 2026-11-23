@@ -3,7 +3,7 @@ name: Privileged
 # The tests that need root, on GitHub's runners (passwordless sudo):
 # - on Ubuntu (a 6.x kernel), the BPF programs in the kernel (crates/ebpf/tests/kernel.rs) and
 #   the Linux backend on veth pairs and network namespaces (crates/avulse/tests/capture.rs). They
-#   do not replace the runs on the Vagrant VMs: the 5.15 verifier is the strict one;
+#   do not replace the runs on the QEMU/KVM VMs (scripts/vm.py): the 5.15 verifier is the strict one;
 # - on macOS, the backend without the system extension on a feth pair
 #   (crates/avulse/tests/capture_macos.rs), then the system extension's build (drivers/macos) and
 #   the backend's extension tier against the extension's XPC service in its test mode (the
