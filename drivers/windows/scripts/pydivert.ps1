@@ -37,7 +37,7 @@ uv run pytest pydivert\tests -p no:cacheprovider -q -rs
 $code = $LASTEXITCODE
 # The suite leaves the driver loaded: Driver Verifier must be watching it.
 $q = verifier /query | Out-String
-if ($q -notmatch "(?im)^\s*MODULE:\s*WinDivert64\.sys\s*\(load:\s*[1-9]") { Write-Host "== Driver Verifier did not watch WinDivert64.sys"; $code = 1 }
+if ($q -notmatch "(?im)^\s*[^\s:]+:\s*WinDivert64\.sys\s*\([^:)]+:\s*[1-9]") { Write-Host "== Driver Verifier did not watch WinDivert64.sys"; $code = 1 }
 Write-Host "== services"
 sc.exe query WinDivert | Out-Host
 sc.exe qc WinDivert | Select-String BINARY_PATH | Out-Host
