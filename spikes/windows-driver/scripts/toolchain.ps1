@@ -93,8 +93,10 @@ Add-MachinePath "C:\rust\cargo\bin"
 if (-not (Test-Path "C:\rust\cargo\bin\cargo.exe")) {
     Get-File "https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe" `
         "$Downloads\rustup-init.exe"
+    # 1.99.1, as in CI's windows-driver job: cargo-wdk 0.1.1 expects Cargo's pre-1.100 `deps/` artifact layout
+    # (with 1.100 it fails to find target\release\deps\avulse.map).
     Install "Rust" "$Downloads\rustup-init.exe" `
-        "-y --profile minimal --default-toolchain stable --default-host x86_64-pc-windows-msvc --no-modify-path"
+        "-y --profile minimal --default-toolchain 1.99.1 --default-host x86_64-pc-windows-msvc --no-modify-path"
 }
 # Clippy, which drivers/windows/scripts/build.ps1 runs on the driver, and the ARM64 target.
 & C:\rust\cargo\bin\rustup.exe component add clippy rustfmt
