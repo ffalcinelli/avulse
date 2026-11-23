@@ -6,9 +6,17 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The directory with the library: `target/<profile>`, above this test's `deps`.
+/// The directory with the library: `target/<profile>` (handling both `deps/` and `build/<pkg>/<hash>/out/`).
 fn target_dir() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
+    for ancestor in exe.ancestors().skip(1) {
+        if matches!(
+            ancestor.file_name().and_then(|n| n.to_str()),
+            Some("debug" | "release")
+        ) {
+            return ancestor.to_path_buf();
+        }
+    }
     exe.parent().unwrap().parent().unwrap().to_path_buf()
 }
 

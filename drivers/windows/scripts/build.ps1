@@ -1,6 +1,6 @@
 # Builds avulse.sys (test-signed, with its INF and catalog) and the test program in the Windows VM,
 # for x64 and ARM64, and checks both drivers' images for HVCI (check-image.ps1):
-#   vagrant winrm windows -e -c "C:\avulse\drivers\windows\scripts\build.ps1"
+#   python3 scripts/vm.py exec windows "powershell -ExecutionPolicy Bypass -File C:\avulse\drivers\windows\scripts\build.ps1"
 # The x64 driver package lands in C:\build\avulse\drivers\windows\driver\target\release\avulse_package,
 # the ARM64 one in ...\driver\target\aarch64-pc-windows-msvc\release\avulse_package, the test program
 # in C:\build\avulse\drivers\windows\test\target\release. ARM64 is built only: no ARM64 machine runs
@@ -16,8 +16,8 @@ foreach ($scope in "Machine", "User") {
 $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
     [Environment]::GetEnvironmentVariable("Path", "User")
 
-# Build from a local copy: VirtualBox shared folders are slow and do not lock files properly.
-robocopy C:\avulse C:\build\avulse /MIR /XD target .git .vagrant fuzz book site /NFL /NDL /NJH /NJS /NP | Out-Null
+# Build from a local copy, so the build never writes into the synced tree.
+robocopy C:\avulse C:\build\avulse /MIR /XD target .git fuzz book site /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed: $LASTEXITCODE" }
 # wdk-build finds the top-level manifest from OUT_DIR, so the target directory must stay the
 # default one (no CARGO_TARGET_DIR). robocopy's /XD keeps it across runs.

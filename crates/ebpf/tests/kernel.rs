@@ -7,13 +7,11 @@
 //!   loopback, the NETWORK_FORWARD split, fragments, and failing open;
 //! - the redirect of inbound packets injected through `lo`.
 //!
-//! It needs root, so it runs only with `AVULSE_BPF=1`, in the Vagrant VMs:
+//! It needs root, so it runs only with `AVULSE_BPF=1`, in Docker or the QEMU/KVM VMs:
 //!
 //! ```text
-//! cargo test -p avulse-ebpf --test kernel --no-run   # on the host; prints the binary's path
-//! vagrant up default
-//! vagrant ssh default -c "sudo AVULSE_BPF=1 /vagrant/target/debug/deps/kernel-… --nocapture --test-threads=1"
-//! vagrant destroy -f default
+//! ./scripts/test-docker.sh
+//! python3 scripts/vm.py run default   # or `legacy` for kernel 5.15
 //! ```
 
 #![cfg(target_os = "linux")]

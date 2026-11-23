@@ -1,7 +1,7 @@
 # Installs what building a Rust Windows driver needs, without a package manager:
 # Visual Studio 2022 Build Tools (MSVC and the Windows 11 SDK 10.0.26100), the WDK 10.0.26100,
 # LLVM (libclang, for bindgen), Rust (MSVC host) and cargo-wdk. Then turns on test signing, which
-# needs a reboot (`vagrant reload windows`). Safe to run again: installed parts are skipped.
+# needs a reboot (`python3 scripts/vm.py reboot windows`). Safe to run again: installed parts are skipped.
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is very slow with the progress bar
@@ -93,8 +93,10 @@ Add-MachinePath "C:\rust\cargo\bin"
 if (-not (Test-Path "C:\rust\cargo\bin\cargo.exe")) {
     Get-File "https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe" `
         "$Downloads\rustup-init.exe"
+    # 1.99.1, as in CI's windows-driver job: cargo-wdk 0.1.1 expects Cargo's pre-1.100 `deps/` artifact layout
+    # (with 1.100 it fails to find target\release\deps\avulse.map).
     Install "Rust" "$Downloads\rustup-init.exe" `
-        "-y --profile minimal --default-toolchain stable --default-host x86_64-pc-windows-msvc --no-modify-path"
+        "-y --profile minimal --default-toolchain 1.99.1 --default-host x86_64-pc-windows-msvc --no-modify-path"
 }
 # Clippy, which drivers/windows/scripts/build.ps1 runs on the driver, and the ARM64 target.
 & C:\rust\cargo\bin\rustup.exe component add clippy rustfmt
@@ -108,4 +110,4 @@ if (-not (Test-Path "C:\rust\cargo\bin\cargo-wdk.exe")) {
 # Test-signed drivers load only with test signing on, after a reboot. Driver Verifier and crash
 # dumps are drivers/windows/scripts/verifier.ps1's, the VM's next provisioner.
 bcdedit /set testsigning on | Out-Host
-Write-Host "Toolchain ready. Reboot (vagrant reload windows) to turn test signing on."
+Write-Host "Toolchain ready. Reboot (python3 scripts/vm.py reboot windows) to turn test signing on."

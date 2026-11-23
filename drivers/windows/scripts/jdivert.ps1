@@ -2,7 +2,7 @@
 # their names (WinDivert64.dll, WinDivert64.sys), under Driver Verifier. Run with -Jdk 25 (Panama)
 # or -Jdk 8 (JNA). In jdivert's own windows VM, as pydivert.ps1 says, with jdivert's .avulse
 # folder and C:\jdivert:
-#   vagrant winrm windows -e -c 'powershell -ExecutionPolicy Bypass -File C:\jdivert\.avulse\jdivert.ps1 -Jdk 25'
+#   python3 scripts/vm.py exec windows "powershell -ExecutionPolicy Bypass -File C:\jdivert\.avulse\jdivert.ps1 -Jdk 25"
 
 param([string]$Jdk = "25")
 $Av = "C:\jdivert\.avulse"; $Dst = "C:\local_jdivert"
@@ -10,7 +10,7 @@ $start = Get-Date
 certutil -f -addstore Root "$Av\WDRLocalTestCert.cer" | Out-Null
 certutil -f -addstore TrustedPublisher "$Av\WDRLocalTestCert.cer" | Out-Null
 verifier /querysettings | Out-Host
-robocopy C:\jdivert $Dst /MIR /XD .git .vagrant target .local .avulse /R:1 /W:1 /NFL /NDL /NJH /NJS
+robocopy C:\jdivert $Dst /MIR /XD .git target .local .avulse /R:1 /W:1 /NFL /NDL /NJH /NJS
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed: $LASTEXITCODE" }
 Set-Location $Dst
 $env:JAVA_HOME = if ($Jdk -eq "8") { "C:\tools\jdk8" } else { "C:\tools\jdk25" }
@@ -31,7 +31,7 @@ $code = $LASTEXITCODE
 Write-Host "== native resources: $((Get-Item "$Dst\target\classes\WinDivert64.dll").Length), $((Get-Item "$Dst\target\classes\WinDivert64.sys").Length) bytes"
 # The suite leaves the driver loaded: Driver Verifier must be watching it.
 $q = verifier /query | Out-String
-if ($q -notmatch "(?im)^\s*MODULE:\s*WinDivert64\.sys\s*\(load:\s*[1-9]") { Write-Host "== Driver Verifier did not watch WinDivert64.sys"; $code = 1 }
+if ($q -notmatch "(?im)^\s*[^\s:]+:\s*WinDivert64\.sys\s*\([^:)]+:\s*[1-9]") { Write-Host "== Driver Verifier did not watch WinDivert64.sys"; $code = 1 }
 Write-Host "== services"
 sc.exe query WinDivert | Out-Host
 sc.exe stop WinDivert | Out-Host

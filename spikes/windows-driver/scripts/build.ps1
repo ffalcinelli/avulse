@@ -1,5 +1,5 @@
 # Builds and packages the spike driver (test-signed) in the Windows VM. Run with:
-#   vagrant winrm windows -e -c "C:\avulse\spikes\windows-driver\scripts\build.ps1"
+#   python3 scripts/vm.py exec windows "powershell -ExecutionPolicy Bypass -File C:\avulse\spikes\windows-driver\scripts\build.ps1"
 # The package lands in C:\build\avulse\spikes\windows-driver\target\release\avulse_spike_package.
 
 $ErrorActionPreference = "Stop"
@@ -13,7 +13,7 @@ $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
     [Environment]::GetEnvironmentVariable("Path", "User")
 
 # Build from a local copy: VirtualBox shared folders are slow and do not lock files properly.
-robocopy C:\avulse C:\build\avulse /MIR /XD target .git .vagrant fuzz book site /NFL /NDL /NJH /NJS /NP | Out-Null
+robocopy C:\avulse C:\build\avulse /MIR /XD target .git fuzz book site /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed: $LASTEXITCODE" }
 # wdk-build finds the top-level manifest from OUT_DIR, so the target directory must stay the
 # default one (no CARGO_TARGET_DIR). robocopy's /XD keeps it across runs.

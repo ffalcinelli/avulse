@@ -4,9 +4,9 @@
 # driver as a lightweight filter with its INF (netcfg) and runs the backend's tests again, with
 # the ETHERNET layer; and checks that no crash dump was written. Run after build.ps1, with test
 # signing on:
-#   vagrant winrm windows -e -c "C:\avulse\drivers\windows\scripts\test.ps1"
+#   python3 scripts/vm.py exec windows "powershell -ExecutionPolicy Bypass -File C:\avulse\drivers\windows\scripts\test.ps1"
 # With a TCP sink on the host (tcp-sink.py), set AVULSE_TCP_PEER first for the large-send test:
-#   vagrant winrm windows -e -c '$env:AVULSE_TCP_PEER = "10.0.2.2:9500"; C:\avulse\drivers\windows\scripts\test.ps1'
+#   AVULSE_TCP_PEER=10.0.2.2:9500 python3 scripts/vm.py run windows
 
 $ErrorActionPreference = "Stop"
 # Pick up the PATH and variables the toolchain script set (cargo, for the backend's tests).
@@ -30,15 +30,18 @@ certutil -f -addstore TrustedPublisher "$pkg\WDRLocalTestCert.cer" | Out-Null
 # all, and the driver must be among those it watches once loaded.
 $verifierFlags = 0x000209BB -bor 0x00004000 -bor 0x00200000 -bor 0x00800000 -bor 0x02000000
 function Assert-Verified($name) {
+    # verifier's labels are localized ("Verifier Flags: 0x...", "Flag verifica: 0x..."): match the shape of the
+    # lines, not their words. The flags line is the only "label: 0x..." one.
     $q = verifier /query | Out-String
-    if ($q -notmatch "(?m)^\s*Verifier Flags:\s*0x([0-9A-Fa-f]+)") {
+    if ($q -notmatch "(?m)^[^:\r\n]+:\s*0x([0-9A-Fa-f]+)\s*$") {
         throw "Driver Verifier is off: run verifier.ps1, then reboot"
     }
     $level = [Convert]::ToInt64($Matches[1], 16)
     if (($level -band $verifierFlags) -ne $verifierFlags) {
         throw ("Driver Verifier's flags are 0x{0:X}, not 0x{1:X}: run verifier.ps1, then reboot" -f $level, $verifierFlags)
     }
-    if ($q -notmatch "(?im)^\s*MODULE:\s*$([regex]::Escape($name))\s*\(load:\s*[1-9]") {
+    # "MODULE: avulse.sys (load: 1 / unload: 0)", "MODULO: avulse.sys (caricati: 1 / non caricati: 0)"
+    if ($q -notmatch "(?im)^\s*[^\s:]+:\s*$([regex]::Escape($name))\s*\([^:)]+:\s*[1-9]") {
         throw "Driver Verifier is not watching $name"
     }
 }

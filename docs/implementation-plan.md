@@ -67,24 +67,22 @@ anything. When a step lands, tick it here, update **Status**, and commit this fi
   - The `gh` token has no `workflow` scope, so HTTPS pushes that touch `.github/workflows/` are
     rejected.
   - `gh` is authenticated for API calls (runs, PRs, environments).
-- **Privileged tests run only in Vagrant VMs.** Run one VM at a time and `vagrant destroy -f` it right
-  after, even on failure. Never download big files into `/tmp` (a small tmpfs); use `~/.cache`.
-  - `Vagrantfile` (repo root) has `default` (Ubuntu 24.04, 6.8) and `legacy` (22.04, 5.15), with
-    nothing to provision. Build the test binaries on the host (`cargo test -p avulse-ebpf --test
-    kernel --no-run`, `cargo test -p avulse --test capture --no-run`) and run them in the VM:
-    `vagrant ssh default -c "sudo AVULSE_BPF=1 /vagrant/target/debug/deps/kernel-<hash>
-    --nocapture --test-threads=1"`, and the same for `capture-<hash>` (`--test-threads=1` matters:
-    the capture tests share one veth pair). On 22.04 they print a harmless warning about the weak
-    `GLIBC_2.39` requirement.
-  - The 24.04 box sometimes hangs at boot (guest RCU stalls, `vagrant up` times out waiting for
-    SSH). Destroy it and run `vagrant up` again.
-  - `windows` (Windows 11 24H2) builds and tests the Windows driver: `vagrant up windows && vagrant
-    reload windows` (the provisioning, `spikes/windows-driver/scripts/toolchain.ps1`, downloads
-    several GB and needs the reboot for test signing, Driver Verifier and kernel dumps), then
-    `vagrant winrm windows -e -c "C:\avulse\spikes\windows-driver\scripts\build.ps1"` and
-    `…\test.ps1`. After a crash, the reboot can leave `C:\avulse` unmounted: `vagrant reload
-    windows` mounts it again. Read dumps with the WDK's `kd -z` and frame sizes with `dumpbin
-    /disasm` (commands in the spike note). Give it 6 GB and nothing else running.
+- **Privileged tests run in Docker (`./scripts/test-docker.sh`, host kernel) or QEMU/KVM VMs (`scripts/vm.py`).**
+  Run one VM at a time and `scripts/vm.py destroy` it right after, even on failure. Never download big
+  files into `/tmp` (a small tmpfs); `scripts/vm.py` caches images in `~/.cache/divert-vm`.
+  - `scripts/vm.py` supports `default` (Ubuntu 24.04, 6.8) and `legacy` (22.04, 5.15), with
+    `ethtool` and `iptables` provisioned via cloud-init. `python3 scripts/vm.py run default` (or
+    `legacy`) builds the test binaries on the host, runs them with `AVULSE_BPF=1` and
+    `--test-threads=1` (the capture tests share one veth pair), and destroys the VM on exit. On 22.04
+    they print a harmless warning about the weak `GLIBC_2.39` requirement.
+  - `windows` (Windows 11) builds and tests the Windows driver. Build the base image once with
+    `python3 scripts/vm.py init-windows --iso /path/to/win11.iso [--lang it-IT]` (shared with
+    pydivert and jdivert). `python3 scripts/vm.py run windows` then provisions a fresh overlay with
+    `spikes/windows-driver/scripts/toolchain.ps1` and `drivers/windows/scripts/verifier.ps1`,
+    reboots (test signing, Driver Verifier and kernel dumps), runs `build.ps1` and `test.ps1`, and
+    destroys the VM. Read dumps
+    with the WDK's `kd -z` and frame sizes with `dumpbin /disasm` (commands in the spike note). Give
+    it 6 GB and nothing else running.
 - **Fuzzing:** `cargo-fuzz` is installed in `~/.cargo/bin`. Without a nightly toolchain, run it
   with `RUSTC_BOOTSTRAP=1` (Arch's rustc ships the ASan runtime):
   `cd fuzz && RUSTC_BOOTSTRAP=1 cargo fuzz run filter -- -max_total_time=600`. Seed the `filter`
@@ -421,15 +419,15 @@ equivalent on the vector packets.
      verdict. (It cannot return: a tail call does not. It writes the verdict to the facts and
      tail-calls a static action program.)
   3. Load everything with `aya`.
-  4. Test with `BPF_PROG_TEST_RUN` in the Vagrant `default` (6.8) and `legacy` (5.15) VMs; reuse
-     `../ebpfdivert/Vagrantfile`.
+  4. Test with `BPF_PROG_TEST_RUN` in the `default` (6.8) and `legacy` (5.15) QEMU/KVM VMs
+     (`scripts/vm.py`, as in `../ebpfdivert/scripts/vm.py`).
 
   Exit: the verifier accepts the program on both kernels. Write a go/no-go note in `docs/spikes/`.
 - [x] **Spike B: Windows Rust driver.** Done 2026-10-15, verdict go in pure Rust; see
   `docs/spikes/windows-driver.md`. The kernel stack (24 KiB, about 12 KiB left when NDIS or WFP
   call the filter) is the constraint Phase 5 must design for: release builds, a stack check with
   `KeExpandKernelStackAndCalloutEx`, and a caller-provided register file for the interpreter. Use
-  `windows-drivers-rs`: one WFP callout and one NDIS LWF, test-signed, loaded in a Windows Vagrant
+  `windows-drivers-rs`: one WFP callout and one NDIS LWF, test-signed, loaded in a Windows QEMU/KVM
   VM. Decide pure Rust or a thin C shim.
 - [ ] **Spike C: macOS.** Partly done on GitHub's macOS runners, 2026-10-21 (no Mac; owner
   decision to use the runners): see `docs/spikes/macos.md`. Answered: `/dev/bpf` capture and
@@ -1394,7 +1392,7 @@ program's capture part.
   - Unit tests: layouts, address round trips and refusals, filter helpers, argument checks.
   - `tests/c.rs` builds the library (tests do not build a `cdylib`), compiles `tests/c/abi.c`
     with `-Wall -Wextra -Werror` into `target/<profile>/avulse-c-test` (rpath `$ORIGIN`), and
-    runs it. In a VM, `sudo AVULSE_BPF=1 /vagrant/target/debug/avulse-c-test` also runs a
+    runs it. In a VM, `sudo AVULSE_BPF=1 /workspace/target/debug/avulse-c-test` also runs a
     handle on `lo`:
     - receive with a timeout, and readiness through `avulse_fd` and `poll`;
     - divert and send back;
@@ -1606,10 +1604,10 @@ The original plan of the step follows.
 - Build `cargo build --release -p avulse-windivert-compat` on the host and copy the library into
   each binding's synced folder, untracked. The binding VMs are Ubuntu 24.04 (glibc 2.39); build
   in an `ubuntu:24.04` container if the host's library needs newer symbols.
-- pydivert: `vagrant up linux`, then its suite as `scripts/run-tests-linux.sh` runs it, with
-  `PYDIVERT_EBPFDIVERT_LIB` pointing at the library; `vagrant destroy -f linux`.
-- jdivert: `vagrant up linux`, `sudo mvn clean verify -Debpfdivert.skipDownload=true
-  -Debpfdivert.local=…` on JDK 25 (Panama) and JDK 8 (JNA); `vagrant destroy -f linux`.
+- pydivert: `./scripts/test-docker.sh` or `python3 scripts/vm.py run linux`, with
+  `PYDIVERT_EBPFDIVERT_LIB` pointing at the library.
+- jdivert: `./scripts/test-docker.sh` or `python3 scripts/vm.py run linux -Debpfdivert.skipDownload=true
+  -Debpfdivert.local=…` on JDK 25 (Panama) and JDK 8 (JNA).
 - One VM at a time. Then avulse's own privileged suites on `default` and `legacy` again.
 
 **Acceptance.** Both suites pass unchanged. The guide has a page on the shim
@@ -1687,8 +1685,9 @@ reading only, as everywhere in this project.
   the call needs Administrator. The ETHERNET layer also needs the filter bound to adapters
   (`netcfg` with the INF), so `capabilities()` reports ETHERNET only when it is.
 - **Testing.**
-  - Builds and tests run in the `windows` Vagrant VM: test signing, Driver Verifier, kernel
-    dumps (`spikes/windows-driver/scripts/toolchain.ps1`, moved to `drivers/windows/scripts/`).
+  - Builds and tests run in the `windows` QEMU/KVM VM (`scripts/vm.py run windows`): test signing,
+    Driver Verifier, kernel dumps (`spikes/windows-driver/scripts/toolchain.ps1`, moved to
+    `drivers/windows/scripts/`).
   - `crates/avulse/tests/capture_windows.rs` (`AVULSE_DRIVER=1`, Administrator) ports the Linux
     capture scenarios that apply.
   - The host checks the ABI crate, and the user-mode backend through `cargo check --target
@@ -2245,9 +2244,8 @@ each under the flags `0x02A249BB`, with no crash dump.
   `test.ps1` fails unless `verifier /query`'s "Verifier Flags" has them all and lists the driver
   with at least one load, as a plain service and again after the `netcfg` install. The bindings'
   runs are `pydivert.ps1` and `jdivert.ps1` (Step 29's steps, now in the repo), with
-  `verifier.ps1` copied into the binding's VM; they check the same for `WinDivert64.sys`. In
-  those VMs `vagrant up` can time out before the shared folder is mounted, so check that
-  `verifier.ps1` ran before rebooting. Low-resources simulation is not on: it would fail the
+  `verifier.ps1` copied into the binding's VM; they check the same for `WinDivert64.sys`. Check
+  that `verifier.ps1` ran before rebooting. Low-resources simulation is not on: it would fail the
   open paths' allocations, which still bugcheck.
 - **HVCI.**
   - `check-image.ps1` checks a `.sys`: sections aligned on pages, none both writable and

@@ -239,9 +239,7 @@ fn run_bytes(insns: &[Insn], facts: &[u8], frame: &[u8]) -> Outcome {
                             }
                             h => panic!("helper {h}"),
                         }
-                        for r in 1..=5 {
-                            m.regs[r] = None;
-                        }
+                        m.regs[1..=5].fill(None);
                         pc + 1
                     }
                     0x90 => return Outcome::Exit(m.reg(0)),
